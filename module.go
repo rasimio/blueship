@@ -2,7 +2,6 @@ package blueship
 
 import (
 	"context"
-	"io/fs"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -38,9 +37,3 @@ type CLIProvider interface {
 	RegisterCLI(cmd *cobra.Command, d *Deps)
 }
 
-// MigrationProvider is implemented by modules that bring their own SQL migrations.
-type MigrationProvider interface {
-	Module
-	Migrations() fs.FS // embed.FS with .sql files (format: NNN_name.sql)
-	Database() string  // database name ("" = default/main)
-}
