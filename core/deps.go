@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -93,12 +95,23 @@ func (p *dbPool) get(module string) (*sqlx.DB, error) {
 }
 
 // appendDBSuffix adds _<suffix> to the dbname in a PostgreSQL DSN.
+// Handles URI format: postgres://user:pass@host:port/dbname?params
+// and key=value format: host=localhost dbname=mydb ...
 func appendDBSuffix(dsn, suffix string) string {
-	// Simple approach: parse and rebuild. Works for both URI and key=value formats.
-	// For URI format: postgres://user:pass@host:port/dbname?params
-	// We just append _suffix to the path segment.
-	// This is a simplified version — production should use net/url.
-	return dsn + "_" + suffix
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return dsn
+		}
+		u.Path = strings.TrimPrefix(u.Path, "/") + "_" + suffix
+		u.Path = "/" + u.Path
+		return u.String()
+	}
+	// key=value format: replace dbname=X with dbname=X_suffix
+	if strings.Contains(dsn, "dbname=") {
+		return strings.Replace(dsn, "dbname=", "dbname="+suffix+"_", 1)
+	}
+	return dsn + " dbname=" + suffix
 }
 
 // initDeps creates Deps from a Config. Used internally by Ship.Run().
