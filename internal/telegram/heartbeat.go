@@ -4,9 +4,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/rasimio/blueship/agent"
 	bs "github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/internal/agent"
 	"github.com/rasimio/blueship/internal/user"
+	"github.com/rasimio/blueship/tool"
 )
 
 // HeartbeatJob sends periodic heartbeat prompts through the AgentLoop for all registered users.
@@ -97,5 +98,5 @@ func (h *HeartbeatJob) runForUser(ctx context.Context, us *UserState) {
 
 // RegisterBuiltinTools is a convenience function for external use.
 func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
-	registerBuiltinTools(r, d)
+	tool.RegisterBuiltinTools(r, d)
 }

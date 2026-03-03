@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	bs "github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/internal/session"
+	"github.com/rasimio/blueship/session"
 )
 
 const compactSystemPrompt = `Сожми этот диалог между пользователем и AI-ассистентом в краткое содержание.

@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	bs "github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/internal/session"
+	"github.com/rasimio/blueship/session"
 )
 
 // Loop orchestrates the send → tool_use → dispatch → loop cycle.

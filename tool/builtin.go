@@ -1,4 +1,4 @@
-package telegram
+package tool
 
 import (
 	"context"
@@ -9,8 +9,8 @@ import (
 	"github.com/rasimio/blueship/internal/web"
 )
 
-// registerBuiltinTools registers runtime-level tools: current_time, web_search, web_fetch.
-func registerBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
+// RegisterBuiltinTools registers runtime-level tools: current_time, web_search, web_fetch.
+func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 	tz, err := time.LoadLocation(d.Config.Timezone)
 	if err != nil {
 		tz = time.UTC
@@ -60,7 +60,6 @@ func registerWebTools(r *bs.ToolRegistry, d *bs.Deps) {
 		)
 	}
 
-	// web_fetch: always available (use configured fetcher or default)
 	var fetcher bs.WebFetcher
 	if d.Config.Fetcher != nil {
 		fetcher = d.Config.Fetcher

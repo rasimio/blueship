@@ -12,11 +12,12 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/rasimio/blueship/agent"
 	bs "github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/internal/agent"
 	"github.com/rasimio/blueship/internal/openai"
-	"github.com/rasimio/blueship/internal/session"
 	"github.com/rasimio/blueship/internal/user"
+	"github.com/rasimio/blueship/session"
+	"github.com/rasimio/blueship/tool"
 	"github.com/rasimio/blueship/version"
 )
 
@@ -263,7 +264,7 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID int64) (*UserState, 
 
 	userDeps := g.deps.ForUser(userID, chatIDStr, isOwner)
 	registry := bs.NewToolRegistry()
-	registerBuiltinTools(registry, userDeps)
+	tool.RegisterBuiltinTools(registry, userDeps)
 	g.modules.RegisterAllTools(registry, userDeps)
 
 	us := &UserState{
