@@ -1,0 +1,150 @@
+package core
+
+import "time"
+
+// Config controls BlueShip runtime behavior.
+// All fields have sensible defaults; only LLM, Transport, and DB are required.
+type Config struct {
+	// --- Required ---
+	LLM       CompletionProvider // e.g. blueship.Anthropic(apiKey)
+	Transport TransportConfig    // e.g. blueship.Telegram(botToken)
+	DB        string             // PostgreSQL DSN
+
+	// --- Optional providers (nil = disabled) ---
+	Embedder    EmbeddingProvider      // default: nil (embedding features disabled)
+	Search      SearchEngine           // default: nil (web_search tool disabled)
+	Fetcher     WebFetcher             // default: nil (auto-created if nil)
+	Calendar    CalendarProvider       // default: nil
+	Transcriber TranscriptionProvider  // default: nil (voice disabled)
+
+	// --- Optional infrastructure ---
+	Redis    string // Redis address (default: "" = no cache)
+	Prompts  string // directory with .md prompt files (default: "" = no files)
+	Timezone string // default: "UTC"
+
+	// --- Fine-tuning (all have defaults) ---
+	Models   ModelsConfig
+	Limits   LimitsConfig
+	Timeouts TimeoutsConfig
+	Retry    RetryConfig
+	Gateway  GatewayConfig
+}
+
+// TransportConfig holds transport configuration.
+type TransportConfig struct {
+	Type     string // "telegram"
+	BotToken string
+}
+
+// ModelsConfig defines which models to use for each role.
+type ModelsConfig struct {
+	Primary string // agent loop (default: "claude-opus-4-6")
+	Compact string // compaction summarizer (default: "claude-haiku-4-5-20251001")
+}
+
+// LimitsConfig defines token budget limits.
+type LimitsConfig struct {
+	MaxContext       int // Opus input budget (default: 180000)
+	CompactThreshold int // trigger compaction above this (default: 40000)
+	CompactKeep      int // keep recent messages intact (default: 30000)
+	MaxOutputTokens  int // agent loop max output (default: 8192)
+	CompactOutput    int // haiku compaction output (default: 2048)
+}
+
+// TimeoutsConfig defines timeouts for external calls.
+type TimeoutsConfig struct {
+	LLM            time.Duration // main Claude call (default: 120s)
+	Compact        time.Duration // Haiku compaction (default: 30s)
+	Embedding      time.Duration // embedding API (default: 15s)
+	Transcription  time.Duration // whisper (default: 30s)
+	TelegramClient time.Duration // telegram sends (default: 10s)
+	TelegramPoll   time.Duration // telegram long-poll (default: 35s)
+}
+
+// RetryConfig defines retry behavior for LLM calls.
+type RetryConfig struct {
+	MaxAttempts int             // default: 3
+	Backoff     []time.Duration // default: [5s, 15s, 30s]
+}
+
+// GatewayConfig defines gateway behavior.
+type GatewayConfig struct {
+	DebounceWindow   time.Duration // default: 1500ms
+	DebounceCap      int           // default: 10
+	SessionResetHour int           // default: 4 (4am)
+	MaxTurns         int           // default: 15
+}
+
+// applyDefaults fills in zero values with sensible defaults.
+func (c *Config) ApplyDefaults() {
+	if c.Timezone == "" {
+		c.Timezone = "UTC"
+	}
+
+	// Models
+	if c.Models.Primary == "" {
+		c.Models.Primary = "claude-opus-4-6"
+	}
+	if c.Models.Compact == "" {
+		c.Models.Compact = "claude-haiku-4-5-20251001"
+	}
+
+	// Limits
+	if c.Limits.MaxContext == 0 {
+		c.Limits.MaxContext = 180000
+	}
+	if c.Limits.CompactThreshold == 0 {
+		c.Limits.CompactThreshold = 40000
+	}
+	if c.Limits.CompactKeep == 0 {
+		c.Limits.CompactKeep = 30000
+	}
+	if c.Limits.MaxOutputTokens == 0 {
+		c.Limits.MaxOutputTokens = 8192
+	}
+	if c.Limits.CompactOutput == 0 {
+		c.Limits.CompactOutput = 2048
+	}
+
+	// Timeouts
+	if c.Timeouts.LLM == 0 {
+		c.Timeouts.LLM = 120 * time.Second
+	}
+	if c.Timeouts.Compact == 0 {
+		c.Timeouts.Compact = 30 * time.Second
+	}
+	if c.Timeouts.Embedding == 0 {
+		c.Timeouts.Embedding = 15 * time.Second
+	}
+	if c.Timeouts.Transcription == 0 {
+		c.Timeouts.Transcription = 30 * time.Second
+	}
+	if c.Timeouts.TelegramClient == 0 {
+		c.Timeouts.TelegramClient = 10 * time.Second
+	}
+	if c.Timeouts.TelegramPoll == 0 {
+		c.Timeouts.TelegramPoll = 35 * time.Second
+	}
+
+	// Retry
+	if c.Retry.MaxAttempts == 0 {
+		c.Retry.MaxAttempts = 3
+	}
+	if len(c.Retry.Backoff) == 0 {
+		c.Retry.Backoff = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second}
+	}
+
+	// Gateway
+	if c.Gateway.DebounceWindow == 0 {
+		c.Gateway.DebounceWindow = 1500 * time.Millisecond
+	}
+	if c.Gateway.DebounceCap == 0 {
+		c.Gateway.DebounceCap = 10
+	}
+	if c.Gateway.SessionResetHour == 0 {
+		c.Gateway.SessionResetHour = 4
+	}
+	if c.Gateway.MaxTurns == 0 {
+		c.Gateway.MaxTurns = 15
+	}
+}
