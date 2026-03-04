@@ -78,3 +78,9 @@ type TransportSender interface {
 	SendText(ctx context.Context, chatID int64, text string) error
 	SendAction(ctx context.Context, chatID int64, action string) error
 }
+
+// MessageSender sends text messages to arbitrary chat IDs (string-based).
+// Used by higher-level modules that need to send messages outside the gateway flow.
+type MessageSender interface {
+	SendMessage(ctx context.Context, chatID string, text string) (messageID int, err error)
+}

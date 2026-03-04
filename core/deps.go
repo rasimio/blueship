@@ -26,6 +26,11 @@ type Deps struct {
 	ChatID  string    // raw chat_id string
 	IsOwner bool
 
+	// Optional providers (populated from Config during InitDeps).
+	Embedder EmbeddingProvider // nil = embedding features disabled
+	LLM      CompletionProvider // nil = LLM features disabled
+	Sender   MessageSender      // nil = message sending disabled
+
 	pool *dbPool
 }
 
@@ -39,13 +44,16 @@ func (d *Deps) DB(module string) (*sqlx.DB, error) {
 // The DB pool and Redis are shared (goroutine-safe).
 func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 	return &Deps{
-		Config:  d.Config,
-		Logger:  d.Logger,
-		Redis:   d.Redis,
-		UserID:  userID,
-		ChatID:  chatID,
-		IsOwner: isOwner,
-		pool:    d.pool,
+		Config:   d.Config,
+		Logger:   d.Logger,
+		Redis:    d.Redis,
+		UserID:   userID,
+		ChatID:   chatID,
+		IsOwner:  isOwner,
+		Embedder: d.Embedder,
+		LLM:      d.LLM,
+		Sender:   d.Sender,
+		pool:     d.pool,
 	}
 }
 
@@ -165,9 +173,12 @@ func InitDeps(cfg *Config, logger *slog.Logger) (*Deps, error) {
 	}
 
 	return &Deps{
-		Config: cfg,
-		Logger: logger,
-		Redis:  rdb,
+		Config:   cfg,
+		Logger:   logger,
+		Redis:    rdb,
+		Embedder: cfg.Embedder,
+		LLM:      cfg.LLM,
+		Sender:   cfg.Sender,
 		pool: &dbPool{
 			dbs:       make(map[string]*sqlx.DB),
 			dsn:       cfg.DB,

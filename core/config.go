@@ -17,6 +17,7 @@ type Config struct {
 	Fetcher     WebFetcher             // default: nil (auto-created if nil)
 	Calendar    CalendarProvider       // default: nil
 	Transcriber TranscriptionProvider  // default: nil (voice disabled)
+	Sender      MessageSender          // default: nil (message sending disabled)
 
 	// --- Optional infrastructure ---
 	Redis    string // Redis address (default: "" = no cache)

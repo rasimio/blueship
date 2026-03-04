@@ -179,3 +179,21 @@ func Serper(apiKey string) SearchEngine {
 func Whisper(apiKey string) TranscriptionProvider {
 	return openai.NewTranscriptionProvider(apiKey, "whisper-1", 30*time.Second)
 }
+
+// TelegramSender creates a MessageSender using the Telegram Bot API.
+func TelegramSender(botToken string, timeout time.Duration) MessageSender {
+	return &telegramSenderAdapter{client: telegram.NewClient(botToken, timeout)}
+}
+
+// telegramSenderAdapter wraps telegram.Client to satisfy MessageSender.
+type telegramSenderAdapter struct {
+	client *telegram.Client
+}
+
+func (a *telegramSenderAdapter) SendMessage(ctx context.Context, chatID string, text string) (int, error) {
+	result, err := a.client.SendMessage(ctx, chatID, text)
+	if err != nil {
+		return 0, err
+	}
+	return result.Result.MessageID, nil
+}

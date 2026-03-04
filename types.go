@@ -25,6 +25,7 @@ type CalendarProvider = core.CalendarProvider
 type CalendarEvent = core.CalendarEvent
 type TranscriptionProvider = core.TranscriptionProvider
 type TransportSender = core.TransportSender
+type MessageSender = core.MessageSender
 
 // Config and infrastructure types
 type Config = core.Config
