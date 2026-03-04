@@ -116,7 +116,7 @@ func (s *Ship) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			scheduler.RunLoop(ctx, s.logger, "thinking", 15*time.Minute, th.Run)
+			scheduler.RunLoop(ctx, s.logger, "thinking", 30*time.Minute, th.Run)
 		}()
 	}
 
