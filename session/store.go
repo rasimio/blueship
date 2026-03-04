@@ -197,7 +197,7 @@ func (s *Store) MessagesForAPI(ctx context.Context, sessionID string, maxTokens 
 
 	truncateOlderToolResults(result, 10, 500)
 	result = trimOrphanedLeading(result)
-	result = trimOrphanedTrailingToolUse(result)
+	result = sanitizeOrphanedToolUse(result)
 
 	return result, nil
 }
@@ -373,17 +373,56 @@ func hasToolUse(msg bs.Message) bool {
 	return false
 }
 
-// trimOrphanedTrailingToolUse removes trailing assistant messages with tool_use
-// that have no following tool_result. This happens when a thinking/heartbeat job
-// crashes mid-execution, leaving orphaned tool_use blocks in the session.
-func trimOrphanedTrailingToolUse(msgs []bs.Message) []bs.Message {
-	for len(msgs) > 0 {
-		last := msgs[len(msgs)-1]
-		if last.Role == "assistant" && hasToolUse(last) {
-			msgs = msgs[:len(msgs)-1]
+// sanitizeOrphanedToolUse removes tool_use blocks from assistant messages
+// that have no matching tool_result in the next user message. This happens when
+// a thinking/heartbeat job crashes mid-tool-execution. Works anywhere in the
+// conversation, not just trailing messages.
+func sanitizeOrphanedToolUse(msgs []bs.Message) []bs.Message {
+	for i := 0; i < len(msgs); i++ {
+		if msgs[i].Role != "assistant" || !hasToolUse(msgs[i]) {
 			continue
 		}
-		break
+
+		// Collect tool_use IDs from this assistant message
+		blocks := bs.NormalizeContent(msgs[i].Content)
+		toolUseIDs := make(map[string]bool)
+		for _, b := range blocks {
+			if b.Type == "tool_use" && b.ID != "" {
+				toolUseIDs[b.ID] = true
+			}
+		}
+
+		// Check if next message has matching tool_results
+		if i+1 < len(msgs) {
+			nextBlocks := bs.NormalizeContent(msgs[i+1].Content)
+			for _, b := range nextBlocks {
+				if b.Type == "tool_result" && b.ToolUseID != "" {
+					delete(toolUseIDs, b.ToolUseID)
+				}
+			}
+		}
+
+		// If all tool_use have results, this message is fine
+		if len(toolUseIDs) == 0 {
+			continue
+		}
+
+		// Strip orphaned tool_use blocks, keep text blocks
+		var cleaned []bs.ContentBlock
+		for _, b := range blocks {
+			if b.Type == "tool_use" && toolUseIDs[b.ID] {
+				continue // drop orphaned tool_use
+			}
+			cleaned = append(cleaned, b)
+		}
+
+		if len(cleaned) == 0 {
+			// Entire message was tool_use — remove it
+			msgs = append(msgs[:i], msgs[i+1:]...)
+			i-- // re-check this index
+		} else {
+			msgs[i].Content = cleaned
+		}
 	}
 	return msgs
 }
