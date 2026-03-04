@@ -65,7 +65,7 @@ func (t *ThinkingJob) runForOwner(ctx context.Context, us *UserState) {
 		Model:          cfg.Models.Primary,
 		MaxTokens:      cfg.Limits.MaxOutputTokens,
 		MaxTurns:       cfg.Gateway.MaxTurns,
-	}, "thinking")
+	}, "[SYSTEM: autonomous thinking cycle — это НЕ сообщение от пользователя. Пользователь тебе НЕ писал. Следуй инструкциям THINKING.]")
 	if err != nil {
 		t.gateway.logger.Error("thinking agent loop error",
 			"chat_id", us.ChatID,
