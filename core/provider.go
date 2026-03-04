@@ -12,11 +12,12 @@ type CompletionProvider interface {
 
 // CompletionRequest is the input for CompletionProvider.Complete.
 type CompletionRequest struct {
-	Model     string
-	System    string
-	Messages  []Message
-	Tools     []ToolDefinition
-	MaxTokens int
+	Model          string
+	System         string
+	Messages       []Message
+	Tools          []ToolDefinition
+	MaxTokens      int
+	ThinkingBudget int // 0 = disabled
 }
 
 // CompletionResponse is the output of CompletionProvider.Complete.

@@ -68,6 +68,12 @@ func (p *Provider) Complete(ctx context.Context, req bs.CompletionRequest) (*bs.
 	return nil, fmt.Errorf("anthropic API failed after %d retries: %w", len(p.backoffs), lastErr)
 }
 
+// thinkingConfig controls extended thinking in the API request.
+type thinkingConfig struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens"`
+}
+
 // apiRequest is the wire format for Anthropic Messages API.
 type apiRequest struct {
 	Model       string              `json:"model"`
@@ -76,6 +82,7 @@ type apiRequest struct {
 	Messages    []bs.Message        `json:"messages"`
 	Tools       []bs.ToolDefinition `json:"tools,omitempty"`
 	Temperature float64             `json:"temperature,omitempty"`
+	Thinking    *thinkingConfig     `json:"thinking,omitempty"`
 }
 
 // apiResponse is the wire format for Anthropic Messages API response.
@@ -95,6 +102,15 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 		System:    req.System,
 		Messages:  req.Messages,
 		Tools:     req.Tools,
+	}
+
+	if req.ThinkingBudget > 0 {
+		apiReq.Thinking = &thinkingConfig{
+			Type:         "enabled",
+			BudgetTokens: req.ThinkingBudget,
+		}
+		apiReq.MaxTokens += req.ThinkingBudget
+		apiReq.Temperature = 0 // temperature must be unset (0) with extended thinking
 	}
 
 	body, err := json.Marshal(apiReq)
@@ -139,8 +155,20 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 
+	// Filter out thinking blocks — invisible to user
+	content := apiResp.Content
+	if req.ThinkingBudget > 0 {
+		filtered := make([]bs.ContentBlock, 0, len(content))
+		for _, b := range content {
+			if b.Type != "thinking" {
+				filtered = append(filtered, b)
+			}
+		}
+		content = filtered
+	}
+
 	return &bs.CompletionResponse{
-		Content:    apiResp.Content,
+		Content:    content,
 		StopReason: apiResp.StopReason,
 		Usage:      apiResp.Usage,
 	}, nil

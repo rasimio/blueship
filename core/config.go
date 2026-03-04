@@ -51,6 +51,7 @@ type LimitsConfig struct {
 	CompactKeep      int // keep recent messages intact (default: 30000)
 	MaxOutputTokens  int // agent loop max output (default: 8192)
 	CompactOutput    int // haiku compaction output (default: 2048)
+	ThinkingBudget   int // extended thinking budget (default: 0 = disabled)
 }
 
 // TimeoutsConfig defines timeouts for external calls.

@@ -118,11 +118,12 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage string) (stri
 
 		// 4. Call LLM
 		resp, err := a.provider.Complete(ctx, bs.CompletionRequest{
-			Model:     cfg.Model,
-			MaxTokens: cfg.MaxTokens,
-			System:    effectiveSystem,
-			Messages:  messages,
-			Tools:     tools,
+			Model:          cfg.Model,
+			MaxTokens:      cfg.MaxTokens,
+			System:         effectiveSystem,
+			Messages:       messages,
+			Tools:          tools,
+			ThinkingBudget: a.cfg.Limits.ThinkingBudget,
 		})
 		if err != nil {
 			return "", fmt.Errorf("LLM API: %w", err)
