@@ -14,6 +14,7 @@ import (
 	"github.com/rasimio/blueship/internal/telegram"
 	"github.com/rasimio/blueship/internal/user"
 	"github.com/rasimio/blueship/internal/web"
+	"github.com/rasimio/blueship/migrate"
 )
 
 // Ship is the main BlueShip runtime instance.
@@ -52,11 +53,16 @@ func (s *Ship) Run(ctx context.Context) error {
 	}
 	defer deps.Close()
 
-	// 2. Resolve owner user
+	// 2. Auto-migrate runtime tables
 	coreDB, err := deps.DB("core")
 	if err != nil {
 		return fmt.Errorf("core DB: %w", err)
 	}
+	if err := migrate.Run(coreDB, s.logger); err != nil {
+		return fmt.Errorf("auto-migrate: %w", err)
+	}
+
+	// 3. Resolve owner user
 	uid, err := user.ResolveOwner(ctx, coreDB)
 	if err != nil {
 		return fmt.Errorf("resolve owner: %w", err)
