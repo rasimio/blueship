@@ -53,6 +53,11 @@ type UserState struct {
 	Registry *bs.ToolRegistry
 	LoopBusy bool
 	debounce *debouncer
+
+	// Thinking cancellation: set while thinking loop is active.
+	// processMessages cancels thinking before acquiring Mu.
+	thinkingCancel context.CancelFunc
+	thinkingDone   chan struct{}
 }
 
 // ModuleRegistry is an adapter interface for the module system.
@@ -333,6 +338,19 @@ func (g *Gateway) GetUser(chatID int64) *UserState {
 }
 
 func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pendingMsg) {
+	// Cancel any running thinking loop so we can process user message immediately.
+	us.Mu.Lock()
+	cancelFn := us.thinkingCancel
+	done := us.thinkingDone
+	us.Mu.Unlock()
+
+	if cancelFn != nil {
+		cancelFn()
+		if done != nil {
+			<-done // wait for thinking cleanup
+		}
+	}
+
 	us.Mu.Lock()
 	defer us.Mu.Unlock()
 	us.LoopBusy = true

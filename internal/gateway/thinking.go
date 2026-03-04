@@ -25,7 +25,14 @@ func (t *ThinkingJob) Run(ctx context.Context) error {
 		t.gateway.logger.Warn("thinking: cannot resolve owner", "error", err)
 		return nil
 	}
-	if us == nil || us.LoopBusy {
+	if us == nil {
+		return nil
+	}
+
+	us.Mu.Lock()
+	busy := us.LoopBusy
+	us.Mu.Unlock()
+	if busy {
 		return nil
 	}
 
@@ -80,13 +87,34 @@ func (t *ThinkingJob) ensureOwner(ctx context.Context) (*UserState, error) {
 }
 
 func (t *ThinkingJob) runForOwner(ctx context.Context, us *UserState) {
+	// Briefly lock to set up cancellation and mark busy.
 	us.Mu.Lock()
-	defer us.Mu.Unlock()
+	if us.LoopBusy {
+		us.Mu.Unlock()
+		return
+	}
+	thinkCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	us.thinkingCancel = cancel
+	us.thinkingDone = done
 	us.LoopBusy = true
-	defer func() { us.LoopBusy = false }()
+	us.Mu.Unlock()
 
-	sess, err := t.gateway.GetOrCreateSession(ctx, us)
+	defer func() {
+		cancel()
+		us.Mu.Lock()
+		us.LoopBusy = false
+		us.thinkingCancel = nil
+		us.thinkingDone = nil
+		us.Mu.Unlock()
+		close(done) // signal waiters (processMessages) that thinking is done
+	}()
+
+	sess, err := t.gateway.GetOrCreateSession(thinkCtx, us)
 	if err != nil {
+		if thinkCtx.Err() != nil {
+			return // cancelled by user message — not an error
+		}
 		t.gateway.logger.Error("thinking session error",
 			"chat_id", us.ChatID,
 			"error", err,
@@ -98,7 +126,7 @@ func (t *ThinkingJob) runForOwner(ctx context.Context, us *UserState) {
 	loop := agent.NewLoop(t.gateway.provider, t.gateway.store, us.Registry, cfg, t.gateway.logger)
 	loop.SetCompactor(t.gateway.compactor)
 
-	reply, err := loop.Run(ctx, agent.RunConfig{
+	reply, err := loop.Run(thinkCtx, agent.RunConfig{
 		SessionID:      sess.ID,
 		SystemPrompt:   t.gateway.SystemPromptThinking(),
 		CompactSummary: derefString(sess.CompactSummary),
@@ -107,10 +135,18 @@ func (t *ThinkingJob) runForOwner(ctx context.Context, us *UserState) {
 		MaxTurns:       cfg.Gateway.MaxTurns,
 	}, "[SYSTEM: autonomous thinking cycle — это НЕ сообщение от пользователя. Пользователь тебе НЕ писал. Следуй инструкциям THINKING.]")
 	if err != nil {
+		if thinkCtx.Err() != nil {
+			return // cancelled by user message — not an error
+		}
 		t.gateway.logger.Error("thinking agent loop error",
 			"chat_id", us.ChatID,
 			"error", err,
 		)
+		return
+	}
+
+	// Don't send reply if thinking was cancelled mid-flight
+	if thinkCtx.Err() != nil {
 		return
 	}
 
