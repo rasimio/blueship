@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/rasimio/blueship/agent"
@@ -87,7 +88,7 @@ func (h *HeartbeatJob) runForUser(ctx context.Context, us *UserState) {
 		return
 	}
 
-	if reply != "" && len(reply) > 10 && reply != "[no-op]" {
+	if reply != "" && len(reply) > 10 && !strings.Contains(reply, "[no-op]") {
 		if err := h.gateway.TG().SendLong(ctx, us.ChatID, reply); err != nil {
 			h.gateway.logger.Error("heartbeat send error",
 				"chat_id", us.ChatID,
