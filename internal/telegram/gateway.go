@@ -126,6 +126,17 @@ func (g *Gateway) loadSystemPrompts(workspacePath string) error {
 	preambleStr := string(preamble) + "\n"
 	g.systemPrompt = preambleStr + string(soul) + "\n\n" + string(agents)
 	g.systemPromptHeartbeat = preambleStr + string(soul) + "\n\n" + string(agents) + "\n\n" + string(heartbeat)
+
+	// Load compact prompt (optional — compactor works without it but with empty system prompt)
+	if g.compactor != nil {
+		compactPath := filepath.Join(workspacePath, "prompts", "compact.md")
+		if data, err := os.ReadFile(compactPath); err == nil {
+			g.compactor.SetSystemPrompt(string(data))
+		} else {
+			g.logger.Warn("compact prompt not found, compaction will use empty system prompt", "path", compactPath)
+		}
+	}
+
 	return nil
 }
 

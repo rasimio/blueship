@@ -11,18 +11,18 @@ import (
 	"github.com/rasimio/blueship/session"
 )
 
-const compactSystemPrompt = `Сожми этот диалог между пользователем и AI-ассистентом в краткое содержание.
-Сохрани: ключевые решения, факты, договорённости, эмоциональный контекст, незавершённые темы.
-Пиши от третьего лица, кратко, по пунктам. Максимум 500 слов.`
+// SummaryHeader is prepended to the compaction summary when injected into the system prompt.
+const SummaryHeader = "\n\n## Краткое содержание предыдущего разговора\n"
 
 // Compactor summarizes older messages via a lightweight model to reduce context size.
 type Compactor struct {
-	provider  bs.CompletionProvider
-	logger    *slog.Logger
-	model     string
-	maxTokens int
-	threshold int
-	keepTokens int
+	provider     bs.CompletionProvider
+	logger       *slog.Logger
+	model        string
+	maxTokens    int
+	threshold    int
+	keepTokens   int
+	systemPrompt string
 }
 
 // NewCompactor creates a new Compactor. Returns nil if provider is nil.
@@ -38,6 +38,11 @@ func NewCompactor(provider bs.CompletionProvider, cfg *bs.Config, logger *slog.L
 		threshold:  cfg.Limits.CompactThreshold,
 		keepTokens: cfg.Limits.CompactKeep,
 	}
+}
+
+// SetSystemPrompt sets the compaction system prompt (loaded from .md file).
+func (c *Compactor) SetSystemPrompt(prompt string) {
+	c.systemPrompt = prompt
 }
 
 // Compact checks if messages exceed the token threshold and, if so, summarizes
@@ -80,7 +85,7 @@ func (c *Compactor) summarize(ctx context.Context, dialogue string) (string, err
 	resp, err := c.provider.Complete(ctx, bs.CompletionRequest{
 		Model:     c.model,
 		MaxTokens: c.maxTokens,
-		System:    compactSystemPrompt,
+		System:    c.systemPrompt,
 		Messages:  []bs.Message{{Role: "user", Content: dialogue}},
 	})
 	if err != nil {

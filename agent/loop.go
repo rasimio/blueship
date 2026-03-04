@@ -99,7 +99,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage string) (stri
 		// 2. Build effective system prompt with compaction summary
 		effectiveSystem := cfg.SystemPrompt
 		if compactSummary != "" {
-			effectiveSystem += "\n\n## Краткое содержание предыдущего разговора\n" + compactSummary
+			effectiveSystem += SummaryHeader + compactSummary
 		}
 
 		// 3. Load messages
