@@ -197,6 +197,7 @@ func (s *Store) MessagesForAPI(ctx context.Context, sessionID string, maxTokens 
 
 	truncateOlderToolResults(result, 10, 500)
 	result = trimOrphanedLeading(result)
+	result = trimOrphanedTrailingToolUse(result)
 
 	return result, nil
 }
@@ -370,6 +371,21 @@ func hasToolUse(msg bs.Message) bool {
 		}
 	}
 	return false
+}
+
+// trimOrphanedTrailingToolUse removes trailing assistant messages with tool_use
+// that have no following tool_result. This happens when a thinking/heartbeat job
+// crashes mid-execution, leaving orphaned tool_use blocks in the session.
+func trimOrphanedTrailingToolUse(msgs []bs.Message) []bs.Message {
+	for len(msgs) > 0 {
+		last := msgs[len(msgs)-1]
+		if last.Role == "assistant" && hasToolUse(last) {
+			msgs = msgs[:len(msgs)-1]
+			continue
+		}
+		break
+	}
+	return msgs
 }
 
 // extractText returns concatenated text from response content blocks.
