@@ -134,9 +134,12 @@ func (g *Gateway) loadSystemPrompts(workspacePath string) error {
 	g.systemPrompt = preambleStr + string(soul) + "\n\n" + string(agents)
 	g.systemPromptHeartbeat = preambleStr + string(soul) + "\n\n" + string(agents) + "\n\n" + string(heartbeat)
 
-	// Thinking prompt (optional — don't fail if file is missing)
+	// Thinking prompt (optional — fall back to regular system prompt if missing)
 	if thinking, err := os.ReadFile(filepath.Join(workspacePath, "THINKING.md")); err == nil {
 		g.systemPromptThinking = preambleStr + string(soul) + "\n\n" + string(agents) + "\n\n" + string(thinking)
+	} else {
+		g.logger.Warn("THINKING.md not found, thinking will use regular system prompt", "path", filepath.Join(workspacePath, "THINKING.md"))
+		g.systemPromptThinking = g.systemPrompt
 	}
 
 	// Load compact prompt (optional — compactor works without it but with empty system prompt)
