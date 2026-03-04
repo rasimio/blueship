@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rasimio/blueship/internal/anthropic"
+	"github.com/rasimio/blueship/internal/gateway"
 	"github.com/rasimio/blueship/internal/openai"
 	"github.com/rasimio/blueship/internal/scheduler"
 	"github.com/rasimio/blueship/internal/telegram"
@@ -91,7 +92,7 @@ func (s *Ship) Run(ctx context.Context) error {
 
 	// 5. Start Telegram Gateway
 	if s.cfg.Transport.Type == "telegram" && s.cfg.Transport.BotToken != "" {
-		gw, err := telegram.NewGateway(deps, reg, s.logger)
+		gw, err := gateway.NewGateway(deps, reg, s.logger)
 		if err != nil {
 			return fmt.Errorf("create gateway: %w", err)
 		}
@@ -103,7 +104,7 @@ func (s *Ship) Run(ctx context.Context) error {
 		}()
 
 		// Heartbeat
-		hb := telegram.NewHeartbeatJob(gw)
+		hb := gateway.NewHeartbeatJob(gw)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

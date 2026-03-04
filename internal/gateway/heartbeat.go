@@ -1,4 +1,4 @@
-package telegram
+package gateway
 
 import (
 	"context"
@@ -6,9 +6,7 @@ import (
 	"time"
 
 	"github.com/rasimio/blueship/agent"
-	bs "github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/user"
-	"github.com/rasimio/blueship/tool"
 )
 
 // HeartbeatJob sends periodic heartbeat prompts through the AgentLoop for all registered users.
@@ -21,7 +19,7 @@ type HeartbeatJob struct {
 func NewHeartbeatJob(gw *Gateway) *HeartbeatJob {
 	return &HeartbeatJob{
 		gateway: gw,
-		tz:      gw.Timezone(),
+		tz:      gw.tz,
 	}
 }
 
@@ -69,12 +67,12 @@ func (h *HeartbeatJob) runForUser(ctx context.Context, us *UserState) {
 	}
 
 	cfg := h.gateway.deps.Config
-	loop := agent.NewLoop(h.gateway.Provider(), h.gateway.SessionStore(), us.Registry, cfg, h.gateway.logger)
-	loop.SetCompactor(h.gateway.CompactorInstance())
+	loop := agent.NewLoop(h.gateway.provider, h.gateway.store, us.Registry, cfg, h.gateway.logger)
+	loop.SetCompactor(h.gateway.compactor)
 
 	reply, err := loop.Run(ctx, agent.RunConfig{
 		SessionID:      sess.ID,
-		SystemPrompt:   h.gateway.SystemPromptHeartbeat(),
+		SystemPrompt:   h.gateway.systemPromptHeartbeat,
 		CompactSummary: derefString(sess.CompactSummary),
 		Model:          cfg.Models.Primary,
 		MaxTokens:      cfg.Limits.MaxOutputTokens,
@@ -89,16 +87,11 @@ func (h *HeartbeatJob) runForUser(ctx context.Context, us *UserState) {
 	}
 
 	if reply != "" && len(reply) > 10 && !strings.Contains(reply, "[no-op]") {
-		if err := h.gateway.TG().SendLong(ctx, us.ChatID, reply); err != nil {
+		if err := h.gateway.tg.SendLong(ctx, us.ChatID, reply); err != nil {
 			h.gateway.logger.Error("heartbeat send error",
 				"chat_id", us.ChatID,
 				"error", err,
 			)
 		}
 	}
-}
-
-// RegisterBuiltinTools is a convenience function for external use.
-func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
-	tool.RegisterBuiltinTools(r, d)
 }

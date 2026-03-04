@@ -1,4 +1,4 @@
-package telegram
+package gateway
 
 import (
 	"context"
@@ -15,18 +15,19 @@ import (
 	"github.com/rasimio/blueship/agent"
 	bs "github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/openai"
+	"github.com/rasimio/blueship/internal/telegram"
 	"github.com/rasimio/blueship/internal/user"
 	"github.com/rasimio/blueship/session"
 	"github.com/rasimio/blueship/tool"
 	"github.com/rasimio/blueship/version"
 )
 
-// Gateway receives Telegram updates and routes them through the AgentLoop.
+// Gateway receives transport updates and routes them through the AgentLoop.
 type Gateway struct {
 	deps      *bs.Deps
 	modules   ModuleRegistry
-	poller    *Poller
-	tg        *Client
+	poller    *telegram.Poller
+	tg        *telegram.Client
 	store     *session.Store
 	provider  bs.CompletionProvider
 	compactor *agent.Compactor
@@ -41,7 +42,7 @@ type Gateway struct {
 	users map[int64]*UserState
 }
 
-// UserState holds per-user runtime state. Exported for heartbeat access.
+// UserState holds per-user runtime state.
 type UserState struct {
 	Mu       sync.Mutex
 	ChatID   int64
@@ -57,7 +58,7 @@ type ModuleRegistry interface {
 	RegisterAllTools(registry *bs.ToolRegistry, d *bs.Deps)
 }
 
-// NewGateway creates a new Telegram gateway.
+// NewGateway creates a new gateway.
 func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Gateway, error) {
 	cfg := deps.Config
 	if cfg.Transport.BotToken == "" {
@@ -76,7 +77,6 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 
 	var whisperProvider *openai.TranscriptionProvider
 	if cfg.Transcriber != nil {
-		// Check if it's our internal type
 		if wp, ok := cfg.Transcriber.(*openai.TranscriptionProvider); ok {
 			whisperProvider = wp
 		}
@@ -85,8 +85,8 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 	gw := &Gateway{
 		deps:      deps,
 		modules:   modules,
-		poller:    NewPoller(cfg.Transport.BotToken, cfg.Timeouts.TelegramPoll),
-		tg:        NewClient(cfg.Transport.BotToken, cfg.Timeouts.TelegramClient),
+		poller:    telegram.NewPoller(cfg.Transport.BotToken, cfg.Timeouts.TelegramPoll),
+		tg:        telegram.NewClient(cfg.Transport.BotToken, cfg.Timeouts.TelegramClient),
 		store:     session.NewStore(coreDB),
 		provider:  cfg.LLM,
 		compactor: agent.NewCompactor(cfg.LLM, cfg, logger),
@@ -142,7 +142,7 @@ func (g *Gateway) loadSystemPrompts(workspacePath string) error {
 
 // Run starts the polling loop and processes updates. Blocks until ctx is done.
 func (g *Gateway) Run(ctx context.Context) {
-	ch := make(chan Update, 100)
+	ch := make(chan telegram.Update, 100)
 
 	go g.poller.Run(ctx, ch)
 	g.logger.Info("telegram gateway started")
@@ -157,7 +157,7 @@ func (g *Gateway) Run(ctx context.Context) {
 	}
 }
 
-func (g *Gateway) handleUpdate(ctx context.Context, update Update) {
+func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 	msg := update.Message
 	if msg == nil || msg.From == nil {
 		return
@@ -223,7 +223,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, update Update) {
 	})
 }
 
-func isTextFile(doc *Document) bool {
+func isTextFile(doc *telegram.Document) bool {
 	if doc == nil || doc.FileID == "" {
 		return false
 	}
@@ -299,7 +299,7 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID int64) (*UserState, 
 	return us, nil
 }
 
-// GetUser returns an existing user state (for heartbeat). Returns nil if not initialized.
+// GetUser returns an existing user state. Returns nil if not initialized.
 func (g *Gateway) GetUser(chatID int64) *UserState {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -403,21 +403,6 @@ func (g *Gateway) todayResetTime() time.Time {
 	}
 	return reset
 }
-
-// SessionStore returns the gateway's session store (for heartbeat).
-func (g *Gateway) SessionStore() *session.Store { return g.store }
-
-// Provider returns the LLM provider (for heartbeat).
-func (g *Gateway) Provider() bs.CompletionProvider { return g.provider }
-
-// Compactor returns the compactor (for heartbeat).
-func (g *Gateway) CompactorInstance() *agent.Compactor { return g.compactor }
-
-// TG returns the Telegram client (for heartbeat).
-func (g *Gateway) TG() *Client { return g.tg }
-
-// SystemPromptHeartbeat returns the heartbeat system prompt.
-func (g *Gateway) SystemPromptHeartbeat() string { return g.systemPromptHeartbeat }
 
 // Timezone returns the configured timezone.
 func (g *Gateway) Timezone() *time.Location { return g.tz }
