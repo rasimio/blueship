@@ -54,16 +54,16 @@ func (s *Ship) Run(ctx context.Context) error {
 	defer deps.Close()
 
 	// 2. Auto-migrate runtime tables
-	coreDB, err := deps.DB("core")
+	shipDB, err := deps.DB("ship")
 	if err != nil {
-		return fmt.Errorf("core DB: %w", err)
+		return fmt.Errorf("ship DB: %w", err)
 	}
-	if err := migrate.Run(coreDB, s.logger); err != nil {
+	if err := migrate.Run(shipDB, s.logger); err != nil {
 		return fmt.Errorf("auto-migrate: %w", err)
 	}
 
 	// 3. Resolve owner user
-	uid, err := user.ResolveOwner(ctx, coreDB)
+	uid, err := user.ResolveOwner(ctx, shipDB)
 	if err != nil {
 		return fmt.Errorf("resolve owner: %w", err)
 	}

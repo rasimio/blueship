@@ -31,7 +31,7 @@ func (h *HeartbeatJob) Run(ctx context.Context) error {
 		return nil
 	}
 
-	coreDB, err := h.gateway.deps.DB("core")
+	coreDB, err := h.gateway.deps.DB("ship")
 	if err != nil {
 		return err
 	}

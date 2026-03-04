@@ -64,9 +64,10 @@ func (d *Deps) Close() {
 
 // dbPool holds lazily-opened database connections, safe for concurrent use.
 type dbPool struct {
-	mu  sync.Mutex
-	dbs map[string]*sqlx.DB
-	dsn string // base DSN
+	mu        sync.Mutex
+	dbs       map[string]*sqlx.DB
+	dsn       string            // base DSN (app database)
+	overrides map[string]string // module → custom DSN
 }
 
 func (p *dbPool) get(module string) (*sqlx.DB, error) {
@@ -78,16 +79,11 @@ func (p *dbPool) get(module string) (*sqlx.DB, error) {
 	}
 
 	dsn := p.dsn
-	if module != "core" && module != "" {
+	if override, ok := p.overrides[module]; ok {
+		dsn = override
+	} else if module != "core" && module != "" {
 		// Append module suffix to database name.
 		dsn = appendDBSuffix(dsn, module)
-	}
-	if module == "core" || module == "" {
-		// BlueShip tables live in the "blueship" schema; public stays available
-		// for app-level tables. lib/pq passes unknown query params as PG
-		// runtime parameters, so search_path is set per-connection.
-		// NOTE: pgx uses runtime_params in config — verify if migrating.
-		dsn = withSearchPath(dsn, "blueship,public")
 	}
 
 	db, err := sqlx.Connect("postgres", dsn)
@@ -121,19 +117,27 @@ func appendDBSuffix(dsn, suffix string) string {
 	return dsn + " dbname=" + suffix
 }
 
-// withSearchPath appends search_path to a PostgreSQL DSN.
-// lib/pq passes unknown query parameters as runtime parameters,
-// so the connection will execute SET search_path = '<path>'.
-func withSearchPath(dsn, path string) string {
+// replaceDBName replaces the database name in a PostgreSQL DSN.
+func replaceDBName(dsn, newName string) string {
 	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		sep := "&"
-		if !strings.Contains(dsn, "?") {
-			sep = "?"
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return dsn
 		}
-		return dsn + sep + "search_path=" + path
+		u.Path = "/" + newName
+		return u.String()
 	}
 	// key=value format
-	return dsn + " search_path='" + path + "'"
+	if strings.Contains(dsn, "dbname=") {
+		// Replace existing dbname value (up to next space or end of string)
+		parts := strings.SplitN(dsn, "dbname=", 2)
+		after := parts[1]
+		if idx := strings.IndexByte(after, ' '); idx >= 0 {
+			return parts[0] + "dbname=" + newName + after[idx:]
+		}
+		return parts[0] + "dbname=" + newName
+	}
+	return dsn + " dbname=" + newName
 }
 
 // initDeps creates Deps from a Config. Used internally by Ship.Run().
@@ -151,13 +155,23 @@ func InitDeps(cfg *Config, logger *slog.Logger) (*Deps, error) {
 		}
 	}
 
+	// Build DSN overrides. "ship" gets its own database if configured,
+	// otherwise falls back to the base (app) database.
+	overrides := make(map[string]string)
+	if cfg.ShipDB != "" {
+		overrides["ship"] = replaceDBName(cfg.DB, cfg.ShipDB)
+	} else {
+		overrides["ship"] = cfg.DB
+	}
+
 	return &Deps{
 		Config: cfg,
 		Logger: logger,
 		Redis:  rdb,
 		pool: &dbPool{
-			dbs: make(map[string]*sqlx.DB),
-			dsn: cfg.DB,
+			dbs:       make(map[string]*sqlx.DB),
+			dsn:       cfg.DB,
+			overrides: overrides,
 		},
 	}, nil
 }

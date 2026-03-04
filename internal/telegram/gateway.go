@@ -69,7 +69,7 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 		tz = time.UTC
 	}
 
-	coreDB, err := deps.DB("core")
+	coreDB, err := deps.DB("ship")
 	if err != nil {
 		return nil, fmt.Errorf("core DB: %w", err)
 	}
@@ -258,7 +258,7 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID int64) (*UserState, 
 		return us, nil
 	}
 
-	coreDB, err := g.deps.DB("core")
+	coreDB, err := g.deps.DB("ship")
 	if err != nil {
 		return nil, fmt.Errorf("core DB: %w", err)
 	}
