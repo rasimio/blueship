@@ -18,7 +18,13 @@ var migrations embed.FS
 // Files with .optional.sql suffix: errors are logged as warnings, not fatal.
 // File naming convention: NNN_name.sql — NNN prefix determines execution order.
 func Run(db *sqlx.DB, logger *slog.Logger) error {
-	// 1. Create tracking table
+	// 1. Ensure blueship schema exists (pool may already have search_path set,
+	//    but the schema must exist before any table creation).
+	if _, err := db.Exec(`CREATE SCHEMA IF NOT EXISTS blueship`); err != nil {
+		return fmt.Errorf("create blueship schema: %w", err)
+	}
+
+	// 2. Create tracking table (lands in blueship schema via search_path)
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS blueship_migrations (
 		version    TEXT PRIMARY KEY,
 		applied_at TIMESTAMPTZ DEFAULT now()
@@ -26,7 +32,7 @@ func Run(db *sqlx.DB, logger *slog.Logger) error {
 		return fmt.Errorf("create migrations table: %w", err)
 	}
 
-	// 2. Read and sort migration files
+	// 3. Read and sort migration files
 	entries, err := fs.ReadDir(migrations, "sql")
 	if err != nil {
 		return fmt.Errorf("read migrations dir: %w", err)
@@ -35,7 +41,7 @@ func Run(db *sqlx.DB, logger *slog.Logger) error {
 		return entries[i].Name() < entries[j].Name()
 	})
 
-	// 3. Apply each migration
+	// 4. Apply each migration
 	for _, entry := range entries {
 		name := entry.Name()
 		optional := strings.HasSuffix(name, ".optional.sql")

@@ -82,6 +82,13 @@ func (p *dbPool) get(module string) (*sqlx.DB, error) {
 		// Append module suffix to database name.
 		dsn = appendDBSuffix(dsn, module)
 	}
+	if module == "core" || module == "" {
+		// BlueShip tables live in the "blueship" schema; public stays available
+		// for app-level tables. lib/pq passes unknown query params as PG
+		// runtime parameters, so search_path is set per-connection.
+		// NOTE: pgx uses runtime_params in config — verify if migrating.
+		dsn = withSearchPath(dsn, "blueship,public")
+	}
 
 	db, err := sqlx.Connect("postgres", dsn)
 	if err != nil {
@@ -112,6 +119,21 @@ func appendDBSuffix(dsn, suffix string) string {
 		return strings.Replace(dsn, "dbname=", "dbname="+suffix+"_", 1)
 	}
 	return dsn + " dbname=" + suffix
+}
+
+// withSearchPath appends search_path to a PostgreSQL DSN.
+// lib/pq passes unknown query parameters as runtime parameters,
+// so the connection will execute SET search_path = '<path>'.
+func withSearchPath(dsn, path string) string {
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		sep := "&"
+		if !strings.Contains(dsn, "?") {
+			sep = "?"
+		}
+		return dsn + sep + "search_path=" + path
+	}
+	// key=value format
+	return dsn + " search_path='" + path + "'"
 }
 
 // initDeps creates Deps from a Config. Used internally by Ship.Run().
