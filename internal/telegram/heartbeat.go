@@ -72,11 +72,12 @@ func (h *HeartbeatJob) runForUser(ctx context.Context, us *UserState) {
 	loop.SetCompactor(h.gateway.CompactorInstance())
 
 	reply, err := loop.Run(ctx, agent.RunConfig{
-		SessionID:    sess.ID,
-		SystemPrompt: h.gateway.SystemPromptHeartbeat(),
-		Model:        cfg.Models.Primary,
-		MaxTokens:    cfg.Limits.MaxOutputTokens,
-		MaxTurns:     cfg.Gateway.MaxTurns,
+		SessionID:      sess.ID,
+		SystemPrompt:   h.gateway.SystemPromptHeartbeat(),
+		CompactSummary: derefString(sess.CompactSummary),
+		Model:          cfg.Models.Primary,
+		MaxTokens:      cfg.Limits.MaxOutputTokens,
+		MaxTurns:       cfg.Gateway.MaxTurns,
 	}, "heartbeat")
 	if err != nil {
 		h.gateway.logger.Error("heartbeat agent loop error",

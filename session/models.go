@@ -16,6 +16,7 @@ type Session struct {
 	SystemPromptHash *string   `db:"system_prompt_hash" json:"-"`
 	TokenCount       int       `db:"token_count" json:"token_count"`
 	MessageCount     int       `db:"message_count" json:"message_count"`
+	CompactSummary   *string   `db:"compact_summary" json:"compact_summary,omitempty"`
 	Active           bool      `db:"active" json:"active"`
 	CreatedAt        time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`

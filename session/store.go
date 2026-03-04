@@ -28,7 +28,7 @@ func (s *Store) Create(ctx context.Context, userID, model string) (*Session, err
 		`INSERT INTO chat_sessions (user_id, model)
 		 VALUES ($1, $2)
 		 RETURNING id, user_id, title, model, system_prompt_hash,
-		           token_count, message_count, active, created_at, updated_at`,
+		           token_count, message_count, compact_summary, active, created_at, updated_at`,
 		userID, model,
 	).StructScan(&sess)
 	if err != nil {
@@ -42,7 +42,7 @@ func (s *Store) GetOrCreate(ctx context.Context, userID, model string) (*Session
 	var sess Session
 	err := s.db.GetContext(ctx, &sess,
 		`SELECT id, user_id, title, model, system_prompt_hash,
-		        token_count, message_count, active, created_at, updated_at
+		        token_count, message_count, compact_summary, active, created_at, updated_at
 		 FROM chat_sessions
 		 WHERE user_id = $1 AND active = true
 		 ORDER BY updated_at DESC
@@ -223,7 +223,7 @@ func (s *Store) ListActive(ctx context.Context, userID string) ([]Session, error
 	var sessions []Session
 	err := s.db.SelectContext(ctx, &sessions,
 		`SELECT id, user_id, title, model, system_prompt_hash,
-		        token_count, message_count, active, created_at, updated_at
+		        token_count, message_count, compact_summary, active, created_at, updated_at
 		 FROM chat_sessions
 		 WHERE user_id = $1 AND active = true
 		 ORDER BY updated_at DESC`,
@@ -233,6 +233,46 @@ func (s *Store) ListActive(ctx context.Context, userID string) ([]Session, error
 		return nil, fmt.Errorf("list active sessions: %w", err)
 	}
 	return sessions, nil
+}
+
+// CompactSession persists compaction results: deletes old messages, saves summary, recalculates counters.
+func (s *Store) CompactSession(ctx context.Context, sessionID string, summary string, keepCount int) error {
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 1. Delete all messages except the most recent keepCount
+	_, err = tx.ExecContext(ctx, `
+		DELETE FROM chat_messages
+		WHERE session_id = $1
+		  AND id NOT IN (
+		      SELECT id FROM chat_messages
+		      WHERE session_id = $1
+		      ORDER BY created_at DESC
+		      LIMIT $2
+		  )`, sessionID, keepCount)
+	if err != nil {
+		return fmt.Errorf("delete old messages: %w", err)
+	}
+
+	// 2. Append summary + recalculate counters
+	_, err = tx.ExecContext(ctx, `
+		UPDATE chat_sessions SET
+		    compact_summary = CASE
+		        WHEN compact_summary IS NULL OR compact_summary = '' THEN $2
+		        ELSE compact_summary || E'\n\n---\n\n' || $2
+		    END,
+		    token_count = (SELECT COALESCE(SUM(token_estimate), 0) FROM chat_messages WHERE session_id = $1),
+		    message_count = (SELECT COUNT(*) FROM chat_messages WHERE session_id = $1),
+		    updated_at = NOW()
+		WHERE id = $1`, sessionID, summary)
+	if err != nil {
+		return fmt.Errorf("update session: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // --- helpers ---

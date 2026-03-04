@@ -340,11 +340,12 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	loop.SetCompactor(g.compactor)
 
 	reply, err := loop.Run(ctx, agent.RunConfig{
-		SessionID:    sess.ID,
-		SystemPrompt: g.systemPrompt,
-		Model:        g.deps.Config.Models.Primary,
-		MaxTokens:    g.deps.Config.Limits.MaxOutputTokens,
-		MaxTurns:     g.deps.Config.Gateway.MaxTurns,
+		SessionID:      sess.ID,
+		SystemPrompt:   g.systemPrompt,
+		CompactSummary: derefString(sess.CompactSummary),
+		Model:          g.deps.Config.Models.Primary,
+		MaxTokens:      g.deps.Config.Limits.MaxOutputTokens,
+		MaxTurns:       g.deps.Config.Gateway.MaxTurns,
 	}, joined)
 	if err != nil {
 		g.logger.Error("agent loop error",
@@ -474,6 +475,11 @@ func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 		compactK,
 	)
 
+	if sess.CompactSummary != nil && *sess.CompactSummary != "" {
+		summaryLen := len(*sess.CompactSummary)
+		msg += fmt.Sprintf("\n📦 Compact: active (%d chars)", summaryLen)
+	}
+
 	if err := g.tg.SendLong(ctx, chatID, msg); err != nil {
 		g.logger.Error("session command: send error", "error", err)
 	}
@@ -484,6 +490,13 @@ func shortID(id string) string {
 		return id[:8] + "…"
 	}
 	return id
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // --- Debouncer ---

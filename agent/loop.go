@@ -23,11 +23,12 @@ type Loop struct {
 
 // RunConfig controls agent loop execution.
 type RunConfig struct {
-	SessionID    string
-	SystemPrompt string
-	Model        string
-	MaxTokens    int
-	MaxTurns     int
+	SessionID      string
+	SystemPrompt   string
+	CompactSummary string // existing compaction summary from previous runs
+	Model          string
+	MaxTokens      int
+	MaxTurns       int
 }
 
 // NewLoop creates a new agent loop.
@@ -69,9 +70,8 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage string) (stri
 	tools := a.registry.Definitions()
 	tokenBudget := a.calculateBudget(cfg.SystemPrompt, tools)
 
-	// Pre-compute compaction once before the tool-use loop.
-	var compactSummary string
-	var compactedMessages []bs.Message
+	// Pre-existing compact summary from previous runs
+	compactSummary := cfg.CompactSummary
 
 	if a.compactor != nil {
 		preloadMsgs, loadErr := a.store.MessagesForAPI(ctx, cfg.SessionID, tokenBudget)
@@ -82,12 +82,20 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage string) (stri
 			if compErr != nil {
 				a.logger.Warn("compaction failed", "error", compErr)
 			} else if summary != "" {
-				compactSummary = summary
-				compactedMessages = kept
-				a.logger.Info("compaction triggered",
-					"original_msgs", len(preloadMsgs),
-					"kept_msgs", len(kept),
-				)
+				// Persist: delete old messages, save summary
+				if err := a.store.CompactSession(ctx, cfg.SessionID, summary, len(kept)); err != nil {
+					a.logger.Warn("compaction persist failed", "error", err)
+				} else {
+					if compactSummary != "" {
+						compactSummary += "\n\n---\n\n" + summary
+					} else {
+						compactSummary = summary
+					}
+					a.logger.Info("compaction persisted",
+						"original_msgs", len(preloadMsgs),
+						"kept_msgs", len(kept),
+					)
+				}
 			}
 		}
 	}
@@ -102,16 +110,10 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage string) (stri
 			effectiveSystem += SummaryHeader + compactSummary
 		}
 
-		// 3. Load messages
-		var messages []bs.Message
-		if compactedMessages != nil {
-			messages = compactedMessages
-			compactedMessages = nil
-		} else {
-			messages, err = a.store.MessagesForAPI(ctx, cfg.SessionID, tokenBudget)
-			if err != nil {
-				return "", fmt.Errorf("load messages: %w", err)
-			}
+		// 3. Load messages (always from DB — compaction already persisted)
+		messages, err := a.store.MessagesForAPI(ctx, cfg.SessionID, tokenBudget)
+		if err != nil {
+			return "", fmt.Errorf("load messages: %w", err)
 		}
 
 		// 4. Call LLM
