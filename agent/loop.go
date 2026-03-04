@@ -74,7 +74,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage string) (stri
 	compactSummary := cfg.CompactSummary
 
 	if a.compactor != nil {
-		preloadMsgs, loadErr := a.store.MessagesForAPI(ctx, cfg.SessionID, tokenBudget)
+		preloadMsgs, loadErr := a.store.AllMessagesForAPI(ctx, cfg.SessionID)
 		if loadErr != nil {
 			a.logger.Warn("compaction preload failed", "error", loadErr)
 		} else if len(preloadMsgs) > 0 {

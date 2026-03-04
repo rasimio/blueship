@@ -201,6 +201,33 @@ func (s *Store) MessagesForAPI(ctx context.Context, sessionID string, maxTokens 
 	return result, nil
 }
 
+// AllMessagesForAPI returns ALL messages formatted for Claude API (no LIMIT).
+// Used for compaction where we need the full conversation to calculate token totals.
+func (s *Store) AllMessagesForAPI(ctx context.Context, sessionID string) ([]bs.Message, error) {
+	var msgs []Message
+	err := s.db.SelectContext(ctx, &msgs,
+		`SELECT id, session_id, role, content, tool_use_id, token_estimate, created_at
+		 FROM chat_messages
+		 WHERE session_id = $1
+		 ORDER BY created_at ASC`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get all messages for API: %w", err)
+	}
+
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+
+	result := make([]bs.Message, len(msgs))
+	for i, m := range msgs {
+		result[i] = m.ToAPIMessage()
+	}
+
+	return result, nil
+}
+
 // MessagesSince returns messages for a user since a given time (across all sessions).
 func (s *Store) MessagesSince(ctx context.Context, userID string, since time.Time) ([]Message, error) {
 	var msgs []Message
