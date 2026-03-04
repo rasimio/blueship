@@ -8,13 +8,22 @@ type Update struct {
 
 // Message represents a Telegram message.
 type Message struct {
-	MessageID int       `json:"message_id"`
-	From      *User     `json:"from,omitempty"`
-	Chat      Chat      `json:"chat"`
-	Text      string    `json:"text"`
-	Caption   string    `json:"caption,omitempty"`
-	Document  *Document `json:"document,omitempty"`
-	Voice     *Voice    `json:"voice,omitempty"`
+	MessageID int          `json:"message_id"`
+	From      *User        `json:"from,omitempty"`
+	Chat      Chat         `json:"chat"`
+	Text      string       `json:"text"`
+	Caption   string       `json:"caption,omitempty"`
+	Document  *Document    `json:"document,omitempty"`
+	Voice     *Voice       `json:"voice,omitempty"`
+	Photo     []PhotoSize  `json:"photo,omitempty"`
+}
+
+// PhotoSize represents one size variant of a Telegram photo.
+type PhotoSize struct {
+	FileID   string `json:"file_id"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+	FileSize int64  `json:"file_size"`
 }
 
 // Document represents a Telegram document (file attachment).

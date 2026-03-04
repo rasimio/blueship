@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"os"
@@ -200,7 +201,25 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 		}
 	}
 
-	if text == "" {
+	var images []bs.ContentBlock
+	if len(msg.Photo) > 0 {
+		photo := msg.Photo[len(msg.Photo)-1] // largest resolution
+		data, err := g.tg.DownloadFile(ctx, photo.FileID, 5*1024*1024)
+		if err != nil {
+			g.logger.Warn("failed to download photo", "error", err, "file_id", photo.FileID)
+		} else {
+			images = append(images, bs.ContentBlock{
+				Type: "image",
+				Source: &bs.ImageSource{
+					Type:      "base64",
+					MediaType: "image/jpeg",
+					Data:      base64.StdEncoding.EncodeToString(data),
+				},
+			})
+		}
+	}
+
+	if text == "" && len(images) == 0 {
 		return
 	}
 
@@ -219,6 +238,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 
 	us.debounce.Add(pendingMsg{
 		text:      text,
+		images:    images,
 		messageID: msg.MessageID,
 	})
 }
@@ -316,11 +336,20 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	go g.keepTyping(typingCtx, us.ChatID)
 	defer stopTyping()
 
-	texts := make([]string, len(msgs))
-	for i, m := range msgs {
-		texts[i] = m.text
+	var blocks []bs.ContentBlock
+	for _, m := range msgs {
+		blocks = append(blocks, m.images...)
+		if m.text != "" {
+			blocks = append(blocks, bs.ContentBlock{Type: "text", Text: m.text})
+		}
 	}
-	joined := strings.Join(texts, "\n")
+
+	var content any
+	if len(blocks) == 1 && blocks[0].Type == "text" {
+		content = blocks[0].Text // backwards compat: plain string
+	} else {
+		content = blocks
+	}
 
 	sess, err := g.GetOrCreateSession(ctx, us)
 	if err != nil {
@@ -333,7 +362,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		"chat_id", us.ChatID,
 		"session_id", sess.ID,
 		"messages", len(msgs),
-		"text_length", len(joined),
+		"blocks", len(blocks),
 	)
 
 	loop := agent.NewLoop(g.provider, g.store, us.Registry, g.deps.Config, g.logger)
@@ -346,7 +375,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		Model:          g.deps.Config.Models.Primary,
 		MaxTokens:      g.deps.Config.Limits.MaxOutputTokens,
 		MaxTurns:       g.deps.Config.Gateway.MaxTurns,
-	}, joined)
+	}, content)
 	if err != nil {
 		g.logger.Error("agent loop error",
 			"chat_id", us.ChatID,
@@ -488,6 +517,7 @@ func derefString(s *string) string {
 
 type pendingMsg struct {
 	text      string
+	images    []bs.ContentBlock
 	messageID int
 }
 

@@ -50,7 +50,7 @@ func (a *Loop) SetCompactor(c *Compactor) {
 // Run executes the agent loop: sends messages to the LLM, dispatches tool calls, and loops
 // until the LLM returns end_turn or max_tokens, or maxTurns is exceeded.
 // Returns the final text response.
-func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage string) (string, error) {
+func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string, error) {
 	if cfg.MaxTurns <= 0 {
 		cfg.MaxTurns = a.cfg.Gateway.MaxTurns
 	}

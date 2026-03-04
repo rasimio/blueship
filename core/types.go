@@ -21,6 +21,14 @@ type ContentBlock struct {
 	ToolUseID string          `json:"tool_use_id,omitempty"` // tool_result
 	Content   any             `json:"content,omitempty"`     // tool_result (string|[]ContentBlock)
 	IsError   bool            `json:"is_error,omitempty"`    // tool_result
+	Source    *ImageSource    `json:"source,omitempty"`      // image
+}
+
+// ImageSource holds base64-encoded image data for vision API.
+type ImageSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"` // "image/jpeg"
+	Data      string `json:"data"`       // base64-encoded
 }
 
 // ToolDefinition describes a tool available to an LLM.
@@ -94,6 +102,8 @@ func EstimateTokens(blocks []ContentBlock) int {
 			total += len([]rune(b.Text)) / 3
 		case "tool_use":
 			total += len([]rune(b.Name))/3 + len(b.Input)/3
+		case "image":
+			total += 1600
 		case "tool_result":
 			if s, ok := b.Content.(string); ok {
 				total += len([]rune(s)) / 3
