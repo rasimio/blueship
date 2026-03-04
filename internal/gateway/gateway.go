@@ -38,6 +38,7 @@ type Gateway struct {
 
 	systemPrompt          string
 	systemPromptHeartbeat string
+	systemPromptThinking  string
 
 	mu    sync.Mutex
 	users map[int64]*UserState
@@ -127,6 +128,11 @@ func (g *Gateway) loadSystemPrompts(workspacePath string) error {
 	preambleStr := string(preamble) + "\n"
 	g.systemPrompt = preambleStr + string(soul) + "\n\n" + string(agents)
 	g.systemPromptHeartbeat = preambleStr + string(soul) + "\n\n" + string(agents) + "\n\n" + string(heartbeat)
+
+	// Thinking prompt (optional — don't fail if file is missing)
+	if thinking, err := os.ReadFile(filepath.Join(workspacePath, "THINKING.md")); err == nil {
+		g.systemPromptThinking = preambleStr + string(soul) + "\n\n" + string(agents) + "\n\n" + string(thinking)
+	}
 
 	// Load compact prompt (optional — compactor works without it but with empty system prompt)
 	if g.compactor != nil {
@@ -435,6 +441,9 @@ func (g *Gateway) todayResetTime() time.Time {
 
 // Timezone returns the configured timezone.
 func (g *Gateway) Timezone() *time.Location { return g.tz }
+
+// SystemPromptThinking returns the thinking system prompt.
+func (g *Gateway) SystemPromptThinking() string { return g.systemPromptThinking }
 
 func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 	us, err := g.getOrInitUser(ctx, chatID)

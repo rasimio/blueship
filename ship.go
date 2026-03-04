@@ -110,6 +110,14 @@ func (s *Ship) Run(ctx context.Context) error {
 			defer wg.Done()
 			scheduler.RunLoop(ctx, s.logger, "heartbeat", 30*time.Minute, hb.Run)
 		}()
+
+		// Thinking (autonomous agent)
+		th := gateway.NewThinkingJob(gw)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			scheduler.RunLoop(ctx, s.logger, "thinking", 15*time.Minute, th.Run)
+		}()
 	}
 
 	// 6. Block until done
