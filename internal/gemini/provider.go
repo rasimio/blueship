@@ -3,6 +3,8 @@ package gemini
 import (
 	"bytes"
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -18,29 +20,36 @@ const generateContentURL = "https://generativelanguage.googleapis.com/v1beta/mod
 
 // CompletionProvider implements bs.CompletionProvider using Gemini generateContent.
 type CompletionProvider struct {
-	apiKey     string
-	httpClient *http.Client
-	logger     *slog.Logger
+	apiKey      string
+	httpClient  *http.Client
+	logger      *slog.Logger
+	generateURL string
 }
 
 // NewCompletionProvider creates a new Gemini completion provider.
 func NewCompletionProvider(apiKey string, timeout time.Duration) *CompletionProvider {
 	return &CompletionProvider{
-		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: timeout},
-		logger:     slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		apiKey:      apiKey,
+		httpClient:  &http.Client{Timeout: timeout},
+		logger:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		generateURL: generateContentURL,
 	}
 }
 
 type generateRequest struct {
-	SystemInstruction *content       `json:"systemInstruction,omitempty"`
-	Contents          []content      `json:"contents"`
-	Tools             []toolWrapper  `json:"tools,omitempty"`
-	GenerationConfig  *genConfig     `json:"generationConfig,omitempty"`
+	SystemInstruction *content      `json:"systemInstruction,omitempty"`
+	Contents          []content     `json:"contents"`
+	Tools             []toolWrapper `json:"tools,omitempty"`
+	GenerationConfig  *genConfig    `json:"generationConfig,omitempty"`
 }
 
 type genConfig struct {
-	MaxOutputTokens int `json:"maxOutputTokens,omitempty"`
+	MaxOutputTokens int             `json:"maxOutputTokens,omitempty"`
+	ThinkingConfig  *thinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+type thinkingConfig struct {
+	ThinkingBudget int `json:"thinkingBudget"`
 }
 
 type toolWrapper struct {
@@ -63,6 +72,7 @@ type part struct {
 	InlineData       *inlineData       `json:"inlineData,omitempty"`
 	FunctionCall     *functionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *functionResponse `json:"functionResponse,omitempty"`
+	ThoughtSignature string            `json:"thoughtSignature,omitempty"`
 }
 
 type inlineData struct {
@@ -85,6 +95,11 @@ type generateResponse struct {
 		Content      content `json:"content"`
 		FinishReason string  `json:"finishReason"`
 	} `json:"candidates"`
+	UsageMetadata *struct {
+		PromptTokenCount     int `json:"promptTokenCount,omitempty"`
+		CandidatesTokenCount int `json:"candidatesTokenCount,omitempty"`
+		TotalTokenCount      int `json:"totalTokenCount,omitempty"`
+	} `json:"usageMetadata,omitempty"`
 	Error *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
@@ -102,12 +117,16 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 		sys = &content{Role: "system", Parts: []part{{Text: req.System}}}
 	}
 
-	tools := buildTools(req.Tools)
+	generation := &genConfig{MaxOutputTokens: req.MaxTokens}
+	if req.ThinkingBudget >= 0 {
+		generation.ThinkingConfig = &thinkingConfig{ThinkingBudget: req.ThinkingBudget}
+	}
+
 	payload := generateRequest{
 		SystemInstruction: sys,
 		Contents:          contents,
-		Tools:             tools,
-		GenerationConfig:  &genConfig{MaxOutputTokens: req.MaxTokens},
+		Tools:             buildTools(req.Tools),
+		GenerationConfig:  generation,
 	}
 
 	body, err := json.Marshal(payload)
@@ -115,8 +134,8 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf(generateContentURL, req.Model, p.apiKey)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	url := fmt.Sprintf(p.generateURL, req.Model, p.apiKey)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -144,30 +163,24 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 	}
 
 	cand := result.Candidates[0]
-	p.logger.Info("gemini response meta",
-		"finish_reason", cand.FinishReason,
-		"parts_count", len(cand.Content.Parts),
-	)
-	for i, part := range cand.Content.Parts {
-		p.logger.Info("gemini response part",
-			"index", i,
-			"has_text", strings.TrimSpace(part.Text) != "",
-			"has_function_call", part.FunctionCall != nil,
-			"has_inline_data", part.InlineData != nil,
-		)
-	}
 	if len(cand.Content.Parts) == 0 {
 		return nil, fmt.Errorf("gemini empty content: finishReason=%s", cand.FinishReason)
 	}
+
 	blocks := toContentBlocks(cand.Content)
 	if len(blocks) == 0 {
 		return nil, fmt.Errorf("gemini empty blocks: finishReason=%s", cand.FinishReason)
 	}
 
+	stopReason := mapStopReason(cand.FinishReason)
+	if hasToolUseBlock(blocks) {
+		stopReason = "tool_use"
+	}
+
 	return &bs.CompletionResponse{
-		Content: blocks,
-		StopReason: mapStopReason(cand.FinishReason),
-		Usage: bs.Usage{},
+		Content:    blocks,
+		StopReason: stopReason,
+		Usage:      toUsage(result.UsageMetadata),
 	}, nil
 }
 
@@ -185,7 +198,10 @@ func buildContents(messages []bs.Message) []content {
 				out = append(out, content{Role: "user", Parts: []part{tp}})
 			}
 		case "assistant":
-			out = append(out, content{Role: "model", Parts: buildModelParts(blocks)})
+			modelParts := buildModelParts(blocks)
+			if len(modelParts) > 0 {
+				out = append(out, content{Role: "model", Parts: modelParts})
+			}
 		}
 	}
 	return out
@@ -202,20 +218,10 @@ func buildUserParts(blocks []bs.ContentBlock) ([]part, []part) {
 			}
 		case "image":
 			if b.Source != nil && b.Source.Type == "base64" && b.Source.MediaType != "" {
-				parts = append(parts, part{
-					InlineData: &inlineData{
-						MimeType: b.Source.MediaType,
-						Data:     b.Source.Data,
-					},
-				})
+				parts = append(parts, part{InlineData: &inlineData{MimeType: b.Source.MediaType, Data: b.Source.Data}})
 			}
 		case "tool_result":
-			toolParts = append(toolParts, part{
-				FunctionResponse: &functionResponse{
-					Name:     b.Name,
-					Response: normalizeFunctionResponse(b.Content),
-				},
-			})
+			toolParts = append(toolParts, part{FunctionResponse: &functionResponse{Name: b.Name, Response: normalizeFunctionResponse(b.Content)}})
 		}
 	}
 	return parts, toolParts
@@ -263,19 +269,14 @@ func buildModelParts(blocks []bs.ContentBlock) []part {
 		switch b.Type {
 		case "text":
 			if b.Text != "" {
-				parts = append(parts, part{Text: b.Text})
+				parts = append(parts, part{Text: b.Text, ThoughtSignature: b.ThoughtSignature})
 			}
 		case "tool_use":
 			args := map[string]any{}
 			if len(b.Input) > 0 {
 				_ = json.Unmarshal(b.Input, &args)
 			}
-			parts = append(parts, part{
-				FunctionCall: &functionCall{
-					Name: b.Name,
-					Args: args,
-				},
-			})
+			parts = append(parts, part{FunctionCall: &functionCall{Name: b.Name, Args: args}, ThoughtSignature: b.ThoughtSignature})
 		}
 	}
 	return parts
@@ -287,31 +288,63 @@ func buildTools(tools []bs.ToolDefinition) []toolWrapper {
 	}
 	funcs := make([]functionDecl, 0, len(tools))
 	for _, t := range tools {
-		funcs = append(funcs, functionDecl{
-			Name:        t.Name,
-			Description: t.Description,
-			Parameters:  t.InputSchema,
-		})
+		funcs = append(funcs, functionDecl{Name: t.Name, Description: t.Description, Parameters: t.InputSchema})
 	}
 	return []toolWrapper{{FunctionDeclarations: funcs}}
 }
 
 func toContentBlocks(c content) []bs.ContentBlock {
 	var blocks []bs.ContentBlock
-	for _, p := range c.Parts {
+	for i, p := range c.Parts {
 		if p.Text != "" {
-			blocks = append(blocks, bs.ContentBlock{Type: "text", Text: p.Text})
+			blocks = append(blocks, bs.ContentBlock{Type: "text", Text: p.Text, ThoughtSignature: p.ThoughtSignature})
 		}
 		if p.FunctionCall != nil {
 			rawArgs, _ := json.Marshal(p.FunctionCall.Args)
 			blocks = append(blocks, bs.ContentBlock{
-				Type:  "tool_use",
-				Name:  p.FunctionCall.Name,
-				Input: rawArgs,
+				Type:             "tool_use",
+				ID:               createToolUseID(p.FunctionCall.Name, rawArgs, p.ThoughtSignature, i),
+				Name:             p.FunctionCall.Name,
+				Input:            rawArgs,
+				ThoughtSignature: p.ThoughtSignature,
 			})
 		}
 	}
 	return blocks
+}
+
+func createToolUseID(name string, rawArgs []byte, thoughtSignature string, index int) string {
+	seed := fmt.Sprintf("%s|%s|%s|%d", name, rawArgs, thoughtSignature, index)
+	sum := sha1.Sum([]byte(seed))
+	return "gemini_" + hex.EncodeToString(sum[:8])
+}
+
+func hasToolUseBlock(blocks []bs.ContentBlock) bool {
+	for _, block := range blocks {
+		if block.Type == "tool_use" {
+			return true
+		}
+	}
+	return false
+}
+
+func toUsage(meta *struct {
+	PromptTokenCount     int `json:"promptTokenCount,omitempty"`
+	CandidatesTokenCount int `json:"candidatesTokenCount,omitempty"`
+	TotalTokenCount      int `json:"totalTokenCount,omitempty"`
+}) bs.Usage {
+	if meta == nil {
+		return bs.Usage{}
+	}
+	input := meta.PromptTokenCount
+	output := meta.CandidatesTokenCount
+	if input == 0 && meta.TotalTokenCount > output {
+		input = meta.TotalTokenCount - output
+	}
+	if output == 0 && meta.TotalTokenCount > input {
+		output = meta.TotalTokenCount - input
+	}
+	return bs.Usage{InputTokens: input, OutputTokens: output}
 }
 
 func mapStopReason(reason string) string {

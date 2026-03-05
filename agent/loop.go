@@ -123,7 +123,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 			System:         effectiveSystem,
 			Messages:       messages,
 			Tools:          tools,
-			ThinkingBudget: a.cfg.Limits.ThinkingBudget,
+			ThinkingBudget: normalizeThinkingBudget(a.cfg.Limits.ThinkingBudget),
 		})
 		if err != nil {
 			return "", fmt.Errorf("LLM API: %w", err)
@@ -199,6 +199,13 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 }
 
 // calculateBudget computes the token budget for message retrieval.
+func normalizeThinkingBudget(budget int) int {
+	if budget == 0 {
+		return -1
+	}
+	return budget
+}
+
 func (a *Loop) calculateBudget(systemPrompt string, tools []bs.ToolDefinition) int {
 	maxContext := a.cfg.Limits.MaxContext
 

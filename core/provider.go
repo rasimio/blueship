@@ -17,7 +17,7 @@ type CompletionRequest struct {
 	Messages       []Message
 	Tools          []ToolDefinition
 	MaxTokens      int
-	ThinkingBudget int // 0 = disabled
+	ThinkingBudget int // -1 = provider default, 0 = disabled, >0 = explicit thinking budget
 }
 
 // CompletionResponse is the output of CompletionProvider.Complete.

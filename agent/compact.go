@@ -83,10 +83,11 @@ func (c *Compactor) Compact(ctx context.Context, messages []bs.Message) (string,
 
 func (c *Compactor) summarize(ctx context.Context, dialogue string) (string, error) {
 	resp, err := c.provider.Complete(ctx, bs.CompletionRequest{
-		Model:     c.model,
-		MaxTokens: c.maxTokens,
-		System:    c.systemPrompt,
-		Messages:  []bs.Message{{Role: "user", Content: dialogue}},
+		Model:          c.model,
+		MaxTokens:      c.maxTokens,
+		System:         c.systemPrompt,
+		ThinkingBudget: 0,
+		Messages:       []bs.Message{{Role: "user", Content: dialogue}},
 	})
 	if err != nil {
 		return "", err

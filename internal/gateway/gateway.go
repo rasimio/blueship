@@ -410,7 +410,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		SessionID:      sess.ID,
 		SystemPrompt:   g.systemPrompt,
 		CompactSummary: derefString(sess.CompactSummary),
-			Model:          g.deps.Config.Models.Primary.Name,
+		Model:          g.deps.Config.Models.Primary.Name,
 		MaxTokens:      g.deps.Config.Limits.MaxOutputTokens,
 		MaxTurns:       g.deps.Config.Gateway.MaxTurns,
 	}, content)

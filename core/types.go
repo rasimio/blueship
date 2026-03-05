@@ -13,15 +13,16 @@ type Message struct {
 
 // ContentBlock is an element of the content array in LLM API messages.
 type ContentBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	ID        string          `json:"id,omitempty"`          // tool_use
-	Name      string          `json:"name,omitempty"`        // tool_use
-	Input     json.RawMessage `json:"input,omitempty"`       // tool_use
-	ToolUseID string          `json:"tool_use_id,omitempty"` // tool_result
-	Content   any             `json:"content,omitempty"`     // tool_result (string|[]ContentBlock)
-	IsError   bool            `json:"is_error,omitempty"`    // tool_result
-	Source    *ImageSource    `json:"source,omitempty"`      // image
+	Type             string          `json:"type"`
+	Text             string          `json:"text,omitempty"`
+	ID               string          `json:"id,omitempty"`                // tool_use
+	Name             string          `json:"name,omitempty"`              // tool_use / tool_result
+	Input            json.RawMessage `json:"input,omitempty"`             // tool_use
+	ThoughtSignature string          `json:"thought_signature,omitempty"` // Gemini tool_use replay
+	ToolUseID        string          `json:"tool_use_id,omitempty"`       // tool_result
+	Content          any             `json:"content,omitempty"`           // tool_result (string|[]ContentBlock)
+	IsError          bool            `json:"is_error,omitempty"`          // tool_result
+	Source           *ImageSource    `json:"source,omitempty"`            // image
 }
 
 // ImageSource holds base64-encoded image data for vision API.
@@ -101,7 +102,7 @@ func EstimateTokens(blocks []ContentBlock) int {
 		case "text":
 			total += len([]rune(b.Text)) / 3
 		case "tool_use":
-			total += len([]rune(b.Name))/3 + len(b.Input)/3
+			total += len([]rune(b.Name))/3 + len(b.Input)/3 + len([]rune(b.ThoughtSignature))/3
 		case "image":
 			total += 1600
 		case "tool_result":
