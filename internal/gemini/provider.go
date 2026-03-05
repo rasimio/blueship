@@ -148,6 +148,14 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 		"finish_reason", cand.FinishReason,
 		"parts_count", len(cand.Content.Parts),
 	)
+	for i, part := range cand.Content.Parts {
+		p.logger.Info("gemini response part",
+			"index", i,
+			"has_text", strings.TrimSpace(part.Text) != "",
+			"has_function_call", part.FunctionCall != nil,
+			"has_inline_data", part.InlineData != nil,
+		)
+	}
 	if len(cand.Content.Parts) == 0 {
 		return nil, fmt.Errorf("gemini empty content: finishReason=%s", cand.FinishReason)
 	}
