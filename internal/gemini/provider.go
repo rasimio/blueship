@@ -191,12 +191,48 @@ func buildUserParts(blocks []bs.ContentBlock) ([]part, []part) {
 			toolParts = append(toolParts, part{
 				FunctionResponse: &functionResponse{
 					Name:     b.Name,
-					Response: b.Content,
+					Response: normalizeFunctionResponse(b.Content),
 				},
 			})
 		}
 	}
 	return parts, toolParts
+}
+
+func normalizeFunctionResponse(content any) map[string]any {
+	if content == nil {
+		return map[string]any{"result": ""}
+	}
+	if m, ok := content.(map[string]any); ok {
+		return m
+	}
+	if raw, ok := content.(json.RawMessage); ok {
+		var v any
+		if json.Unmarshal(raw, &v) == nil {
+			return wrapResult(v)
+		}
+	}
+	if b, ok := content.([]byte); ok {
+		var v any
+		if json.Unmarshal(b, &v) == nil {
+			return wrapResult(v)
+		}
+	}
+	if s, ok := content.(string); ok {
+		var v any
+		if json.Unmarshal([]byte(s), &v) == nil {
+			return wrapResult(v)
+		}
+		return map[string]any{"result": s}
+	}
+	return wrapResult(content)
+}
+
+func wrapResult(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	return map[string]any{"result": v}
 }
 
 func buildModelParts(blocks []bs.ContentBlock) []part {
