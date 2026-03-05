@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ const generateContentURL = "https://generativelanguage.googleapis.com/v1beta/mod
 type CompletionProvider struct {
 	apiKey     string
 	httpClient *http.Client
+	logger     *slog.Logger
 }
 
 // NewCompletionProvider creates a new Gemini completion provider.
@@ -25,6 +28,7 @@ func NewCompletionProvider(apiKey string, timeout time.Duration) *CompletionProv
 	return &CompletionProvider{
 		apiKey:     apiKey,
 		httpClient: &http.Client{Timeout: timeout},
+		logger:     slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	}
 }
 
@@ -140,6 +144,10 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 	}
 
 	cand := result.Candidates[0]
+	p.logger.Info("gemini response meta",
+		"finish_reason", cand.FinishReason,
+		"parts_count", len(cand.Content.Parts),
+	)
 	if len(cand.Content.Parts) == 0 {
 		return nil, fmt.Errorf("gemini empty content: finishReason=%s", cand.FinishReason)
 	}
