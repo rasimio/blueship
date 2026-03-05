@@ -76,6 +76,7 @@ type GatewayConfig struct {
 	DebounceCap      int           // default: 10
 	SessionResetHour int           // default: 4 (4am)
 	MaxTurns         int           // default: 15
+	DisableThinking  bool          // default: false (thinking job runs every hour)
 }
 
 // applyDefaults fills in zero values with sensible defaults.

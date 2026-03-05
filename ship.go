@@ -112,12 +112,14 @@ func (s *Ship) Run(ctx context.Context) error {
 		}()
 
 		// Thinking (autonomous agent)
-		th := gateway.NewThinkingJob(gw)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			scheduler.RunLoop(ctx, s.logger, "thinking", 60*time.Minute, th.Run)
-		}()
+		if !deps.Config.Gateway.DisableThinking {
+			th := gateway.NewThinkingJob(gw)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				scheduler.RunLoop(ctx, s.logger, "thinking", 60*time.Minute, th.Run)
+			}()
+		}
 	}
 
 	// 6. Block until done
