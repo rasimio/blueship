@@ -233,6 +233,17 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 		}
 	}
 
+	// Prepend quoted reply context so the model sees what message the user is replying to
+	if msg.ReplyToMessage != nil {
+		quoted := msg.ReplyToMessage.Text
+		if quoted == "" {
+			quoted = msg.ReplyToMessage.Caption
+		}
+		if quoted != "" {
+			text = fmt.Sprintf("[reply to: %s]\n\n%s", quoted, text)
+		}
+	}
+
 	if text == "" && len(images) == 0 {
 		return
 	}
