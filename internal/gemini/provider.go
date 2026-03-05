@@ -166,7 +166,7 @@ func buildContents(messages []bs.Message) []content {
 				out = append(out, content{Role: "user", Parts: userParts})
 			}
 			for _, tp := range toolParts {
-				out = append(out, content{Role: "tool", Parts: []part{tp}})
+				out = append(out, content{Role: "user", Parts: []part{tp}})
 			}
 		case "assistant":
 			out = append(out, content{Role: "model", Parts: buildModelParts(blocks)})
