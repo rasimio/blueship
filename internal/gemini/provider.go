@@ -140,7 +140,13 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 	}
 
 	cand := result.Candidates[0]
+	if len(cand.Content.Parts) == 0 {
+		return nil, fmt.Errorf("gemini empty content: finishReason=%s", cand.FinishReason)
+	}
 	blocks := toContentBlocks(cand.Content)
+	if len(blocks) == 0 {
+		return nil, fmt.Errorf("gemini empty blocks: finishReason=%s", cand.FinishReason)
+	}
 
 	return &bs.CompletionResponse{
 		Content: blocks,
