@@ -38,10 +38,16 @@ type TransportConfig struct {
 	BotToken string
 }
 
+// ModelRef identifies a model and its provider.
+type ModelRef struct {
+	Provider string
+	Name     string
+}
+
 // ModelsConfig defines which models to use for each role.
 type ModelsConfig struct {
-	Primary string // agent loop (default: "claude-opus-4-6")
-	Compact string // compaction summarizer (default: "claude-haiku-4-5-20251001")
+	Primary ModelRef // agent loop (default: "claude-haiku-4-5-20251001")
+	Compact ModelRef // compaction summarizer (default: "claude-haiku-4-5-20251001")
 }
 
 // LimitsConfig defines token budget limits.
@@ -86,11 +92,11 @@ func (c *Config) ApplyDefaults() {
 	}
 
 	// Models
-	if c.Models.Primary == "" {
-		c.Models.Primary = "claude-opus-4-6"
+	if c.Models.Primary.Name == "" {
+		c.Models.Primary = ModelRef{Provider: "anthropic", Name: "claude-haiku-4-5-20251001"}
 	}
-	if c.Models.Compact == "" {
-		c.Models.Compact = "claude-haiku-4-5-20251001"
+	if c.Models.Compact.Name == "" {
+		c.Models.Compact = ModelRef{Provider: "anthropic", Name: "claude-haiku-4-5-20251001"}
 	}
 
 	// Limits

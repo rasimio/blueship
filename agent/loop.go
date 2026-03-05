@@ -58,7 +58,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 		cfg.MaxTokens = a.cfg.Limits.MaxOutputTokens
 	}
 	if cfg.Model == "" {
-		cfg.Model = a.cfg.Models.Primary
+		cfg.Model = a.cfg.Models.Primary.Name
 	}
 
 	// 1. Append user message
@@ -174,6 +174,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 				toolResults = append(toolResults, bs.ContentBlock{
 					Type:      "tool_result",
 					ToolUseID: block.ID,
+					Name:      block.Name,
 					Content:   result,
 					IsError:   isError,
 				})

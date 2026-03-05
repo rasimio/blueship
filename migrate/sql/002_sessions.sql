@@ -2,7 +2,7 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL,
     title TEXT,
-    model TEXT NOT NULL DEFAULT 'claude-opus-4-6',
+    model TEXT NOT NULL,
     system_prompt_hash TEXT,
     token_count INT DEFAULT 0,
     message_count INT DEFAULT 0,

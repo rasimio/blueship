@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/rasimio/blueship/internal/anthropic"
+	"github.com/rasimio/blueship/internal/gemini"
 	"github.com/rasimio/blueship/internal/gateway"
 	"github.com/rasimio/blueship/internal/openai"
 	"github.com/rasimio/blueship/internal/scheduler"
@@ -162,6 +163,26 @@ func AnthropicWithConfig(apiKey string, timeout time.Duration, backoffs []time.D
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	return anthropic.NewProvider(apiKey, timeout, backoffs, logger)
 }
+// OpenAI creates a CompletionProvider using OpenAI Chat Completions.
+func OpenAI(apiKey string) CompletionProvider {
+	return openai.NewCompletionProvider(apiKey, 120*time.Second)
+}
+
+// OpenAIWithConfig creates a CompletionProvider with a custom timeout.
+func OpenAIWithConfig(apiKey string, timeout time.Duration) CompletionProvider {
+	return openai.NewCompletionProvider(apiKey, timeout)
+}
+
+// Gemini creates a CompletionProvider using Gemini generateContent.
+func Gemini(apiKey string) CompletionProvider {
+	return gemini.NewCompletionProvider(apiKey, 120*time.Second)
+}
+
+// GeminiWithConfig creates a CompletionProvider with a custom timeout.
+func GeminiWithConfig(apiKey string, timeout time.Duration) CompletionProvider {
+	return gemini.NewCompletionProvider(apiKey, timeout)
+}
+
 
 // Telegram creates a TransportConfig for Telegram.
 func Telegram(botToken string) TransportConfig {
@@ -191,7 +212,11 @@ func Whisper(apiKey string) TranscriptionProvider {
 	return openai.NewTranscriptionProvider(apiKey, "whisper-1", 30*time.Second)
 }
 
-// TelegramSender creates a MessageSender using the Telegram Bot API.
+// WhisperWithModel creates a TranscriptionProvider with a custom model.
+func WhisperWithModel(apiKey, model string, timeout time.Duration) TranscriptionProvider {
+	return openai.NewTranscriptionProvider(apiKey, model, timeout)
+}
+ // TelegramSender creates a MessageSender using the Telegram Bot API.
 func TelegramSender(botToken string, timeout time.Duration) MessageSender {
 	return &telegramSenderAdapter{client: telegram.NewClient(botToken, timeout)}
 }

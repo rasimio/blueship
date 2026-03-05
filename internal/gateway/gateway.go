@@ -410,7 +410,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		SessionID:      sess.ID,
 		SystemPrompt:   g.systemPrompt,
 		CompactSummary: derefString(sess.CompactSummary),
-		Model:          g.deps.Config.Models.Primary,
+			Model:          g.deps.Config.Models.Primary.Name,
 		MaxTokens:      g.deps.Config.Limits.MaxOutputTokens,
 		MaxTurns:       g.deps.Config.Gateway.MaxTurns,
 	}, content)
@@ -446,7 +446,7 @@ func (g *Gateway) keepTyping(ctx context.Context, chatID int64) {
 
 // GetOrCreateSession gets or creates a session with daily reset.
 func (g *Gateway) GetOrCreateSession(ctx context.Context, us *UserState) (*session.Session, error) {
-	sess, err := g.store.GetOrCreate(ctx, us.UserID.String(), g.deps.Config.Models.Primary)
+	sess, err := g.store.GetOrCreate(ctx, us.UserID.String(), g.deps.Config.Models.Primary.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +456,7 @@ func (g *Gateway) GetOrCreateSession(ctx context.Context, us *UserState) (*sessi
 		if err := g.store.Archive(ctx, sess.ID); err != nil {
 			return nil, fmt.Errorf("archive old session: %w", err)
 		}
-		return g.store.Create(ctx, us.UserID.String(), g.deps.Config.Models.Primary)
+		return g.store.Create(ctx, us.UserID.String(), g.deps.Config.Models.Primary.Name)
 	}
 
 	return sess, nil
@@ -523,7 +523,7 @@ func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 			"🧵 %s · updated %s ago\n"+
 			"⚙️ Runtime: telegram · Compact threshold: %dk",
 		buildDate, commit,
-		g.deps.Config.Models.Primary,
+		g.deps.Config.Models.Primary.Name,
 		sess.MessageCount, sess.TokenCount/1000,
 		realTokens/1000, maxTokens/1000, pct,
 		shortID(sess.ID), ago,

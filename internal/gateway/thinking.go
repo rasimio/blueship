@@ -130,7 +130,7 @@ func (t *ThinkingJob) runForOwner(ctx context.Context, us *UserState) {
 		SessionID:      sess.ID,
 		SystemPrompt:   t.gateway.SystemPromptThinking(),
 		CompactSummary: derefString(sess.CompactSummary),
-		Model:          cfg.Models.Primary,
+			Model:          cfg.Models.Primary.Name,
 		MaxTokens:      cfg.Limits.MaxOutputTokens,
 		MaxTurns:       cfg.Gateway.MaxTurns,
 	}, "[SYSTEM: autonomous thinking cycle — это НЕ сообщение от пользователя. Пользователь тебе НЕ писал. Следуй инструкциям THINKING.]")
