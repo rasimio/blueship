@@ -74,12 +74,29 @@ type thinkingConfig struct {
 	BudgetTokens int    `json:"budget_tokens"`
 }
 
+type apiMessage struct {
+	Role    string            `json:"role"`
+	Content []apiContentBlock `json:"content"`
+}
+
+type apiContentBlock struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   any             `json:"content,omitempty"`
+	IsError   bool            `json:"is_error,omitempty"`
+	Source    *bs.ImageSource `json:"source,omitempty"`
+}
+
 // apiRequest is the wire format for Anthropic Messages API.
 type apiRequest struct {
 	Model       string              `json:"model"`
 	MaxTokens   int                 `json:"max_tokens"`
 	System      string              `json:"system,omitempty"`
-	Messages    []bs.Message        `json:"messages"`
+	Messages    []apiMessage        `json:"messages"`
 	Tools       []bs.ToolDefinition `json:"tools,omitempty"`
 	Temperature float64             `json:"temperature,omitempty"`
 	Thinking    *thinkingConfig     `json:"thinking,omitempty"`
@@ -87,12 +104,12 @@ type apiRequest struct {
 
 // apiResponse is the wire format for Anthropic Messages API response.
 type apiResponse struct {
-	ID         string           `json:"id"`
-	Role       string           `json:"role"`
+	ID         string            `json:"id"`
+	Role       string            `json:"role"`
 	Content    []bs.ContentBlock `json:"content"`
-	Model      string           `json:"model"`
-	StopReason string           `json:"stop_reason"`
-	Usage      bs.Usage         `json:"usage"`
+	Model      string            `json:"model"`
+	StopReason string            `json:"stop_reason"`
+	Usage      bs.Usage          `json:"usage"`
 }
 
 func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
@@ -100,7 +117,7 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 		Model:     req.Model,
 		MaxTokens: req.MaxTokens,
 		System:    req.System,
-		Messages:  req.Messages,
+		Messages:  buildMessages(req.Messages),
 		Tools:     req.Tools,
 	}
 
@@ -172,4 +189,92 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 		StopReason: apiResp.StopReason,
 		Usage:      apiResp.Usage,
 	}, nil
+}
+
+func buildMessages(messages []bs.Message) []apiMessage {
+	out := make([]apiMessage, 0, len(messages))
+	for _, msg := range messages {
+		blocks := bs.NormalizeContent(msg.Content)
+		content := make([]apiContentBlock, 0, len(blocks))
+		for _, block := range blocks {
+			if wire, ok := toAPIContentBlock(block); ok {
+				content = append(content, wire)
+			}
+		}
+		if len(content) == 0 {
+			continue
+		}
+		out = append(out, apiMessage{Role: msg.Role, Content: content})
+	}
+	return out
+}
+
+func toAPIContentBlock(block bs.ContentBlock) (apiContentBlock, bool) {
+	switch block.Type {
+	case "text":
+		if block.Text == "" {
+			return apiContentBlock{}, false
+		}
+		return apiContentBlock{Type: "text", Text: block.Text}, true
+	case "image":
+		if block.Source == nil {
+			return apiContentBlock{}, false
+		}
+		return apiContentBlock{Type: "image", Source: block.Source}, true
+	case "tool_use":
+		return apiContentBlock{
+			Type:  "tool_use",
+			ID:    block.ID,
+			Name:  block.Name,
+			Input: normalizeToolInput(block.Input),
+		}, true
+	case "tool_result":
+		return apiContentBlock{
+			Type:      "tool_result",
+			ToolUseID: block.ToolUseID,
+			Content:   normalizeToolResultContent(block.Content),
+			IsError:   block.IsError,
+		}, true
+	default:
+		return apiContentBlock{}, false
+	}
+}
+
+func normalizeToolInput(input json.RawMessage) json.RawMessage {
+	if len(input) == 0 {
+		return json.RawMessage([]byte("{}"))
+	}
+	return input
+}
+
+func normalizeToolResultContent(content any) any {
+	if content == nil {
+		return ""
+	}
+	if blocks, ok := content.([]bs.ContentBlock); ok {
+		wire := make([]apiContentBlock, 0, len(blocks))
+		for _, b := range blocks {
+			if converted, ok := toAPIContentBlock(b); ok {
+				wire = append(wire, converted)
+			}
+		}
+		if len(wire) == 0 {
+			return ""
+		}
+		return wire
+	}
+	if s, ok := content.(string); ok {
+		return s
+	}
+	if raw, ok := content.(json.RawMessage); ok {
+		return string(raw)
+	}
+	if b, ok := content.([]byte); ok {
+		return string(b)
+	}
+	data, err := json.Marshal(content)
+	if err != nil {
+		return fmt.Sprintf("%v", content)
+	}
+	return string(data)
 }
