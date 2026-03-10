@@ -24,6 +24,7 @@ type CompletionProvider struct {
 	httpClient  *http.Client
 	logger      *slog.Logger
 	generateURL string
+	backoffs    []time.Duration
 }
 
 // NewCompletionProvider creates a new Gemini completion provider.
@@ -33,6 +34,7 @@ func NewCompletionProvider(apiKey string, timeout time.Duration) *CompletionProv
 		httpClient:  &http.Client{Timeout: timeout},
 		logger:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
 		generateURL: generateContentURL,
+		backoffs:    []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second},
 	}
 }
 
@@ -105,8 +107,40 @@ type generateResponse struct {
 	} `json:"error,omitempty"`
 }
 
-// Complete sends a completion request to Gemini.
+// Complete sends a completion request to Gemini with retry on 429/503.
 func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
+	var lastErr error
+	for attempt := 0; attempt <= len(p.backoffs); attempt++ {
+		resp, err := p.sendOnce(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+
+		lastErr = err
+
+		errMsg := err.Error()
+		if !strings.Contains(errMsg, "503") && !strings.Contains(errMsg, "429") {
+			return nil, err
+		}
+
+		if attempt < len(p.backoffs) {
+			p.logger.Warn("gemini API retryable error",
+				"error", err,
+				"attempt", attempt+1,
+				"backoff", p.backoffs[attempt],
+			)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(p.backoffs[attempt]):
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("gemini API failed after %d retries: %w", len(p.backoffs), lastErr)
+}
+
+func (p *CompletionProvider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
 	if p.apiKey == "" {
 		return nil, fmt.Errorf("gemini not configured: missing API key")
 	}
