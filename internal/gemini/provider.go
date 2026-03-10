@@ -119,7 +119,11 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 		lastErr = err
 
 		errMsg := err.Error()
-		if !strings.Contains(errMsg, "503") && !strings.Contains(errMsg, "429") {
+		retryable := strings.Contains(errMsg, "503") ||
+			strings.Contains(errMsg, "429") ||
+			strings.Contains(errMsg, "deadline exceeded") ||
+			strings.Contains(errMsg, "context canceled")
+		if !retryable {
 			return nil, err
 		}
 
@@ -186,7 +190,9 @@ func (p *CompletionProvider) sendOnce(ctx context.Context, req bs.CompletionRequ
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("gemini request: %w", err)
+		// Strip API key from error messages
+		errStr := strings.ReplaceAll(err.Error(), p.apiKey, "***")
+		return nil, fmt.Errorf("gemini request: %s", errStr)
 	}
 	defer resp.Body.Close()
 
