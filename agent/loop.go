@@ -29,6 +29,9 @@ type RunConfig struct {
 	Model          string
 	MaxTokens      int
 	MaxTurns       int
+	// InjectedContext is prepended to the first user turn (not stored in session).
+	// Used for automatic memory/context injection before the LLM call.
+	InjectedContext string
 }
 
 // NewLoop creates a new agent loop.
@@ -116,6 +119,17 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 			return "", fmt.Errorf("load messages: %w", err)
 		}
 
+		// On the first turn, prepend injected context to the last user message.
+		// Not stored in DB — ephemeral context (e.g. memory traces).
+		if turn == 0 && cfg.InjectedContext != "" && len(messages) > 0 {
+			last := &messages[len(messages)-1]
+			if last.Role == "user" {
+				blocks := bs.NormalizeContent(last.Content)
+				prefix := bs.ContentBlock{Type: "text", Text: "[context]\n" + cfg.InjectedContext + "[/context]\n\n"}
+				last.Content = append([]bs.ContentBlock{prefix}, blocks...)
+			}
+		}
+
 		// 4. Call LLM
 		resp, err := a.provider.Complete(ctx, bs.CompletionRequest{
 			Model:          cfg.Model,
@@ -195,7 +209,12 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 		}
 	}
 
-	return "", fmt.Errorf("agent loop exceeded %d turns", cfg.MaxTurns)
+	// Return whatever text was accumulated before hitting the turn limit.
+	if text := accumulated.String(); text != "" {
+		a.logger.Warn("agent loop hit turn limit, returning partial response", "turns", cfg.MaxTurns)
+		return text, nil
+	}
+	return "", fmt.Errorf("agent loop exceeded %d turns with no text output", cfg.MaxTurns)
 }
 
 // calculateBudget computes the token budget for message retrieval.
@@ -217,9 +236,10 @@ func (a *Loop) calculateBudget(systemPrompt string, tools []bs.ToolDefinition) i
 		toolSchemaTokens = len(data) / 3
 	}
 
+	minBudget := a.cfg.Limits.MinMessageBudget
 	budget := maxContext - systemTokens - toolSchemaTokens
-	if budget < 10000 {
-		budget = 10000
+	if budget < minBudget {
+		budget = minBudget
 	}
 	return budget
 }

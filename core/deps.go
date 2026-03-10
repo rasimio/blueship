@@ -27,9 +27,13 @@ type Deps struct {
 	IsOwner bool
 
 	// Optional providers (populated from Config during InitDeps).
-	Embedder EmbeddingProvider // nil = embedding features disabled
+	Embedder EmbeddingProvider  // nil = embedding features disabled
 	LLM      CompletionProvider // nil = LLM features disabled
 	Sender   MessageSender      // nil = message sending disabled
+
+	// ContextInjector is called before the first LLM turn to inject per-request context
+	// (e.g. memory traces). Returns empty string to skip injection.
+	ContextInjector func(ctx context.Context, userID, message string) string
 
 	pool *dbPool
 }
@@ -44,16 +48,17 @@ func (d *Deps) DB(module string) (*sqlx.DB, error) {
 // The DB pool and Redis are shared (goroutine-safe).
 func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 	return &Deps{
-		Config:   d.Config,
-		Logger:   d.Logger,
-		Redis:    d.Redis,
-		UserID:   userID,
-		ChatID:   chatID,
-		IsOwner:  isOwner,
-		Embedder: d.Embedder,
-		LLM:      d.LLM,
-		Sender:   d.Sender,
-		pool:     d.pool,
+		Config:          d.Config,
+		Logger:          d.Logger,
+		Redis:           d.Redis,
+		UserID:          userID,
+		ChatID:          chatID,
+		IsOwner:         isOwner,
+		Embedder:        d.Embedder,
+		LLM:             d.LLM,
+		Sender:          d.Sender,
+		ContextInjector: d.ContextInjector,
+		pool:            d.pool,
 	}
 }
 

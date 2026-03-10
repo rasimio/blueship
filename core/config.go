@@ -24,12 +24,21 @@ type Config struct {
 	Prompts  string // directory with .md prompt files (default: "" = no files)
 	Timezone string // default: "UTC"
 
+	// --- Owner (single-user mode) ---
+	Owner OwnerConfig
+
 	// --- Fine-tuning (all have defaults) ---
 	Models   ModelsConfig
 	Limits   LimitsConfig
 	Timeouts TimeoutsConfig
 	Retry    RetryConfig
 	Gateway  GatewayConfig
+}
+
+// OwnerConfig identifies the single owner of this instance.
+type OwnerConfig struct {
+	ChatID      string // e.g. "telegram:5452235517"
+	DisplayName string // e.g. "Расим"
 }
 
 // TransportConfig holds transport configuration.
@@ -52,12 +61,13 @@ type ModelsConfig struct {
 
 // LimitsConfig defines token budget limits.
 type LimitsConfig struct {
-	MaxContext       int // Opus input budget (default: 180000)
-	CompactThreshold int // trigger compaction above this (default: 40000)
-	CompactKeep      int // keep recent messages intact (default: 30000)
-	MaxOutputTokens  int // agent loop max output (default: 8192)
-	CompactOutput    int // haiku compaction output (default: 2048)
-	ThinkingBudget   int // extended thinking budget (default: 0 = disabled)
+	MaxContext        int // Opus input budget (default: 180000)
+	CompactThreshold  int // trigger compaction above this (default: 40000)
+	CompactKeep       int // keep recent messages intact (default: 30000)
+	MaxOutputTokens   int // agent loop max output (default: 8192)
+	CompactOutput     int // haiku compaction output (default: 2048)
+	ThinkingBudget    int // extended thinking budget (default: 0 = disabled)
+	MinMessageBudget  int // minimum token budget for messages (default: 10000)
 }
 
 // TimeoutsConfig defines timeouts for external calls.
@@ -114,6 +124,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Limits.CompactOutput == 0 {
 		c.Limits.CompactOutput = 2048
+	}
+	if c.Limits.MinMessageBudget == 0 {
+		c.Limits.MinMessageBudget = 10000
 	}
 
 	// Timeouts

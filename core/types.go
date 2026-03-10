@@ -41,8 +41,10 @@ type ToolDefinition struct {
 
 // Usage contains token usage information from an LLM API response.
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens          int `json:"input_tokens"`
+	OutputTokens         int `json:"output_tokens"`
+	CacheCreationTokens  int `json:"cache_creation_input_tokens,omitempty"`
+	CacheReadTokens      int `json:"cache_read_input_tokens,omitempty"`
 }
 
 // ToolHandler processes a tool call and returns a result or error.

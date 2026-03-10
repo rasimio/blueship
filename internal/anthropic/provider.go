@@ -74,6 +74,24 @@ type thinkingConfig struct {
 	BudgetTokens int    `json:"budget_tokens"`
 }
 
+type cacheControl struct {
+	Type string `json:"type"` // "ephemeral"
+}
+
+type systemBlock struct {
+	Type         string        `json:"type"` // "text"
+	Text         string        `json:"text"`
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
+}
+
+// apiTool wraps ToolDefinition with optional cache_control for prompt caching.
+type apiTool struct {
+	Name         string          `json:"name"`
+	Description  string          `json:"description"`
+	InputSchema  json.RawMessage `json:"input_schema"`
+	CacheControl *cacheControl   `json:"cache_control,omitempty"`
+}
+
 type apiMessage struct {
 	Role    string            `json:"role"`
 	Content []apiContentBlock `json:"content"`
@@ -93,13 +111,13 @@ type apiContentBlock struct {
 
 // apiRequest is the wire format for Anthropic Messages API.
 type apiRequest struct {
-	Model       string              `json:"model"`
-	MaxTokens   int                 `json:"max_tokens"`
-	System      string              `json:"system,omitempty"`
-	Messages    []apiMessage        `json:"messages"`
-	Tools       []bs.ToolDefinition `json:"tools,omitempty"`
-	Temperature float64             `json:"temperature,omitempty"`
-	Thinking    *thinkingConfig     `json:"thinking,omitempty"`
+	Model       string        `json:"model"`
+	MaxTokens   int           `json:"max_tokens"`
+	System      []systemBlock `json:"system,omitempty"`
+	Messages    []apiMessage  `json:"messages"`
+	Tools       []apiTool     `json:"tools,omitempty"`
+	Temperature float64       `json:"temperature,omitempty"`
+	Thinking    *thinkingConfig `json:"thinking,omitempty"`
 }
 
 // apiResponse is the wire format for Anthropic Messages API response.
@@ -116,9 +134,9 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 	apiReq := apiRequest{
 		Model:     req.Model,
 		MaxTokens: req.MaxTokens,
-		System:    req.System,
+		System:    buildSystem(req.System),
 		Messages:  buildMessages(req.Messages),
-		Tools:     req.Tools,
+		Tools:     buildTools(req.Tools),
 	}
 
 	if req.ThinkingBudget > 0 {
@@ -184,11 +202,49 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 		content = filtered
 	}
 
+	if apiResp.Usage.CacheReadTokens > 0 || apiResp.Usage.CacheCreationTokens > 0 {
+		p.logger.Info("prompt cache",
+			"cache_read", apiResp.Usage.CacheReadTokens,
+			"cache_write", apiResp.Usage.CacheCreationTokens,
+		)
+	}
+
 	return &bs.CompletionResponse{
 		Content:    content,
 		StopReason: apiResp.StopReason,
 		Usage:      apiResp.Usage,
 	}, nil
+}
+
+// buildSystem converts a system prompt string to the Anthropic array format with cache_control.
+// The minimum cacheable size is 1024 tokens (~3072 chars); we only add cache_control if met.
+func buildSystem(system string) []systemBlock {
+	if system == "" {
+		return nil
+	}
+	block := systemBlock{Type: "text", Text: system}
+	if len([]rune(system))/3 >= 1024 {
+		block.CacheControl = &cacheControl{Type: "ephemeral"}
+	}
+	return []systemBlock{block}
+}
+
+// buildTools converts ToolDefinitions to apiTools with cache_control on the last entry.
+func buildTools(tools []bs.ToolDefinition) []apiTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]apiTool, len(tools))
+	for i, t := range tools {
+		out[i] = apiTool{
+			Name:        t.Name,
+			Description: t.Description,
+			InputSchema: t.InputSchema,
+		}
+	}
+	// Mark the last tool — Anthropic caches everything up to and including the breakpoint.
+	out[len(out)-1].CacheControl = &cacheControl{Type: "ephemeral"}
+	return out
 }
 
 func buildMessages(messages []bs.Message) []apiMessage {

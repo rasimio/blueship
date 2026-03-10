@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/rasimio/blueship/internal/anthropic"
 	"github.com/rasimio/blueship/internal/gemini"
 	"github.com/rasimio/blueship/internal/gateway"
@@ -64,10 +66,18 @@ func (s *Ship) Run(ctx context.Context) error {
 		return fmt.Errorf("auto-migrate: %w", err)
 	}
 
-	// 3. Resolve owner user
-	uid, err := user.ResolveOwner(ctx, shipDB)
-	if err != nil {
-		return fmt.Errorf("resolve owner: %w", err)
+	// 3. Ensure/resolve owner user
+	var uid uuid.UUID
+	if s.cfg.Owner.ChatID != "" {
+		uid, err = user.EnsureOwner(ctx, shipDB, s.cfg.Owner.ChatID, s.cfg.Owner.DisplayName)
+		if err != nil {
+			return fmt.Errorf("ensure owner: %w", err)
+		}
+	} else {
+		uid, err = user.ResolveOwner(ctx, shipDB)
+		if err != nil {
+			return fmt.Errorf("resolve owner: %w", err)
+		}
 	}
 	deps.UserID = uid
 	s.logger.Info("running as owner", "user_id", uid.String())
@@ -182,6 +192,7 @@ func Gemini(apiKey string) CompletionProvider {
 func GeminiWithConfig(apiKey string, timeout time.Duration) CompletionProvider {
 	return gemini.NewCompletionProvider(apiKey, timeout)
 }
+
 
 
 // Telegram creates a TransportConfig for Telegram.

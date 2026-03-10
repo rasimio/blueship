@@ -69,3 +69,30 @@ func ResolveOwner(ctx context.Context, db *sqlx.DB) (uuid.UUID, error) {
 	}
 	return uuid.Parse(id)
 }
+
+// EnsureOwner creates or updates the owner user from config.
+// Returns the owner's UUID.
+func EnsureOwner(ctx context.Context, db *sqlx.DB, chatID, displayName string) (uuid.UUID, error) {
+	if chatID == "" {
+		return uuid.Nil, fmt.Errorf("owner chat_id not configured")
+	}
+	if displayName == "" {
+		displayName = "Owner"
+	}
+
+	// Upsert: create if not exists, update display_name if exists
+	var id string
+	err := db.GetContext(ctx, &id, `
+		INSERT INTO user_profiles (id, chat_id, display_name, trust_level, is_owner)
+		VALUES (gen_random_uuid(), $1, $2, 'close', true)
+		ON CONFLICT (chat_id) DO UPDATE SET
+			display_name = EXCLUDED.display_name,
+			is_owner = true,
+			updated_at = now()
+		RETURNING id
+	`, chatID, displayName)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("ensure owner: %w", err)
+	}
+	return uuid.Parse(id)
+}

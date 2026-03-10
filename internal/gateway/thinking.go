@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	"github.com/rasimio/blueship/agent"
-	"github.com/rasimio/blueship/internal/user"
 )
 
 // ThinkingJob runs autonomous thinking cycles for the owner user.
@@ -71,17 +70,11 @@ func (t *ThinkingJob) ensureOwner(ctx context.Context) (*UserState, error) {
 		return nil, fmt.Errorf("parse chat_id %s: %w", chatIDStr, err)
 	}
 
-	userID, err := user.ResolveByChatID(ctx, coreDB, chatIDStr)
-	if err != nil {
-		return nil, fmt.Errorf("resolve owner: %w", err)
-	}
-
-	// Initialize through gateway (same as getOrInitUser but we already have user info)
+	// Initialize through gateway — resolves user internally.
 	us, err := t.gateway.getOrInitUser(ctx, chatID)
 	if err != nil {
 		return nil, fmt.Errorf("init owner user %d: %w", chatID, err)
 	}
-	_ = userID // used implicitly by getOrInitUser
 
 	return us, nil
 }

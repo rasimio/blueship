@@ -134,6 +134,15 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
+	sysLen := len(req.System)
+	p.logger.Info("gemini API request",
+		"model", req.Model,
+		"messages", len(req.Messages),
+		"tools", len(req.Tools),
+		"system_len", sysLen,
+		"body_bytes", len(body),
+	)
+
 	url := fmt.Sprintf(p.generateURL, req.Model, p.apiKey)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {

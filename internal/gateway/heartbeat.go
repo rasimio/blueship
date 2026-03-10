@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/rasimio/blueship/agent"
-	"github.com/rasimio/blueship/internal/user"
 )
 
 // HeartbeatJob sends periodic heartbeat prompts through the AgentLoop for all registered users.
@@ -23,31 +22,25 @@ func NewHeartbeatJob(gw *Gateway) *HeartbeatJob {
 	}
 }
 
-// Run executes one heartbeat iteration for all registered users.
+// Run executes one heartbeat iteration for the owner.
 func (h *HeartbeatJob) Run(ctx context.Context) error {
 	hour := time.Now().In(h.tz).Hour()
 	if hour < 8 {
 		return nil
 	}
 
-	coreDB, err := h.gateway.deps.DB("ship")
-	if err != nil {
-		return err
+	us := h.gateway.GetOwnerUser()
+	if us == nil {
+		return nil
+	}
+	us.Mu.Lock()
+	busy := us.LoopBusy
+	us.Mu.Unlock()
+	if busy {
+		return nil
 	}
 
-	chatIDs, err := user.ListTelegramChatIDs(ctx, coreDB)
-	if err != nil {
-		return err
-	}
-
-	for _, chatID := range chatIDs {
-		us := h.gateway.GetUser(chatID)
-		if us == nil || us.LoopBusy {
-			continue
-		}
-
-		go h.runForUser(ctx, us)
-	}
+	go h.runForUser(ctx, us)
 	return nil
 }
 
@@ -74,7 +67,7 @@ func (h *HeartbeatJob) runForUser(ctx context.Context, us *UserState) {
 		SessionID:      sess.ID,
 		SystemPrompt:   h.gateway.systemPromptHeartbeat,
 		CompactSummary: derefString(sess.CompactSummary),
-			Model:          cfg.Models.Primary.Name,
+			Model:        cfg.Models.Primary.Name,
 		MaxTokens:      cfg.Limits.MaxOutputTokens,
 		MaxTurns:       cfg.Gateway.MaxTurns,
 	}, "heartbeat")

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 
 	"github.com/rasimio/blueship/agent"
 	bs "github.com/rasimio/blueship/core"
@@ -51,6 +52,7 @@ type UserState struct {
 	UserID   uuid.UUID
 	IsOwner  bool
 	Registry *bs.ToolRegistry
+	Deps     *bs.Deps // per-user deps (carries ContextInjector set by modules)
 	LoopBusy bool
 	debounce *debouncer
 
@@ -103,13 +105,80 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 		users:     make(map[int64]*UserState),
 	}
 
-	if cfg.Prompts != "" {
-		if err := gw.loadSystemPrompts(cfg.Prompts); err != nil {
-			return nil, fmt.Errorf("load system prompts: %w", err)
+	// Load system prompts: DB first, filesystem second, error if neither
+	dbErr := gw.loadSystemPromptsFromDB(coreDB)
+	if dbErr != nil {
+		if cfg.Prompts != "" {
+			gw.logger.Info("DB prompts not available, loading from filesystem", "error", dbErr)
+			if err := gw.loadSystemPrompts(cfg.Prompts); err != nil {
+				return nil, fmt.Errorf("load system prompts from filesystem: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("system prompts not configured: populate system_prompts table or set Prompts path (%w)", dbErr)
+		}
+	}
+
+	// Load compact prompt from filesystem (utility prompt, not personality)
+	if gw.compactor != nil && cfg.Prompts != "" {
+		compactPath := filepath.Join(cfg.Prompts, "prompts", "compact.md")
+		if data, err := os.ReadFile(compactPath); err == nil {
+			gw.compactor.SetSystemPrompt(string(data))
+		} else {
+			gw.logger.Warn("compact prompt not found", "path", compactPath)
 		}
 	}
 
 	return gw, nil
+}
+
+func (g *Gateway) loadSystemPromptsFromDB(db *sqlx.DB) error {
+	rows, err := db.Queryx("SELECT key, content FROM system_prompts WHERE content <> ''")
+	if err != nil {
+		return fmt.Errorf("query system_prompts: %w", err)
+	}
+	defer rows.Close()
+
+	prompts := make(map[string]string)
+	for rows.Next() {
+		var key, content string
+		if err := rows.Scan(&key, &content); err != nil {
+			return fmt.Errorf("scan row: %w", err)
+		}
+		prompts[key] = content
+	}
+
+	// Require at least preamble + soul + agents
+	for _, required := range []string{"preamble", "soul", "agents"} {
+		if prompts[required] == "" {
+			return fmt.Errorf("missing required prompt: %s", required)
+		}
+	}
+
+	preamble := prompts["preamble"] + "\n"
+	g.systemPrompt = preamble + prompts["soul"] + "\n\n" + prompts["agents"]
+	g.systemPromptHeartbeat = g.systemPrompt
+	if prompts["heartbeat"] != "" {
+		g.systemPromptHeartbeat = g.systemPrompt + "\n\n" + prompts["heartbeat"]
+	}
+	if prompts["thinking"] != "" {
+		g.systemPromptThinking = g.systemPrompt + "\n\n" + prompts["thinking"]
+	} else {
+		g.systemPromptThinking = g.systemPrompt
+	}
+
+	if g.compactor != nil && prompts["compact"] != "" {
+		g.compactor.SetSystemPrompt(prompts["compact"])
+	}
+
+	g.logger.Info("system prompts loaded from DB",
+		"preamble", len(prompts["preamble"]),
+		"soul", len(prompts["soul"]),
+		"agents", len(prompts["agents"]),
+		"heartbeat", len(prompts["heartbeat"]),
+		"thinking", len(prompts["thinking"]),
+		"compact", len(prompts["compact"]),
+	)
+	return nil
 }
 
 func (g *Gateway) loadSystemPrompts(workspacePath string) error {
@@ -140,16 +209,6 @@ func (g *Gateway) loadSystemPrompts(workspacePath string) error {
 	} else {
 		g.logger.Warn("THINKING.md not found, thinking will use regular system prompt", "path", filepath.Join(workspacePath, "THINKING.md"))
 		g.systemPromptThinking = g.systemPrompt
-	}
-
-	// Load compact prompt (optional — compactor works without it but with empty system prompt)
-	if g.compactor != nil {
-		compactPath := filepath.Join(workspacePath, "prompts", "compact.md")
-		if data, err := os.ReadFile(compactPath); err == nil {
-			g.compactor.SetSystemPrompt(string(data))
-		} else {
-			g.logger.Warn("compact prompt not found, compaction will use empty system prompt", "path", compactPath)
-		}
 	}
 
 	return nil
@@ -315,8 +374,17 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID int64) (*UserState, 
 	}
 
 	var isOwner bool
-	coreDB.GetContext(ctx, &isOwner,
-		`SELECT is_owner FROM user_profiles WHERE id = $1`, userID.String())
+	if err := coreDB.GetContext(ctx, &isOwner,
+		`SELECT is_owner FROM user_profiles WHERE id = $1`, userID.String()); err != nil {
+		g.logger.Warn("is_owner lookup failed, defaulting to false", "user_id", userID, "error", err)
+	}
+
+	// Single-user mode: reject non-owner messages
+	if !isOwner {
+		g.logger.Info("rejected non-owner message", "chat_id", chatID, "user_id", userID.String())
+		_ = g.tg.SendLong(ctx, chatID, "This bot is private.")
+		return nil, fmt.Errorf("non-owner user rejected")
+	}
 
 	userDeps := g.deps.ForUser(userID, chatIDStr, isOwner)
 	registry := bs.NewToolRegistry()
@@ -328,6 +396,7 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID int64) (*UserState, 
 		UserID:   userID,
 		IsOwner:  isOwner,
 		Registry: registry,
+		Deps:     userDeps,
 	}
 
 	us.debounce = newDebouncer(g.deps.Config.Gateway.DebounceWindow, g.deps.Config.Gateway.DebounceCap, func(msgs []pendingMsg) {
@@ -349,6 +418,18 @@ func (g *Gateway) GetUser(chatID int64) *UserState {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.users[chatID]
+}
+
+// GetOwnerUser returns the owner's UserState, or nil if not yet initialized.
+func (g *Gateway) GetOwnerUser() *UserState {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, us := range g.users {
+		if us.IsOwner {
+			return us
+		}
+	}
+	return nil
 }
 
 func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pendingMsg) {
@@ -403,6 +484,23 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		"blocks", len(blocks),
 	)
 
+	// Build injected memory context from AME (if configured by memory module).
+	injectedCtx := ""
+	if us.Deps != nil && us.Deps.ContextInjector != nil {
+		msgText := ""
+		for _, m := range msgs {
+			if m.text != "" {
+				if msgText != "" {
+					msgText += " "
+				}
+				msgText += m.text
+			}
+		}
+		if msgText != "" {
+			injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText)
+		}
+	}
+
 	loop := agent.NewLoop(g.provider, g.store, us.Registry, g.deps.Config, g.logger)
 	loop.SetCompactor(g.compactor)
 
@@ -413,6 +511,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		Model:          g.deps.Config.Models.Primary.Name,
 		MaxTokens:      g.deps.Config.Limits.MaxOutputTokens,
 		MaxTurns:       g.deps.Config.Gateway.MaxTurns,
+		InjectedContext: injectedCtx,
 	}, content)
 	if err != nil {
 		g.logger.Error("agent loop error",
@@ -499,11 +598,6 @@ func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 	if commit == "" {
 		commit = "local"
 	}
-
-	apiKey := ""
-	maskedKey := "***"
-	_ = apiKey
-	_ = maskedKey
 
 	realTokens := sess.TokenCount * 2
 	maxTokens := 200000
