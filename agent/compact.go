@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	bs "github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/session"
 )
 
 // SummaryHeader is prepended to the compaction summary when injected into the system prompt.
@@ -92,7 +91,7 @@ func (c *Compactor) summarize(ctx context.Context, dialogue string) (string, err
 	if err != nil {
 		return "", err
 	}
-	return session.ExtractText(resp.Content), nil
+	return bs.ExtractText(resp.Content), nil
 }
 
 func estimateMessagesTokens(messages []bs.Message) int {

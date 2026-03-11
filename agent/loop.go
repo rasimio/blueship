@@ -8,13 +8,12 @@ import (
 	"strings"
 
 	bs "github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/session"
 )
 
 // Loop orchestrates the send → tool_use → dispatch → loop cycle.
 type Loop struct {
 	provider  bs.CompletionProvider
-	store     *session.Store
+	store     bs.MessageStore
 	registry  *bs.ToolRegistry
 	compactor *Compactor // nil = disabled
 	logger    *slog.Logger
@@ -35,7 +34,7 @@ type RunConfig struct {
 }
 
 // NewLoop creates a new agent loop.
-func NewLoop(provider bs.CompletionProvider, store *session.Store, registry *bs.ToolRegistry, cfg *bs.Config, logger *slog.Logger) *Loop {
+func NewLoop(provider bs.CompletionProvider, store bs.MessageStore, registry *bs.ToolRegistry, cfg *bs.Config, logger *slog.Logger) *Loop {
 	return &Loop{
 		provider: provider,
 		store:    store,
@@ -65,7 +64,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 	}
 
 	// 1. Append user message
-	_, err := a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: userMessage})
+	err := a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: userMessage})
 	if err != nil {
 		return "", fmt.Errorf("append user message: %w", err)
 	}
@@ -151,7 +150,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 		)
 
 		// 5. Store assistant response
-		_, err = a.store.AppendWithTokens(ctx, cfg.SessionID, bs.Message{
+		err = a.store.AppendWithTokens(ctx, cfg.SessionID, bs.Message{
 			Role:    "assistant",
 			Content: resp.Content,
 		}, resp.Usage.OutputTokens)
@@ -160,7 +159,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 		}
 
 		// Collect text from this turn
-		if turnText := session.ExtractText(resp.Content); turnText != "" {
+		if turnText := bs.ExtractText(resp.Content); turnText != "" {
 			if accumulated.Len() > 0 {
 				accumulated.WriteString("\n\n")
 			}
@@ -194,7 +193,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 				})
 			}
 
-			_, err = a.store.Append(ctx, cfg.SessionID, bs.Message{
+			err = a.store.Append(ctx, cfg.SessionID, bs.Message{
 				Role:    "user",
 				Content: toolResults,
 			})

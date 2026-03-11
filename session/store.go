@@ -72,15 +72,26 @@ func (s *Store) Archive(ctx context.Context, sessionID string) error {
 }
 
 // Append adds a message to a session.
-func (s *Store) Append(ctx context.Context, sessionID string, msg bs.Message) (*Message, error) {
+// Satisfies core.MessageStore.
+func (s *Store) Append(ctx context.Context, sessionID string, msg bs.Message) error {
 	blocks := bs.NormalizeContent(msg.Content)
 	tokens := bs.EstimateTokens(blocks)
-	return s.appendInternal(ctx, sessionID, msg.Role, blocks, nil, tokens)
+	_, err := s.appendInternal(ctx, sessionID, msg.Role, blocks, nil, tokens)
+	return err
 }
 
 // AppendWithTokens adds a message with a known token count (e.g., from API usage).
-func (s *Store) AppendWithTokens(ctx context.Context, sessionID string, msg bs.Message, tokens int) (*Message, error) {
+// Satisfies core.MessageStore.
+func (s *Store) AppendWithTokens(ctx context.Context, sessionID string, msg bs.Message, tokens int) error {
 	blocks := bs.NormalizeContent(msg.Content)
+	_, err := s.appendInternal(ctx, sessionID, msg.Role, blocks, nil, tokens)
+	return err
+}
+
+// AppendReturning adds a message and returns the stored Message (for CLI/debug use).
+func (s *Store) AppendReturning(ctx context.Context, sessionID string, msg bs.Message) (*Message, error) {
+	blocks := bs.NormalizeContent(msg.Content)
+	tokens := bs.EstimateTokens(blocks)
 	return s.appendInternal(ctx, sessionID, msg.Role, blocks, nil, tokens)
 }
 

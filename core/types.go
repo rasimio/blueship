@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"strings"
 )
 
 // Message represents a message in LLM conversation format (role + content).
@@ -49,6 +50,17 @@ type Usage struct {
 
 // ToolHandler processes a tool call and returns a result or error.
 type ToolHandler func(ctx context.Context, input json.RawMessage) (any, error)
+
+// ExtractText returns concatenated text from response content blocks.
+func ExtractText(content []ContentBlock) string {
+	var parts []string
+	for _, block := range content {
+		if block.Type == "text" && block.Text != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
 
 // NormalizeContent converts content to the canonical []ContentBlock format.
 // string → []{type:"text", text:s}; []ContentBlock → as-is; already JSON array → decode.
