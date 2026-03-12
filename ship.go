@@ -234,6 +234,11 @@ func Serper(apiKey string) SearchEngine {
 	return web.NewSerperSearch(apiKey)
 }
 
+// NewHTTPFetcher creates a WebFetcher that downloads and extracts text from web pages.
+func NewHTTPFetcher() WebFetcher {
+	return web.NewHTTPFetcher()
+}
+
 // Whisper creates a TranscriptionProvider using OpenAI Whisper.
 func Whisper(apiKey string) TranscriptionProvider {
 	return openai.NewTranscriptionProvider(apiKey, "whisper-1", 30*time.Second)

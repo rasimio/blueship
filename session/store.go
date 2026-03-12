@@ -23,14 +23,32 @@ func NewStore(db *sqlx.DB) *Store {
 
 // Create creates a new chat session.
 func (s *Store) Create(ctx context.Context, userID, model string) (*Session, error) {
+	return s.CreateWithPrevious(ctx, userID, model, "")
+}
+
+// CreateWithPrevious creates a new session linked to a previous one.
+func (s *Store) CreateWithPrevious(ctx context.Context, userID, model, previousID string) (*Session, error) {
 	var sess Session
-	err := s.db.QueryRowxContext(ctx,
-		`INSERT INTO chat_sessions (user_id, model)
-		 VALUES ($1, $2)
-		 RETURNING id, user_id, title, model, system_prompt_hash,
-		           token_count, message_count, compact_summary, active, created_at, updated_at`,
-		userID, model,
-	).StructScan(&sess)
+	var err error
+	if previousID != "" {
+		// Archive the previous session
+		s.db.ExecContext(ctx,
+			`UPDATE chat_sessions SET active = false, updated_at = NOW() WHERE id = $1`,
+			previousID)
+		err = s.db.QueryRowxContext(ctx,
+			`INSERT INTO chat_sessions (user_id, model, previous_id)
+			 VALUES ($1, $2, $3)
+			 RETURNING *`,
+			userID, model, previousID,
+		).StructScan(&sess)
+	} else {
+		err = s.db.QueryRowxContext(ctx,
+			`INSERT INTO chat_sessions (user_id, model)
+			 VALUES ($1, $2)
+			 RETURNING *`,
+			userID, model,
+		).StructScan(&sess)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create session: %w", err)
 	}
@@ -41,9 +59,7 @@ func (s *Store) Create(ctx context.Context, userID, model string) (*Session, err
 func (s *Store) GetOrCreate(ctx context.Context, userID, model string) (*Session, error) {
 	var sess Session
 	err := s.db.GetContext(ctx, &sess,
-		`SELECT id, user_id, title, model, system_prompt_hash,
-		        token_count, message_count, compact_summary, active, created_at, updated_at
-		 FROM chat_sessions
+		`SELECT * FROM chat_sessions
 		 WHERE user_id = $1 AND active = true
 		 ORDER BY updated_at DESC
 		 LIMIT 1`,
@@ -268,13 +284,52 @@ func (s *Store) MessagesSince(ctx context.Context, userID string, since time.Tim
 	return msgs, nil
 }
 
+// ChainMessages returns messages across a session chain (following previous_id links).
+// Messages are returned newest-first for cursor pagination.
+// Use `before` (created_at timestamp) as cursor; pass zero time for first page.
+func (s *Store) ChainMessages(ctx context.Context, sessionID string, limit int, before time.Time) ([]Message, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	query := `
+		WITH RECURSIVE chain AS (
+			SELECT id FROM chat_sessions WHERE id = $1
+			UNION ALL
+			SELECT cs.previous_id FROM chat_sessions cs
+			JOIN chain c ON c.id = cs.id
+			WHERE cs.previous_id IS NOT NULL
+		)
+		SELECT m.id, m.session_id, m.role, m.content, m.tool_use_id, m.token_estimate, m.created_at
+		FROM chat_messages m
+		WHERE m.session_id IN (SELECT id FROM chain)`
+
+	args := []any{sessionID}
+	if !before.IsZero() {
+		query += ` AND m.created_at < $2 ORDER BY m.created_at DESC LIMIT $3`
+		args = append(args, before, limit)
+	} else {
+		query += ` ORDER BY m.created_at DESC LIMIT $2`
+		args = append(args, limit)
+	}
+
+	var msgs []Message
+	if err := s.db.SelectContext(ctx, &msgs, query, args...); err != nil {
+		return nil, fmt.Errorf("chain messages: %w", err)
+	}
+
+	// Reverse to chronological order
+	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
+		msgs[i], msgs[j] = msgs[j], msgs[i]
+	}
+	return msgs, nil
+}
+
 // ListActive returns all active sessions for a user.
 func (s *Store) ListActive(ctx context.Context, userID string) ([]Session, error) {
 	var sessions []Session
 	err := s.db.SelectContext(ctx, &sessions,
-		`SELECT id, user_id, title, model, system_prompt_hash,
-		        token_count, message_count, compact_summary, active, created_at, updated_at
-		 FROM chat_sessions
+		`SELECT * FROM chat_sessions
 		 WHERE user_id = $1 AND active = true
 		 ORDER BY updated_at DESC`,
 		userID,
