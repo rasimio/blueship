@@ -31,6 +31,9 @@ type Deps struct {
 	LLM      CompletionProvider // nil = LLM features disabled
 	Sender   MessageSender      // nil = message sending disabled
 
+	// ModelStore reads model assignments from DB (nil = use Config.Models).
+	ModelStore *ModelConfigStore
+
 	// ContextInjector is called before the first LLM turn to inject per-request context
 	// (e.g. memory traces). Returns empty string to skip injection.
 	ContextInjector func(ctx context.Context, userID, message string) string
@@ -57,6 +60,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		Embedder:        d.Embedder,
 		LLM:             d.LLM,
 		Sender:          d.Sender,
+		ModelStore:      d.ModelStore,
 		ContextInjector: d.ContextInjector,
 		pool:            d.pool,
 	}

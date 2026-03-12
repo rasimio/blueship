@@ -313,6 +313,10 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 		go g.handleSessionCommand(ctx, chatID)
 		return
 	}
+	if text == "/reset" {
+		go g.handleResetCommand(ctx, chatID)
+		return
+	}
 
 	us, err := g.getOrInitUser(ctx, chatID)
 	if err != nil {
@@ -508,7 +512,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		SessionID:      sess.ID,
 		SystemPrompt:   g.systemPrompt,
 		CompactSummary: derefString(sess.CompactSummary),
-		Model:          g.deps.Config.Models.Primary.Name,
+		Model:          g.primaryModel(),
 		MaxTokens:      g.deps.Config.Limits.MaxOutputTokens,
 		MaxTurns:       g.deps.Config.Gateway.MaxTurns,
 		InjectedContext: injectedCtx,
@@ -545,7 +549,8 @@ func (g *Gateway) keepTyping(ctx context.Context, chatID int64) {
 
 // GetOrCreateSession gets or creates a session with daily reset.
 func (g *Gateway) GetOrCreateSession(ctx context.Context, us *UserState) (*session.Session, error) {
-	sess, err := g.store.GetOrCreate(ctx, us.UserID.String(), g.deps.Config.Models.Primary.Name)
+	model := g.primaryModelDisplay()
+	sess, err := g.store.GetOrCreate(ctx, us.UserID.String(), model)
 	if err != nil {
 		return nil, err
 	}
@@ -555,7 +560,7 @@ func (g *Gateway) GetOrCreateSession(ctx context.Context, us *UserState) (*sessi
 		if err := g.store.Archive(ctx, sess.ID); err != nil {
 			return nil, fmt.Errorf("archive old session: %w", err)
 		}
-		return g.store.Create(ctx, us.UserID.String(), g.deps.Config.Models.Primary.Name)
+		return g.store.Create(ctx, us.UserID.String(), model)
 	}
 
 	return sess, nil
@@ -617,7 +622,7 @@ func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 			"🧵 %s · updated %s ago\n"+
 			"⚙️ Runtime: telegram · Compact threshold: %dk",
 		buildDate, commit,
-		g.deps.Config.Models.Primary.Name,
+		g.primaryModelDisplay(),
 		sess.MessageCount, sess.TokenCount/1000,
 		realTokens/1000, maxTokens/1000, pct,
 		shortID(sess.ID), ago,
@@ -631,6 +636,63 @@ func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 
 	if err := g.tg.SendLong(ctx, chatID, msg); err != nil {
 		g.logger.Error("session command: send error", "error", err)
+	}
+}
+
+// primaryModel returns the current primary model in "provider:name" format.
+// Reads from ModelStore (DB) first, falls back to Config.
+func (g *Gateway) primaryModel() string {
+	if g.deps.ModelStore != nil {
+		if s := g.deps.ModelStore.ForRouter("primary"); s != "" {
+			return s
+		}
+	}
+	p := g.deps.Config.Models.Primary
+	if p.Provider != "" {
+		return p.Provider + ":" + p.Name
+	}
+	return p.Name
+}
+
+// primaryModelDisplay returns a human-readable model name (without provider prefix).
+func (g *Gateway) primaryModelDisplay() string {
+	if g.deps.ModelStore != nil {
+		if ref := g.deps.ModelStore.Get("primary"); ref.Name != "" {
+			return ref.Name
+		}
+	}
+	return g.deps.Config.Models.Primary.Name
+}
+
+func (g *Gateway) handleResetCommand(ctx context.Context, chatID int64) {
+	us, err := g.getOrInitUser(ctx, chatID)
+	if err != nil {
+		g.logger.Debug("reset command: ignored", "chat_id", chatID, "error", err)
+		return
+	}
+
+	// Refresh model config from DB
+	if g.deps.ModelStore != nil {
+		if err := g.deps.ModelStore.Refresh(ctx); err != nil {
+			g.logger.Warn("reset: failed to refresh model config", "error", err)
+		}
+	}
+
+	// Archive current session
+	sess, err := g.store.GetOrCreate(ctx, us.UserID.String(), g.primaryModel())
+	if err == nil && sess != nil {
+		_ = g.store.Archive(ctx, sess.ID)
+		g.logger.Info("reset: archived session",
+			"chat_id", chatID,
+			"session_id", sess.ID,
+			"messages", sess.MessageCount,
+		)
+	}
+
+	model := g.primaryModelDisplay()
+	msg := fmt.Sprintf("Session reset.\nModel: %s", model)
+	if err := g.tg.SendLong(ctx, chatID, msg); err != nil {
+		g.logger.Error("reset command: send error", "error", err)
 	}
 }
 

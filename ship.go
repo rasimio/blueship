@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/anthropic"
 	"github.com/rasimio/blueship/internal/gemini"
 	"github.com/rasimio/blueship/internal/gateway"
@@ -64,6 +65,21 @@ func (s *Ship) Run(ctx context.Context) error {
 	}
 	if err := migrate.Run(shipDB, s.logger); err != nil {
 		return fmt.Errorf("auto-migrate: %w", err)
+	}
+
+	// 2b. Load model config from DB (overrides Config.Models at runtime)
+	modelStore := core.NewModelConfigStore(shipDB)
+	if err := modelStore.Load(ctx); err != nil {
+		s.logger.Warn("model_config not loaded, using config defaults", "error", err)
+	} else {
+		deps.ModelStore = modelStore
+		// Override Config.Models so all consumers see DB values
+		if ref := modelStore.Get("primary"); ref.Name != "" {
+			deps.Config.Models.Primary = ref
+		}
+		if ref := modelStore.Get("compact"); ref.Name != "" {
+			deps.Config.Models.Compact = ref
+		}
 	}
 
 	// 3. Ensure/resolve owner user
