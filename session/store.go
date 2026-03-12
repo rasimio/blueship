@@ -55,6 +55,17 @@ func (s *Store) GetOrCreate(ctx context.Context, userID, model string) (*Session
 	return s.Create(ctx, userID, model)
 }
 
+// IsActive checks if a session exists and is active.
+func (s *Store) IsActive(ctx context.Context, sessionID string) (bool, error) {
+	var active bool
+	err := s.db.GetContext(ctx, &active,
+		`SELECT active FROM chat_sessions WHERE id = $1`, sessionID)
+	if err != nil {
+		return false, err
+	}
+	return active, nil
+}
+
 // Archive marks a session as inactive.
 func (s *Store) Archive(ctx context.Context, sessionID string) error {
 	res, err := s.db.ExecContext(ctx,
