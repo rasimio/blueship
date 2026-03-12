@@ -122,7 +122,8 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 		retryable := strings.Contains(errMsg, "503") ||
 			strings.Contains(errMsg, "429") ||
 			strings.Contains(errMsg, "deadline exceeded") ||
-			strings.Contains(errMsg, "context canceled")
+			strings.Contains(errMsg, "context canceled") ||
+			strings.Contains(errMsg, "gemini empty")
 		if !retryable {
 			return nil, err
 		}
