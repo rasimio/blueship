@@ -549,6 +549,9 @@ func (g *Gateway) keepTyping(ctx context.Context, chatID int64) {
 
 // GetOrCreateSession gets or creates a session with daily reset.
 func (g *Gateway) GetOrCreateSession(ctx context.Context, us *UserState) (*session.Session, error) {
+	if g.deps.ModelStore != nil {
+		_ = g.deps.ModelStore.Refresh(ctx)
+	}
 	model := g.primaryModelDisplay()
 	sess, err := g.store.GetOrCreate(ctx, us.UserID.String(), model)
 	if err != nil {
