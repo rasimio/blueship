@@ -34,6 +34,10 @@ type Deps struct {
 	// ModelStore reads model assignments from DB (nil = use Config.Models).
 	ModelStore *ModelConfigStore
 
+	// Stores provide access to ship DB data without modules querying ship DB directly.
+	Prompts  PromptStore // system_prompts table (nil = not available)
+	Users    UserStore   // user_profiles table (nil = not available)
+
 	// ContextInjector is called before the first LLM turn to inject per-request context
 	// (e.g. memory traces). Returns empty string to skip injection.
 	ContextInjector func(ctx context.Context, userID, message string) string
@@ -61,6 +65,8 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		LLM:             d.LLM,
 		Sender:          d.Sender,
 		ModelStore:      d.ModelStore,
+		Prompts:         d.Prompts,
+		Users:           d.Users,
 		ContextInjector: d.ContextInjector,
 		pool:            d.pool,
 	}

@@ -82,6 +82,10 @@ func (s *Ship) Run(ctx context.Context) error {
 		}
 	}
 
+	// 2c. Initialize stores for ship DB data (prompts, users).
+	deps.Prompts = core.NewPromptStore(shipDB)
+	deps.Users = core.NewUserStore(shipDB)
+
 	// 3. Ensure/resolve owner user
 	var uid uuid.UUID
 	if s.cfg.Owner.ChatID != "" {
