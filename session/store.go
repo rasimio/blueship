@@ -268,8 +268,9 @@ func (s *Store) AllMessagesForAPI(ctx context.Context, sessionID string) ([]bs.M
 }
 
 // MessagesSince returns messages for a user since a given time (across all sessions).
-func (s *Store) MessagesSince(ctx context.Context, userID string, since time.Time) ([]Message, error) {
-	var msgs []Message
+// Satisfies core.SessionQuerier (returns []bs.SessionMessage).
+func (s *Store) MessagesSince(ctx context.Context, userID string, since time.Time) ([]bs.SessionMessage, error) {
+	var msgs []bs.SessionMessage
 	err := s.db.SelectContext(ctx, &msgs,
 		`SELECT m.id, m.session_id, m.role, m.content, m.tool_use_id, m.token_estimate, m.created_at
 		 FROM chat_messages m
@@ -503,6 +504,9 @@ func sanitizeOrphanedToolUse(msgs []bs.Message) []bs.Message {
 	}
 	return msgs
 }
+
+// Verify Store satisfies core.SessionQuerier at compile time.
+var _ bs.SessionQuerier = (*Store)(nil)
 
 // extractText returns concatenated text from response content blocks.
 func ExtractText(content []bs.ContentBlock) string {

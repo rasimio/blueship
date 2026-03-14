@@ -35,8 +35,9 @@ type Deps struct {
 	ModelStore *ModelConfigStore
 
 	// Stores provide access to ship DB data without modules querying ship DB directly.
-	Prompts  PromptStore // system_prompts table (nil = not available)
-	Users    UserStore   // user_profiles table (nil = not available)
+	Prompts  PromptStore    // system_prompts table (nil = not available)
+	Users    UserStore      // user_profiles table (nil = not available)
+	Sessions SessionQuerier // chat_messages/chat_sessions (nil = not available)
 
 	// ContextInjector is called before the first LLM turn to inject per-request context
 	// (e.g. memory traces). Returns empty string to skip injection.
@@ -67,6 +68,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		ModelStore:      d.ModelStore,
 		Prompts:         d.Prompts,
 		Users:           d.Users,
+		Sessions:        d.Sessions,
 		ContextInjector: d.ContextInjector,
 		pool:            d.pool,
 	}

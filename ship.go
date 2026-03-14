@@ -20,6 +20,7 @@ import (
 	"github.com/rasimio/blueship/internal/user"
 	"github.com/rasimio/blueship/internal/web"
 	"github.com/rasimio/blueship/migrate"
+	"github.com/rasimio/blueship/session"
 )
 
 // Ship is the main BlueShip runtime instance.
@@ -82,9 +83,10 @@ func (s *Ship) Run(ctx context.Context) error {
 		}
 	}
 
-	// 2c. Initialize stores for ship DB data (prompts, users).
+	// 2c. Initialize stores for ship DB data (prompts, users, sessions).
 	deps.Prompts = core.NewPromptStore(shipDB)
 	deps.Users = core.NewUserStore(shipDB)
+	deps.Sessions = session.NewStore(shipDB)
 
 	// 3. Ensure/resolve owner user
 	var uid uuid.UUID
