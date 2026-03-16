@@ -326,6 +326,33 @@ func (s *Store) ChainMessages(ctx context.Context, sessionID string, limit int, 
 	return msgs, nil
 }
 
+// LastMessages returns the most recent user/assistant message for each of the given session IDs.
+func (s *Store) LastMessages(ctx context.Context, sessionIDs []string) (map[string]Message, error) {
+	if len(sessionIDs) == 0 {
+		return nil, nil
+	}
+	query, args, err := sqlx.In(`
+		SELECT DISTINCT ON (session_id) id, session_id, role, content, tool_use_id, token_estimate, created_at
+		FROM chat_messages
+		WHERE session_id IN (?) AND role IN ('user', 'assistant')
+		ORDER BY session_id, created_at DESC`, sessionIDs)
+	if err != nil {
+		return nil, fmt.Errorf("build IN query: %w", err)
+	}
+	query = s.db.Rebind(query)
+
+	var msgs []Message
+	if err := s.db.SelectContext(ctx, &msgs, query, args...); err != nil {
+		return nil, fmt.Errorf("last messages: %w", err)
+	}
+
+	result := make(map[string]Message, len(msgs))
+	for _, m := range msgs {
+		result[m.SessionID] = m
+	}
+	return result, nil
+}
+
 // ListActive returns all active sessions for a user.
 func (s *Store) ListActive(ctx context.Context, userID string) ([]Session, error) {
 	var sessions []Session
