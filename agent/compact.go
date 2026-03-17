@@ -32,7 +32,7 @@ func NewCompactor(provider bs.CompletionProvider, cfg *bs.Config, logger *slog.L
 	return &Compactor{
 		provider:   provider,
 		logger:     logger,
-		model:      cfg.Models.Compact.Name,
+		model:      cfg.Models.Compact.ForRouter(),
 		maxTokens:  cfg.Limits.CompactOutput,
 		threshold:  cfg.Limits.CompactThreshold,
 		keepTokens: cfg.Limits.CompactKeep,

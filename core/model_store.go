@@ -61,10 +61,7 @@ func (s *ModelConfigStore) ForRouter(role string) string {
 	if ref.Name == "" {
 		return ""
 	}
-	if ref.Provider != "" {
-		return ref.Provider + ":" + ref.Name
-	}
-	return ref.Name
+	return ref.ForRouter()
 }
 
 // Refresh reloads config from DB. Call after /reset or DB update.

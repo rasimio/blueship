@@ -53,6 +53,14 @@ type ModelRef struct {
 	Name     string
 }
 
+// ForRouter returns "provider:name" for use with LLMRouter.
+func (r ModelRef) ForRouter() string {
+	if r.Provider != "" {
+		return r.Provider + ":" + r.Name
+	}
+	return r.Name
+}
+
 // ModelsConfig defines which models to use for each role.
 type ModelsConfig struct {
 	Primary ModelRef // agent loop (default: "claude-haiku-4-5-20251001")
