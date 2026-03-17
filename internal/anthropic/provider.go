@@ -18,14 +18,13 @@ const messagesURL = "https://api.anthropic.com/v1/messages"
 
 // Provider implements bs.CompletionProvider using the Anthropic Messages API.
 type Provider struct {
-	apiKey     string // protected by oauth.mu when oauth != nil
+	apiKey     string
 	httpClient *http.Client
 	logger     *slog.Logger
 	backoffs   []time.Duration
-	oauth      *oauthState // nil for static API key
 }
 
-// NewProvider creates a new Anthropic CompletionProvider with a static API key.
+// NewProvider creates a new Anthropic CompletionProvider.
 func NewProvider(apiKey string, timeout time.Duration, backoffs []time.Duration, logger *slog.Logger) *Provider {
 	return &Provider{
 		apiKey:     apiKey,
@@ -35,69 +34,9 @@ func NewProvider(apiKey string, timeout time.Duration, backoffs []time.Duration,
 	}
 }
 
-// NewOAuthProvider creates a CompletionProvider with OAuth token refresh.
-// The accessToken can be empty — it will be obtained via refresh on first use.
-func NewOAuthProvider(accessToken string, oauth OAuthConfig, timeout time.Duration, backoffs []time.Duration, logger *slog.Logger) *Provider {
-	return &Provider{
-		apiKey:     accessToken,
-		httpClient: &http.Client{Timeout: timeout},
-		logger:     logger,
-		backoffs:   backoffs,
-		oauth:      newOAuthState(oauth),
-	}
-}
-
-// getToken returns the current API key, proactively refreshing if near expiry.
-func (p *Provider) getToken() string {
-	if p.oauth == nil {
-		return p.apiKey
-	}
-	p.oauth.mu.Lock()
-	defer p.oauth.mu.Unlock()
-	if p.oauth.needsRefresh() {
-		if token, err := p.oauth.doRefresh(); err == nil {
-			p.apiKey = token
-			p.logger.Info("oauth token refreshed proactively")
-		} else {
-			p.logger.Error("oauth proactive refresh failed, using current token", "error", err)
-		}
-	}
-	return p.apiKey
-}
-
-// forceRefresh forces an OAuth token refresh (e.g. after a 401).
-func (p *Provider) forceRefresh() error {
-	if p.oauth == nil {
-		return fmt.Errorf("no oauth configured")
-	}
-	p.oauth.mu.Lock()
-	defer p.oauth.mu.Unlock()
-	token, err := p.oauth.doRefresh()
-	if err != nil {
-		return err
-	}
-	p.apiKey = token
-	return nil
-}
-
 // Complete sends a completion request to the Anthropic Messages API.
-// On auth errors with OAuth configured, refreshes the token and retries.
+// Includes built-in retry on rate_limit and overloaded errors.
 func (p *Provider) Complete(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
-	resp, err := p.completeWithRetry(ctx, req)
-	if err != nil && p.oauth != nil && isAuthError(err) {
-		p.logger.Info("auth error, attempting oauth token refresh")
-		if refreshErr := p.forceRefresh(); refreshErr != nil {
-			p.logger.Error("oauth token refresh failed", "error", refreshErr)
-			return nil, fmt.Errorf("%w (refresh also failed: %v)", err, refreshErr)
-		}
-		p.logger.Info("oauth token refreshed, retrying request")
-		return p.completeWithRetry(ctx, req)
-	}
-	return resp, err
-}
-
-// completeWithRetry handles rate_limit and overloaded retries.
-func (p *Provider) completeWithRetry(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
 	var lastErr error
 	for attempt := 0; attempt <= len(p.backoffs); attempt++ {
 		resp, err := p.sendOnce(ctx, req)
@@ -127,11 +66,6 @@ func (p *Provider) completeWithRetry(ctx context.Context, req bs.CompletionReque
 	}
 
 	return nil, fmt.Errorf("anthropic API failed after %d retries: %w", len(p.backoffs), lastErr)
-}
-
-func isAuthError(err error) bool {
-	msg := err.Error()
-	return strings.Contains(msg, "authentication_error") || strings.Contains(msg, "status 401")
 }
 
 // thinkingConfig controls extended thinking in the API request.
@@ -232,7 +166,7 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.getToken())
+	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 	httpReq.Header.Set("anthropic-beta", "oauth-2025-04-20")
 

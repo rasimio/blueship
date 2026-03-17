@@ -179,9 +179,6 @@ func (r *moduleRegistry) RegisterAllTools(registry *ToolRegistry, d *Deps) {
 
 // --- Convenience constructors for Config ---
 
-// OAuthConfig re-exports anthropic.OAuthConfig for external use.
-type OAuthConfig = anthropic.OAuthConfig
-
 // Anthropic creates a CompletionProvider using the Anthropic Messages API.
 func Anthropic(apiKey string) CompletionProvider {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -197,23 +194,6 @@ func Anthropic(apiKey string) CompletionProvider {
 func AnthropicWithConfig(apiKey string, timeout time.Duration, backoffs []time.Duration) CompletionProvider {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	return anthropic.NewProvider(apiKey, timeout, backoffs, logger)
-}
-
-// AnthropicOAuth creates a CompletionProvider with OAuth token refresh.
-func AnthropicOAuth(refreshToken string, oauth OAuthConfig) CompletionProvider {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	return anthropic.NewOAuthProvider(
-		"", oauth,
-		120*time.Second,
-		[]time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second},
-		logger,
-	)
-}
-
-// AnthropicOAuthWithConfig creates a CompletionProvider with OAuth and custom settings.
-func AnthropicOAuthWithConfig(oauth OAuthConfig, timeout time.Duration, backoffs []time.Duration) CompletionProvider {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	return anthropic.NewOAuthProvider("", oauth, timeout, backoffs, logger)
 }
 // OpenAI creates a CompletionProvider using OpenAI Chat Completions.
 func OpenAI(apiKey string) CompletionProvider {
