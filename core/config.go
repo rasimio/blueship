@@ -101,6 +101,7 @@ type GatewayConfig struct {
 	SessionResetHour int           // default: 4 (4am)
 	MaxTurns         int           // default: 15
 	DisableThinking  bool          // default: false (thinking job runs every hour)
+	Debug            bool          // send errors to owner via Telegram instead of "Sorry..."
 }
 
 // applyDefaults fills in zero values with sensible defaults.

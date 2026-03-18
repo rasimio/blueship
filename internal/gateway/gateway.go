@@ -436,6 +436,31 @@ func (g *Gateway) GetOwnerUser() *UserState {
 	return nil
 }
 
+// sendDebugError sends the actual error to the owner via Telegram when debug mode is on.
+// For non-owner users, always sends the generic "Sorry" message.
+func (g *Gateway) sendDebugError(ctx context.Context, chatID int64, source string, err error) {
+	if g.deps.Config.Gateway.Debug {
+		msg := fmt.Sprintf("[%s] %v", source, err)
+		g.tg.SendLong(ctx, chatID, msg)
+	} else {
+		g.tg.SendLong(ctx, chatID, "Sorry, something went wrong internally.")
+	}
+}
+
+// notifyOwnerError sends an error to the owner's DM (for background jobs).
+// Only sends when debug mode is on. Does nothing if owner is not initialized.
+func (g *Gateway) notifyOwnerError(ctx context.Context, source string, err error) {
+	if !g.deps.Config.Gateway.Debug {
+		return
+	}
+	owner := g.GetOwnerUser()
+	if owner == nil {
+		return
+	}
+	msg := fmt.Sprintf("[%s] %v", source, err)
+	g.tg.SendLong(ctx, owner.ChatID, msg)
+}
+
 func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pendingMsg) {
 	// Cancel any running thinking loop so we can process user message immediately.
 	us.Mu.Lock()
@@ -477,7 +502,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	sess, err := g.GetOrCreateSession(ctx, us)
 	if err != nil {
 		g.logger.Error("session error", "error", err)
-		g.tg.SendLong(ctx, us.ChatID, "Internal error: failed to get session")
+		g.sendDebugError(ctx, us.ChatID, "session", err)
 		return
 	}
 
@@ -522,7 +547,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			"chat_id", us.ChatID,
 			"error", err,
 		)
-		g.tg.SendLong(ctx, us.ChatID, "Sorry, something went wrong internally.")
+		g.sendDebugError(ctx, us.ChatID, "agent", err)
 		return
 	}
 

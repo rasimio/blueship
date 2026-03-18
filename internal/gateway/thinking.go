@@ -112,6 +112,7 @@ func (t *ThinkingJob) runForOwner(ctx context.Context, us *UserState) {
 			"chat_id", us.ChatID,
 			"error", err,
 		)
+		t.gateway.notifyOwnerError(ctx, "thinking/session", err)
 		return
 	}
 
@@ -135,6 +136,7 @@ func (t *ThinkingJob) runForOwner(ctx context.Context, us *UserState) {
 			"chat_id", us.ChatID,
 			"error", err,
 		)
+		t.gateway.notifyOwnerError(ctx, "thinking/agent", err)
 		return
 	}
 

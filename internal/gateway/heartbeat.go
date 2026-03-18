@@ -56,6 +56,7 @@ func (h *HeartbeatJob) runForUser(ctx context.Context, us *UserState) {
 			"chat_id", us.ChatID,
 			"error", err,
 		)
+		h.gateway.notifyOwnerError(ctx, "heartbeat/session", err)
 		return
 	}
 
@@ -76,6 +77,7 @@ func (h *HeartbeatJob) runForUser(ctx context.Context, us *UserState) {
 			"chat_id", us.ChatID,
 			"error", err,
 		)
+		h.gateway.notifyOwnerError(ctx, "heartbeat/agent", err)
 		return
 	}
 
