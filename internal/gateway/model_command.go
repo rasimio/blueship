@@ -9,22 +9,21 @@ import (
 	"github.com/rasimio/blueship/internal/telegram"
 )
 
-// Available models grouped by provider.
-var availableModels = map[string][]string{
-	"gemini": {
-		"gemini-2.5-pro",
-		"gemini-2.5-flash",
-		"gemini-3.1-pro-preview",
-	},
-	"anthropic": {
-		"claude-sonnet-4-6",
-		"claude-opus-4-6",
-		"claude-haiku-4-5-20251001",
-	},
-	"openai": {
-		"gpt-4o",
-		"gpt-4o-mini",
-	},
+// loadAvailableModels reads available_models from the ship DB.
+func loadAvailableModels(db interface{ Select(dest interface{}, query string, args ...interface{}) error }) map[string][]string {
+	type row struct {
+		Provider string `db:"provider"`
+		Name     string `db:"name"`
+	}
+	var rows []row
+	if err := db.Select(&rows, "SELECT provider, name FROM available_models ORDER BY provider, name"); err != nil {
+		return nil
+	}
+	m := make(map[string][]string)
+	for _, r := range rows {
+		m[r.Provider] = append(m[r.Provider], r.Name)
+	}
+	return m
 }
 
 // handleModelCommand sends inline keyboard with role selection.
@@ -105,15 +104,22 @@ func (g *Gateway) showModelPicker(ctx context.Context, chatID int64, messageID i
 	current := g.deps.ModelStore.Get(role)
 	currentKey := current.Provider + ":" + current.Name
 
+	// Load models from DB
+	shipDB, err := g.deps.DB("ship")
+	models := map[string][]string{}
+	if err == nil {
+		models = loadAvailableModels(shipDB)
+	}
+
 	// Sort providers for consistent order
-	providers := make([]string, 0, len(availableModels))
-	for p := range availableModels {
+	providers := make([]string, 0, len(models))
+	for p := range models {
 		providers = append(providers, p)
 	}
 	sort.Strings(providers)
 
 	for _, provider := range providers {
-		models := availableModels[provider]
+		models := models[provider]
 		for _, model := range models {
 			key := provider + ":" + model
 			label := key
