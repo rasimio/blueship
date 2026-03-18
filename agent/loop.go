@@ -130,6 +130,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 		}
 
 		// 4. Call LLM
+		a.logger.Info("calling LLM", "model", cfg.Model, "tools", len(tools), "messages", len(messages))
 		resp, err := a.provider.Complete(ctx, bs.CompletionRequest{
 			Model:          cfg.Model,
 			MaxTokens:      cfg.MaxTokens,
