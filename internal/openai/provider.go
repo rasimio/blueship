@@ -16,9 +16,10 @@ const defaultBaseURL = "https://api.openai.com/v1"
 
 // CompletionProvider implements bs.CompletionProvider using OpenAI-compatible Chat Completions.
 type CompletionProvider struct {
-	apiKey     string
-	baseURL    string
-	httpClient *http.Client
+	apiKey      string
+	baseURL     string
+	httpClient  *http.Client
+	extraParams map[string]any // additional JSON fields merged into every request
 }
 
 // NewCompletionProvider creates a new OpenAI completion provider.
@@ -31,11 +32,13 @@ func NewCompletionProvider(apiKey string, timeout time.Duration) *CompletionProv
 }
 
 // NewCompatibleProvider creates a provider for any OpenAI-compatible API (MLX, vLLM, Ollama, etc.).
-func NewCompatibleProvider(baseURL string, apiKey string, timeout time.Duration) *CompletionProvider {
+// extraParams are merged into every request JSON (e.g. {"chat_template_kwargs": {"enable_thinking": false}}).
+func NewCompatibleProvider(baseURL string, apiKey string, timeout time.Duration, extraParams map[string]any) *CompletionProvider {
 	return &CompletionProvider{
-		apiKey:     apiKey,
-		baseURL:    baseURL,
-		httpClient: &http.Client{Timeout: timeout},
+		apiKey:      apiKey,
+		baseURL:     baseURL,
+		httpClient:  &http.Client{Timeout: timeout},
+		extraParams: extraParams,
 	}
 }
 
@@ -108,6 +111,16 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	// Merge extra params (e.g. chat_template_kwargs) into request JSON.
+	if len(p.extraParams) > 0 {
+		var m map[string]any
+		json.Unmarshal(body, &m)
+		for k, v := range p.extraParams {
+			m[k] = v
+		}
+		body, _ = json.Marshal(m)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
