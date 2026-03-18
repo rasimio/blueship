@@ -92,6 +92,76 @@ func (c *Client) SendMessage(ctx context.Context, chatID string, text string) (*
 	return &result, nil
 }
 
+// InlineKeyboardButton represents one button in an inline keyboard.
+type InlineKeyboardButton struct {
+	Text         string `json:"text"`
+	CallbackData string `json:"callback_data"`
+}
+
+// SendMessageWithKeyboard sends a message with an inline keyboard.
+func (c *Client) SendMessageWithKeyboard(ctx context.Context, chatID int64, text string, rows [][]InlineKeyboardButton) (*SendMessageResult, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("telegram bot not configured")
+	}
+	payload := map[string]any{
+		"chat_id":    chatID,
+		"text":       text,
+		"parse_mode": "HTML",
+		"reply_markup": map[string]any{
+			"inline_keyboard": rows,
+		},
+	}
+	return c.postJSON(ctx, "sendMessage", payload)
+}
+
+// EditMessageText edits an existing message's text and keyboard.
+func (c *Client) EditMessageText(ctx context.Context, chatID int64, messageID int, text string, rows [][]InlineKeyboardButton) error {
+	if !c.IsConfigured() {
+		return fmt.Errorf("telegram bot not configured")
+	}
+	payload := map[string]any{
+		"chat_id":    chatID,
+		"message_id": messageID,
+		"text":       text,
+		"parse_mode": "HTML",
+	}
+	if rows != nil {
+		payload["reply_markup"] = map[string]any{"inline_keyboard": rows}
+	} else {
+		payload["reply_markup"] = map[string]any{"inline_keyboard": []any{}}
+	}
+	_, err := c.postJSON(ctx, "editMessageText", payload)
+	return err
+}
+
+// AnswerCallbackQuery answers a callback query (removes loading spinner).
+func (c *Client) AnswerCallbackQuery(ctx context.Context, callbackID string) error {
+	if !c.IsConfigured() {
+		return nil
+	}
+	payload := map[string]any{"callback_query_id": callbackID}
+	_, err := c.postJSON(ctx, "answerCallbackQuery", payload)
+	return err
+}
+
+func (c *Client) postJSON(ctx context.Context, method string, payload map[string]any) (*SendMessageResult, error) {
+	body, _ := json.Marshal(payload)
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/%s", c.token, method)
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var result SendMessageResult
+	json.NewDecoder(resp.Body).Decode(&result)
+	return &result, nil
+}
+
 // SetReaction sets an emoji reaction on a message.
 func (c *Client) SetReaction(ctx context.Context, chatID int64, messageID int, emoji string) error {
 	if !c.IsConfigured() {

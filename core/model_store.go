@@ -64,6 +64,28 @@ func (s *ModelConfigStore) ForRouter(role string) string {
 	return ref.ForRouter()
 }
 
+// Update sets the model for a given role in DB and refreshes the cache.
+func (s *ModelConfigStore) Update(ctx context.Context, role, provider, modelName string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE model_config SET provider = $1, model_name = $2, updated_at = NOW() WHERE role = $3`,
+		provider, modelName, role)
+	if err != nil {
+		return err
+	}
+	return s.Load(ctx)
+}
+
+// Roles returns all configured role names.
+func (s *ModelConfigStore) Roles() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	roles := make([]string, 0, len(s.cache))
+	for role := range s.cache {
+		roles = append(roles, role)
+	}
+	return roles
+}
+
 // Refresh reloads config from DB. Call after /reset or DB update.
 func (s *ModelConfigStore) Refresh(ctx context.Context) error {
 	return s.Load(ctx)

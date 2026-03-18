@@ -232,6 +232,15 @@ func (g *Gateway) Run(ctx context.Context) {
 }
 
 func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
+	// Handle callback queries (inline button presses)
+	if cq := update.CallbackQuery; cq != nil {
+		g.tg.AnswerCallbackQuery(ctx, cq.ID)
+		if g.handleModelCallback(ctx, cq) {
+			return
+		}
+		return
+	}
+
 	msg := update.Message
 	if msg == nil || msg.From == nil {
 		return
@@ -315,6 +324,10 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 	}
 	if text == "/reset" {
 		go g.handleResetCommand(ctx, chatID)
+		return
+	}
+	if text == "/model" {
+		go g.handleModelCommand(ctx, chatID)
 		return
 	}
 

@@ -34,7 +34,7 @@ type getUpdatesResponse struct {
 // Poll makes a single getUpdates call and returns updates.
 func (p *Poller) Poll(ctx context.Context) ([]Update, error) {
 	url := fmt.Sprintf(
-		"https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=30&allowed_updates=[\"message\"]",
+		"https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=30&allowed_updates=[\"message\",\"callback_query\"]",
 		p.token, p.offset,
 	)
 
