@@ -12,11 +12,12 @@ import (
 	bs "github.com/rasimio/blueship/core"
 )
 
-const chatCompletionsURL = "https://api.openai.com/v1/chat/completions"
+const defaultBaseURL = "https://api.openai.com/v1"
 
-// CompletionProvider implements bs.CompletionProvider using OpenAI Chat Completions.
+// CompletionProvider implements bs.CompletionProvider using OpenAI-compatible Chat Completions.
 type CompletionProvider struct {
 	apiKey     string
+	baseURL    string
 	httpClient *http.Client
 }
 
@@ -24,6 +25,16 @@ type CompletionProvider struct {
 func NewCompletionProvider(apiKey string, timeout time.Duration) *CompletionProvider {
 	return &CompletionProvider{
 		apiKey:     apiKey,
+		baseURL:    defaultBaseURL,
+		httpClient: &http.Client{Timeout: timeout},
+	}
+}
+
+// NewCompatibleProvider creates a provider for any OpenAI-compatible API (MLX, vLLM, Ollama, etc.).
+func NewCompatibleProvider(baseURL string, apiKey string, timeout time.Duration) *CompletionProvider {
+	return &CompletionProvider{
+		apiKey:     apiKey,
+		baseURL:    baseURL,
 		httpClient: &http.Client{Timeout: timeout},
 	}
 }
@@ -79,12 +90,8 @@ type chatCompletionResponse struct {
 	Error *apiError `json:"error,omitempty"`
 }
 
-// Complete sends a completion request to OpenAI.
+// Complete sends a completion request to an OpenAI-compatible endpoint.
 func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
-	if p.apiKey == "" {
-		return nil, fmt.Errorf("openai not configured: missing API key")
-	}
-
 	messages := buildMessages(req.System, req.Messages)
 	tools := buildTools(req.Tools)
 
@@ -103,12 +110,14 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", chatCompletionsURL, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	if p.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {

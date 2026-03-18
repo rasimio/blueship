@@ -205,6 +205,12 @@ func OpenAIWithConfig(apiKey string, timeout time.Duration) CompletionProvider {
 	return openai.NewCompletionProvider(apiKey, timeout)
 }
 
+// OpenAICompatible creates a CompletionProvider for any OpenAI-compatible API
+// (MLX, vLLM, Ollama, LM Studio, etc.). Pass empty apiKey if auth is not required.
+func OpenAICompatible(baseURL, apiKey string, timeout time.Duration) CompletionProvider {
+	return openai.NewCompatibleProvider(baseURL, apiKey, timeout)
+}
+
 // Gemini creates a CompletionProvider using Gemini generateContent.
 func Gemini(apiKey string) CompletionProvider {
 	return gemini.NewCompletionProvider(apiKey, 120*time.Second)
