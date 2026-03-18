@@ -9,7 +9,7 @@ type Config struct {
 	LLM       CompletionProvider // e.g. blueship.Anthropic(apiKey)
 	Transport TransportConfig    // e.g. blueship.Telegram(botToken)
 	DB        string             // PostgreSQL DSN (app database)
-	ShipDB    string             // BlueShip's own database name (default: same as DB)
+	ShipSchema string            // Schema for BlueShip tables (default: "" = public)
 
 	// --- Optional providers (nil = disabled) ---
 	Embedder    EmbeddingProvider      // default: nil (embedding features disabled)

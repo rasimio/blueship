@@ -15,9 +15,27 @@ import (
 var migrations embed.FS
 
 // Run applies all pending migrations in order.
+// The db connection must already have the correct search_path set (via DSN).
 // Files with .optional.sql suffix: errors are logged as warnings, not fatal.
 // File naming convention: NNN_name.sql — NNN prefix determines execution order.
 func Run(db *sqlx.DB, logger *slog.Logger) error {
+	// 0. Ensure schema exists (read search_path from connection)
+	var sp string
+	if err := db.QueryRow("SHOW search_path").Scan(&sp); err == nil {
+		// sp looks like: "ship, public" or "\"$user\", public"
+		parts := strings.Split(sp, ",")
+		for _, p := range parts {
+			s := strings.TrimSpace(strings.Trim(strings.TrimSpace(p), `"`))
+			if s != "" && s != "public" && s != "$user" && s != `"$user"` {
+				if _, err := db.Exec(fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", s)); err != nil {
+					return fmt.Errorf("create schema %s: %w", s, err)
+				}
+				logger.Info("ensured schema exists", "schema", s)
+				break
+			}
+		}
+	}
+
 	// 1. Create tracking table
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS blueship_migrations (
 		version    TEXT PRIMARY KEY,

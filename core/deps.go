@@ -88,11 +88,12 @@ func (d *Deps) Close() {
 }
 
 // dbPool holds lazily-opened database connections, safe for concurrent use.
+// Each module gets its own connection with a schema-specific search_path.
 type dbPool struct {
-	mu        sync.Mutex
-	dbs       map[string]*sqlx.DB
-	dsn       string            // base DSN (app database)
-	overrides map[string]string // module → custom DSN
+	mu      sync.Mutex
+	dbs     map[string]*sqlx.DB
+	dsn     string            // base DSN (single database)
+	schemas map[string]string // module → schema name (empty = public)
 }
 
 func (p *dbPool) get(module string) (*sqlx.DB, error) {
@@ -104,11 +105,15 @@ func (p *dbPool) get(module string) (*sqlx.DB, error) {
 	}
 
 	dsn := p.dsn
-	if override, ok := p.overrides[module]; ok {
-		dsn = override
+	schema := ""
+	if s, ok := p.schemas[module]; ok {
+		schema = s
 	} else if module != "core" && module != "" {
-		// Append module suffix to database name.
-		dsn = appendDBSuffix(dsn, module)
+		schema = module
+	}
+
+	if schema != "" {
+		dsn = withSearchPath(dsn, schema)
 	}
 
 	db, err := sqlx.Connect("postgres", dsn)
@@ -122,47 +127,23 @@ func (p *dbPool) get(module string) (*sqlx.DB, error) {
 	return db, nil
 }
 
-// appendDBSuffix adds _<suffix> to the dbname in a PostgreSQL DSN.
-// Handles URI format: postgres://user:pass@host:port/dbname?params
-// and key=value format: host=localhost dbname=mydb ...
-func appendDBSuffix(dsn, suffix string) string {
+// withSearchPath appends search_path=<schema>,public to a PostgreSQL DSN.
+// lib/pq passes unknown connection parameters as SET commands on connect,
+// so every pooled connection automatically gets the correct search_path.
+func withSearchPath(dsn, schema string) string {
+	sp := schema + ",public"
 	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
 		u, err := url.Parse(dsn)
 		if err != nil {
 			return dsn
 		}
-		u.Path = strings.TrimPrefix(u.Path, "/") + "_" + suffix
-		u.Path = "/" + u.Path
-		return u.String()
-	}
-	// key=value format: replace dbname=X with dbname=X_suffix
-	if strings.Contains(dsn, "dbname=") {
-		return strings.Replace(dsn, "dbname=", "dbname="+suffix+"_", 1)
-	}
-	return dsn + " dbname=" + suffix
-}
-
-// replaceDBName replaces the database name in a PostgreSQL DSN.
-func replaceDBName(dsn, newName string) string {
-	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
-		u, err := url.Parse(dsn)
-		if err != nil {
-			return dsn
-		}
-		u.Path = "/" + newName
+		q := u.Query()
+		q.Set("search_path", sp)
+		u.RawQuery = q.Encode()
 		return u.String()
 	}
 	// key=value format
-	if strings.Contains(dsn, "dbname=") {
-		// Replace existing dbname value (up to next space or end of string)
-		parts := strings.SplitN(dsn, "dbname=", 2)
-		after := parts[1]
-		if idx := strings.IndexByte(after, ' '); idx >= 0 {
-			return parts[0] + "dbname=" + newName + after[idx:]
-		}
-		return parts[0] + "dbname=" + newName
-	}
-	return dsn + " dbname=" + newName
+	return dsn + " search_path=" + sp
 }
 
 // initDeps creates Deps from a Config. Used internally by Ship.Run().
@@ -180,13 +161,10 @@ func InitDeps(cfg *Config, logger *slog.Logger) (*Deps, error) {
 		}
 	}
 
-	// Build DSN overrides. "ship" gets its own database if configured,
-	// otherwise falls back to the base (app) database.
-	overrides := make(map[string]string)
-	if cfg.ShipDB != "" {
-		overrides["ship"] = replaceDBName(cfg.DB, cfg.ShipDB)
-	} else {
-		overrides["ship"] = cfg.DB
+	// Build schema map. "ship" gets its own schema if configured.
+	schemas := make(map[string]string)
+	if cfg.ShipSchema != "" {
+		schemas["ship"] = cfg.ShipSchema
 	}
 
 	return &Deps{
@@ -197,9 +175,9 @@ func InitDeps(cfg *Config, logger *slog.Logger) (*Deps, error) {
 		LLM:      cfg.LLM,
 		Sender:   cfg.Sender,
 		pool: &dbPool{
-			dbs:       make(map[string]*sqlx.DB),
-			dsn:       cfg.DB,
-			overrides: overrides,
+			dbs:     make(map[string]*sqlx.DB),
+			dsn:     cfg.DB,
+			schemas: schemas,
 		},
 	}, nil
 }
