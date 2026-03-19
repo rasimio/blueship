@@ -773,15 +773,15 @@ func (g *Gateway) extractInsight(ctx context.Context, response, extractType stri
 		return truncateStr(response, 200) // fallback
 	}
 
-	prompt := fmt.Sprintf(`Extract one concise %s (1-2 sentences, max 150 chars) from this AI assistant's response. Return ONLY the insight text, no quotes, no explanation.
+	prompt := fmt.Sprintf(`Извлеки один краткий вывод (%s, 1-2 предложения, макс 150 символов) из этого ответа AI-ассистента. Верни ТОЛЬКО текст вывода на том же языке что и ответ, без кавычек, без пояснений.
 
-Response:
+Ответ:
 %s`, extractType, truncateStr(response, 1500))
 
 	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
 		Model:     model,
 		MaxTokens: 128,
-		System:    "You extract concise insights. Return only the insight text.",
+		System:    "Ты извлекаешь краткие выводы. Возвращай только текст вывода, на языке оригинала.",
 		Messages:  []bs.Message{{Role: "user", Content: prompt}},
 	})
 	if err != nil {
