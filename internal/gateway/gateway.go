@@ -573,9 +573,14 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	loop := agent.NewLoop(g.provider, g.store, us.Registry, g.deps.RoleTools, g.deps.Config, g.logger)
 	loop.SetCompactor(g.compactor)
 
+	// Inject current datetime into system prompt so the model always knows "today".
+	now := time.Now().In(g.tz)
+	systemWithTime := fmt.Sprintf("[current_datetime: %s]\n\n%s",
+		now.Format("2006-01-02 15:04 MST (Monday)"), g.systemPrompt)
+
 	reply, err := loop.Run(ctx, agent.RunConfig{
 		SessionID:       sess.ID,
-		SystemPrompt:    g.systemPrompt,
+		SystemPrompt:    systemWithTime,
 		CompactSummary:  derefString(sess.CompactSummary),
 		Model:           g.cortexModel(),
 		MaxTokens:       g.deps.Config.Limits.MaxOutputTokens,
