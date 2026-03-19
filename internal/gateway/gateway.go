@@ -691,9 +691,6 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		}
 		fmt.Fprintf(&researchBlock, "[%s result]\n%s\n\n", pa.Tool, truncateStr(result, 2000))
 	}
-	if researchBlock.Len() > 0 {
-		researchBlock.WriteString("[/research]")
-	}
 
 	// Expand matched rules into directive block.
 	var guidance strings.Builder
@@ -717,24 +714,41 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		guidance.WriteString(researchBlock.String())
 	}
 
-	// Tool override. Always include current_time if any calendar tool is selected —
-	// without it the model doesn't know today's date and picks wrong dates.
+	// Tool override.
 	var toolOverride []string
 	if reflexResult.Tools != nil {
 		toolOverride = reflexResult.Tools
+		// If date-sensitive tools are selected, inject current_time into research block
+		// as a pre-action (Qwen ignores current_time as a tool and guesses dates).
 		needsTime := false
-		hasTime := false
 		for _, t := range toolOverride {
 			if strings.HasPrefix(t, "calendar_") || strings.HasPrefix(t, "tasks_") || strings.HasPrefix(t, "deadlines_") {
 				needsTime = true
-			}
-			if t == "current_time" {
-				hasTime = true
+				break
 			}
 		}
-		if needsTime && !hasTime {
-			toolOverride = append([]string{"current_time"}, toolOverride...)
+		if needsTime {
+			timeResult, isErr := us.Registry.Execute(ctx, "current_time", json.RawMessage(`{}`))
+			if !isErr {
+				if researchBlock.Len() == 0 {
+					researchBlock.WriteString("[research]\n")
+				}
+				fmt.Fprintf(&researchBlock, "[current_time]\n%s\n\n", timeResult)
+				g.logger.Info("auto-injected current_time into context")
+			}
 		}
+		// Remove current_time from tools — it's already in context.
+		var filtered []string
+		for _, t := range toolOverride {
+			if t != "current_time" {
+				filtered = append(filtered, t)
+			}
+		}
+		toolOverride = filtered
+	}
+	// Close research block if anything was added (pre-actions or auto-injected time).
+	if researchBlock.Len() > 0 {
+		researchBlock.WriteString("[/research]")
 	}
 
 	return rc.FormattedTraces, guidance.String(), toolOverride, reflexResult.PostActions
