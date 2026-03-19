@@ -124,10 +124,10 @@ func (t *ThinkingJob) runForOwner(ctx context.Context, us *UserState) {
 		SessionID:      sess.ID,
 		SystemPrompt:   t.gateway.SystemPromptThinking(),
 		CompactSummary: derefString(sess.CompactSummary),
-		Model:          t.gateway.primaryModel(),
+		Model:          t.gateway.cortexModel(),
 		MaxTokens:      cfg.Limits.MaxOutputTokens,
 		MaxTurns:       cfg.Gateway.MaxTurns,
-		Role:           "primary",
+		Role:           "cortex",
 	}, "[SYSTEM: autonomous thinking cycle — это НЕ сообщение от пользователя. Пользователь тебе НЕ писал. Следуй инструкциям THINKING.]")
 	if err != nil {
 		if thinkCtx.Err() != nil {

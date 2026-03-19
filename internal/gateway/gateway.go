@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -526,21 +527,27 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		"blocks", len(blocks),
 	)
 
-	// Build injected memory context from AME (if configured by memory module).
-	injectedCtx := ""
-	if us.Deps != nil && us.Deps.ContextInjector != nil {
-		msgText := ""
-		for _, m := range msgs {
-			if m.text != "" {
-				if msgText != "" {
-					msgText += " "
-				}
-				msgText += m.text
+	// Collect message text for context injection.
+	msgText := ""
+	for _, m := range msgs {
+		if m.text != "" {
+			if msgText != "" {
+				msgText += " "
 			}
+			msgText += m.text
 		}
-		if msgText != "" {
-			injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText)
-		}
+	}
+
+	// Build context and run reflex/cortex pipeline.
+	var injectedCtx, reflexGuidance string
+	var toolOverride []string // nil = use role default
+
+	if msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil && g.reflexModel() != "" {
+		// Reflex/Cortex pipeline: structured context → reflex classification → filtered cortex input.
+		injectedCtx, reflexGuidance, toolOverride = g.runReflexPipeline(ctx, us, msgText)
+	} else if msgText != "" && us.Deps != nil && us.Deps.ContextInjector != nil {
+		// Fallback: legacy ContextInjector (no reflex).
+		injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText)
 	}
 
 	loop := agent.NewLoop(g.provider, g.store, us.Registry, g.deps.RoleTools, g.deps.Config, g.logger)
@@ -550,11 +557,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		SessionID:       sess.ID,
 		SystemPrompt:    g.systemPrompt,
 		CompactSummary:  derefString(sess.CompactSummary),
-		Model:           g.primaryModel(),
+		Model:           g.cortexModel(),
 		MaxTokens:       g.deps.Config.Limits.MaxOutputTokens,
 		MaxTurns:        g.deps.Config.Gateway.MaxTurns,
 		InjectedContext: injectedCtx,
-		Role:            "primary",
+		ReflexGuidance:  reflexGuidance,
+		Role:            "cortex",
+		ToolOverride:    toolOverride,
 	}, content)
 	if err != nil {
 		g.logger.Error("agent loop error",
@@ -570,6 +579,133 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			g.logger.Error("send reply error", "chat_id", us.ChatID, "error", err)
 		}
 	}
+}
+
+const reflexConfidenceThreshold = 0.7
+
+// runReflexPipeline executes the System 1/2 pipeline:
+// 1. ReflexPreparer → structured context (traces + candidate rules)
+// 2. Reflex LLM (Gemini Flash) → classification (matched rules, tools, confidence)
+// 3. If confidence > threshold: filtered context + tool override
+// 4. If confidence <= threshold: full context + role default tools
+// Returns (injectedContext, reflexGuidance, toolOverride).
+func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText string) (string, string, []string) {
+	rc := us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText)
+	if rc == nil {
+		return "", "", nil
+	}
+
+	// Build reflex prompt with candidate rules
+	if len(rc.CandidateRules) == 0 {
+		// No rules to classify — skip reflex, use full context.
+		return rc.FullContext, "", nil
+	}
+
+	var rulesBlock strings.Builder
+	for _, r := range rc.CandidateRules {
+		fmt.Fprintf(&rulesBlock, "[%s] WHEN: %s → DO: %s (sr=%.0f%%)\n",
+			r.ID, r.Trigger, r.Action, r.SuccessRate*100)
+	}
+
+	reflexPrompt := fmt.Sprintf(`Classify the user message. Match applicable rules. Select needed tools.
+
+## Rules
+%s
+## Available Tools
+memory_save, memory_self_save, memory_search, memory_associate, memory_correct, tasks_list, tasks_create, tasks_update, deadlines_check
+
+## Message
+%s
+
+Return JSON only, no markdown:
+{"matched_rules":["id1"],"tools":["memory_save"],"intent":"casual_chat","confidence":0.9}
+Rules: include IDs of rules whose triggers match this specific message. Empty array if none match.
+Tools: include tool names only if this message requires tool use. Empty array if just conversation.
+Intent: one of casual_chat, task_management, memory_operation, free_reflection, emotional_support, information_request.
+Confidence: 0.0-1.0 how sure you are about your classification.`, rulesBlock.String(), msgText)
+
+	reflexResult, err := g.callReflex(ctx, reflexPrompt)
+	if err != nil {
+		g.logger.Warn("reflex failed, using full context", "error", err)
+		return rc.FullContext, "", nil
+	}
+
+	g.logger.Info("reflex result",
+		"intent", reflexResult.Intent,
+		"confidence", reflexResult.Confidence,
+		"matched_rules", len(reflexResult.MatchedRules),
+		"tools", reflexResult.Tools,
+	)
+
+	// Low confidence → fallback to full context.
+	if reflexResult.Confidence < reflexConfidenceThreshold {
+		g.logger.Info("reflex low confidence, using full context",
+			"confidence", reflexResult.Confidence,
+			"threshold", reflexConfidenceThreshold,
+		)
+		return rc.FullContext, "", nil
+	}
+
+	// High confidence → build filtered context.
+	// Expand matched rules into directive block.
+	var guidance strings.Builder
+	if len(reflexResult.MatchedRules) > 0 {
+		matchedSet := make(map[string]bool, len(reflexResult.MatchedRules))
+		for _, id := range reflexResult.MatchedRules {
+			matchedSet[id] = true
+		}
+		guidance.WriteString("[active rules]\n")
+		for _, r := range rc.CandidateRules {
+			if matchedSet[r.ID] {
+				fmt.Fprintf(&guidance, "WHEN: %s\nDO: %s\n\n", r.Trigger, r.Action)
+			}
+		}
+		guidance.WriteString("[/active rules]")
+	}
+
+	// Tool override: use reflex selection if non-nil.
+	var toolOverride []string
+	if reflexResult.Tools != nil {
+		toolOverride = reflexResult.Tools
+	}
+
+	return rc.FormattedTraces, guidance.String(), toolOverride
+}
+
+// callReflex sends a classification request to the reflex model and parses JSON.
+func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResult, error) {
+	model := g.reflexModel()
+	if model == "" {
+		return nil, fmt.Errorf("reflex model not configured")
+	}
+
+	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
+		Model:     model,
+		MaxTokens: 256,
+		System:    "You are a message classifier. Return valid JSON only, no markdown fences.",
+		Messages: []bs.Message{
+			{Role: "user", Content: prompt},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reflex LLM: %w", err)
+	}
+
+	text := bs.ExtractText(resp.Content)
+	// Strip markdown fences if present.
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "```") {
+		lines := strings.Split(text, "\n")
+		if len(lines) > 2 {
+			text = strings.Join(lines[1:len(lines)-1], "\n")
+		}
+	}
+
+	var result bs.ReflexResult
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		return nil, fmt.Errorf("parse reflex JSON %q: %w", text, err)
+	}
+	return &result, nil
 }
 
 func (g *Gateway) keepTyping(ctx context.Context, chatID int64) {
@@ -591,7 +727,7 @@ func (g *Gateway) GetOrCreateSession(ctx context.Context, us *UserState) (*sessi
 	if g.deps.ModelStore != nil {
 		_ = g.deps.ModelStore.Refresh(ctx)
 	}
-	model := g.primaryModelDisplay()
+	model := g.cortexModelDisplay()
 	sess, err := g.store.GetOrCreate(ctx, us.UserID.String(), model)
 	if err != nil {
 		return nil, err
@@ -664,7 +800,7 @@ func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 			"🧵 %s · updated %s ago\n"+
 			"⚙️ Runtime: telegram · Compact threshold: %dk",
 		buildDate, commit,
-		g.primaryModelDisplay(),
+		g.cortexModelDisplay(),
 		sess.MessageCount, sess.TokenCount/1000,
 		contextTokens/1000, maxContext/1000, pct,
 		shortID(sess.ID), ago,
@@ -681,14 +817,14 @@ func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 	}
 }
 
-// primaryModel returns the current primary model in "provider:name" format.
-// Reads from ModelStore (DB) first, falls back to Config.
-func (g *Gateway) primaryModel() string {
+// cortexModel returns the cortex (response generator) model in "provider:name" format.
+func (g *Gateway) cortexModel() string {
 	if g.deps.ModelStore != nil {
-		if s := g.deps.ModelStore.ForRouter("primary"); s != "" {
+		if s := g.deps.ModelStore.ForRouter("cortex"); s != "" {
 			return s
 		}
 	}
+	// Fallback to Config.Models.Primary (backwards compat)
 	p := g.deps.Config.Models.Primary
 	if p.Provider != "" {
 		return p.Provider + ":" + p.Name
@@ -696,9 +832,18 @@ func (g *Gateway) primaryModel() string {
 	return p.Name
 }
 
-func (g *Gateway) primaryModelDisplay() string {
+// reflexModel returns the reflex (classifier) model in "provider:name" format.
+// Returns empty string if reflex is not configured.
+func (g *Gateway) reflexModel() string {
 	if g.deps.ModelStore != nil {
-		if ref := g.deps.ModelStore.Get("primary"); ref.Name != "" {
+		return g.deps.ModelStore.ForRouter("reflex")
+	}
+	return ""
+}
+
+func (g *Gateway) cortexModelDisplay() string {
+	if g.deps.ModelStore != nil {
+		if ref := g.deps.ModelStore.Get("cortex"); ref.Name != "" {
 			return ref.Name
 		}
 	}
@@ -725,7 +870,7 @@ func (g *Gateway) handleResetCommand(ctx context.Context, chatID int64) {
 	}
 
 	// Archive current session
-	sess, err := g.store.GetOrCreate(ctx, us.UserID.String(), g.primaryModel())
+	sess, err := g.store.GetOrCreate(ctx, us.UserID.String(), g.cortexModel())
 	if err == nil && sess != nil {
 		_ = g.store.Archive(ctx, sess.ID)
 		g.logger.Info("reset: archived session",
@@ -735,7 +880,7 @@ func (g *Gateway) handleResetCommand(ctx context.Context, chatID int64) {
 		)
 	}
 
-	model := g.primaryModelDisplay()
+	model := g.cortexModelDisplay()
 	msg := fmt.Sprintf("Session reset.\nModel: %s", model)
 	if err := g.tg.SendLong(ctx, chatID, msg); err != nil {
 		g.logger.Error("reset command: send error", "error", err)

@@ -68,7 +68,7 @@ func (h *HeartbeatJob) runForUser(ctx context.Context, us *UserState) {
 		SessionID:      sess.ID,
 		SystemPrompt:   h.gateway.systemPromptHeartbeat,
 		CompactSummary: derefString(sess.CompactSummary),
-		Model:          h.gateway.primaryModel(),
+		Model:          h.gateway.cortexModel(),
 		MaxTokens:      cfg.Limits.MaxOutputTokens,
 		MaxTurns:       cfg.Gateway.MaxTurns,
 		Role:           "background",

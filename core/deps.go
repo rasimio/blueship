@@ -46,6 +46,11 @@ type Deps struct {
 	// (e.g. memory traces). Returns empty string to skip injection.
 	ContextInjector func(ctx context.Context, userID, message string) string
 
+	// ReflexPreparer returns structured context for the reflex/cortex pipeline.
+	// If set and reflex model is configured, gateway uses this instead of ContextInjector.
+	// Falls back to ContextInjector if not set.
+	ReflexPreparer func(ctx context.Context, userID, message string) *ReflexContext
+
 	pool *dbPool
 }
 
@@ -74,6 +79,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		Users:           d.Users,
 		Sessions:        d.Sessions,
 		ContextInjector: d.ContextInjector,
+		ReflexPreparer:  d.ReflexPreparer,
 		pool:            d.pool,
 	}
 }

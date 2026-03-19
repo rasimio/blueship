@@ -74,8 +74,9 @@ func (s *Ship) Run(ctx context.Context) error {
 		s.logger.Warn("model_config not loaded, using config defaults", "error", err)
 	} else {
 		deps.ModelStore = modelStore
-		// Override Config.Models so all consumers see DB values
-		if ref := modelStore.Get("primary"); ref.Name != "" {
+		// Override Config.Models so all consumers see DB values.
+		// "cortex" role maps to Config.Models.Primary (backwards compat).
+		if ref := modelStore.Get("cortex"); ref.Name != "" {
 			deps.Config.Models.Primary = ref
 		}
 		if ref := modelStore.Get("compact"); ref.Name != "" {

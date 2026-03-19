@@ -35,6 +35,13 @@ type RunConfig struct {
 	// Role selects which tools to send (via RoleToolStore).
 	// Empty or unknown role = all tools (backwards-compatible for cloud models).
 	Role string
+	// ReflexGuidance is a high-priority directive from the reflex phase.
+	// Contains expanded matched rules formatted as instructions.
+	// Prepended to InjectedContext so it gets maximum attention from the model.
+	ReflexGuidance string
+	// ToolOverride overrides role-based tool selection with an explicit list.
+	// nil = use role default; empty slice = no tools.
+	ToolOverride []string
 }
 
 // NewLoop creates a new agent loop.
@@ -74,10 +81,12 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 		return "", fmt.Errorf("append user message: %w", err)
 	}
 
-	// Select tools for this role. Roles with entries in role_tools get only those
-	// tools; roles without entries (or empty role) get all tools.
+	// Select tools: ToolOverride > Role-based > all.
 	var tools []bs.ToolDefinition
-	if cfg.Role != "" && a.roleTools != nil {
+	if cfg.ToolOverride != nil {
+		// Reflex explicitly selected tools (empty slice = no tools).
+		tools = a.registry.DefinitionsForNames(cfg.ToolOverride)
+	} else if cfg.Role != "" && a.roleTools != nil {
 		if names := a.roleTools.Get(cfg.Role); names != nil {
 			tools = a.registry.DefinitionsForNames(names)
 		} else {
@@ -134,8 +143,13 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 			return "", fmt.Errorf("load messages: %w", err)
 		}
 
-		// On the first turn, prepend injected context to the last user message.
-		// Not stored in DB — ephemeral context (e.g. memory traces).
+		// On the first turn, prepend reflex guidance + injected context to the last user message.
+		// Not stored in DB — ephemeral context (e.g. memory traces, matched rules).
+		if turn == 0 && cfg.ReflexGuidance != "" && cfg.InjectedContext != "" {
+			cfg.InjectedContext = cfg.ReflexGuidance + "\n\n" + cfg.InjectedContext
+		} else if turn == 0 && cfg.ReflexGuidance != "" {
+			cfg.InjectedContext = cfg.ReflexGuidance
+		}
 		if turn == 0 && cfg.InjectedContext != "" && len(messages) > 0 {
 			last := &messages[len(messages)-1]
 			if last.Role == "user" {
