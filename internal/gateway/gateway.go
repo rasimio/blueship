@@ -42,6 +42,11 @@ type Gateway struct {
 	systemPromptHeartbeat string
 	systemPromptThinking  string
 
+	// Reflex pipeline prompts (loaded from system_prompts table).
+	reflexSystemPrompt   string // system prompt for reflex LLM call
+	reflexPlanTemplate   string // user prompt template (has %s placeholders for rules, tools, message)
+	extractInsightPrompt string // system prompt for insight extraction
+
 	mu    sync.Mutex
 	users map[int64]*UserState
 }
@@ -171,6 +176,17 @@ func (g *Gateway) loadSystemPromptsFromDB(db *sqlx.DB) error {
 		g.compactor.SetSystemPrompt(prompts["compact"])
 	}
 
+	// Reflex pipeline prompts (optional — defaults used if not in DB).
+	if prompts["reflex-system"] != "" {
+		g.reflexSystemPrompt = prompts["reflex-system"]
+	}
+	if prompts["reflex-plan"] != "" {
+		g.reflexPlanTemplate = prompts["reflex-plan"]
+	}
+	if prompts["extract-insight"] != "" {
+		g.extractInsightPrompt = prompts["extract-insight"]
+	}
+
 	g.logger.Info("system prompts loaded from DB",
 		"preamble", len(prompts["preamble"]),
 		"soul", len(prompts["soul"]),
@@ -178,6 +194,9 @@ func (g *Gateway) loadSystemPromptsFromDB(db *sqlx.DB) error {
 		"heartbeat", len(prompts["heartbeat"]),
 		"thinking", len(prompts["thinking"]),
 		"compact", len(prompts["compact"]),
+		"reflex-system", len(prompts["reflex-system"]),
+		"reflex-plan", len(prompts["reflex-plan"]),
+		"extract-insight", len(prompts["extract-insight"]),
 	)
 	return nil
 }
@@ -591,6 +610,7 @@ const reflexConfidenceThreshold = 0.7
 const preActionTimeout = 10 * time.Second
 const maxPreActions = 2
 
+
 // runReflexPipeline executes the System 1/2 pipeline:
 // 1. ReflexPreparer → structured context (traces + candidate rules)
 // 2. Reflex LLM (Gemini Flash) → plan (matched rules, pre/post actions, tools)
@@ -622,33 +642,11 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		}
 	}
 
-	reflexPrompt := fmt.Sprintf(`Create an execution plan for this user message.
-
-## Rules
-%s
-## Available Tools
-%s
-
-## Message
-%s
-
-Return JSON only, no markdown:
-{"matched_rules":["id1"],"intent":"free_reflection","confidence":0.95,"pre_actions":[{"tool":"web_search","input":{"query":"topic"}}],"post_actions":[{"type":"save_reflection"}],"tools":[]}
-
-matched_rules: IDs of rules whose triggers match this message. Empty if none.
-intent: casual_chat, task_management, memory_operation, free_reflection, emotional_support, information_request.
-confidence: 0.0-1.0.
-
-pre_actions: tools to execute BEFORE response generation. Results become additional context.
-  Use when matched rule actions require research/reading: web_search with a relevant query.
-  Empty if no research needed.
-
-post_actions: actions AFTER response generation.
-  "save_reflection" — auto-save the response as a self-reflection. Use when intent is free_reflection or rule says to reflect/synthesize.
-  Empty if nothing to save.
-
-tools: tools the model can call DURING generation (e.g. memory_save for "запомни X", tasks_create for task requests).
-  Usually empty when pre/post actions handle everything.`, rulesBlock.String(), toolsList, msgText)
+	if g.reflexPlanTemplate == "" {
+		g.logger.Warn("reflex-plan prompt not in DB, skipping reflex")
+		return rc.FullContext, "", nil, nil
+	}
+	reflexPrompt := fmt.Sprintf(g.reflexPlanTemplate, rulesBlock.String(), toolsList, msgText)
 
 	reflexResult, err := g.callReflex(ctx, reflexPrompt)
 	if err != nil {
@@ -787,15 +785,16 @@ func (g *Gateway) extractInsight(ctx context.Context, response, extractType stri
 		return truncateStr(response, 200) // fallback
 	}
 
-	prompt := fmt.Sprintf(`Извлеки один краткий вывод (%s, 1-2 предложения, макс 150 символов) из этого ответа AI-ассистента. Верни ТОЛЬКО текст вывода на том же языке что и ответ, без кавычек, без пояснений.
-
-Ответ:
-%s`, extractType, truncateStr(response, 1500))
+	if g.extractInsightPrompt == "" {
+		g.logger.Warn("extract-insight prompt not in DB, skipping")
+		return ""
+	}
+	prompt := fmt.Sprintf(g.extractInsightPrompt, extractType, truncateStr(response, 1500))
 
 	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
 		Model:     model,
 		MaxTokens: 128,
-		System:    "Ты извлекаешь краткие выводы. Возвращай только текст вывода, на языке оригинала.",
+		System:    g.reflexSystemPrompt,
 		Messages:  []bs.Message{{Role: "user", Content: prompt}},
 	})
 	if err != nil {
@@ -826,7 +825,7 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
 		Model:     model,
 		MaxTokens: 512,
-		System:    "You are a message classifier. Return valid JSON only, no markdown fences.",
+		System:    g.reflexSystemPrompt,
 		Messages: []bs.Message{
 			{Role: "user", Content: prompt},
 		},
