@@ -61,17 +61,17 @@ func (h *HeartbeatJob) runForUser(ctx context.Context, us *UserState) {
 	}
 
 	cfg := h.gateway.deps.Config
-	loop := agent.NewLoop(h.gateway.provider, h.gateway.store, us.Registry, cfg, h.gateway.logger)
+	loop := agent.NewLoop(h.gateway.provider, h.gateway.store, us.Registry, h.gateway.deps.RoleTools, cfg, h.gateway.logger)
 	loop.SetCompactor(h.gateway.compactor)
 
 	reply, err := loop.Run(ctx, agent.RunConfig{
-		SessionID:       sess.ID,
-		SystemPrompt:    h.gateway.systemPromptHeartbeat,
-		CompactSummary:  derefString(sess.CompactSummary),
-		Model:           h.gateway.primaryModel(),
-		MaxTokens:       cfg.Limits.MaxOutputTokens,
-		MaxTurns:        cfg.Gateway.MaxTurns,
-		MaxToolPriority: h.gateway.maxToolPriority(),
+		SessionID:      sess.ID,
+		SystemPrompt:   h.gateway.systemPromptHeartbeat,
+		CompactSummary: derefString(sess.CompactSummary),
+		Model:          h.gateway.primaryModel(),
+		MaxTokens:      cfg.Limits.MaxOutputTokens,
+		MaxTurns:       cfg.Gateway.MaxTurns,
+		Role:           "background",
 	}, "heartbeat")
 	if err != nil {
 		h.gateway.logger.Error("heartbeat agent loop error",

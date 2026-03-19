@@ -543,7 +543,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		}
 	}
 
-	loop := agent.NewLoop(g.provider, g.store, us.Registry, g.deps.Config, g.logger)
+	loop := agent.NewLoop(g.provider, g.store, us.Registry, g.deps.RoleTools, g.deps.Config, g.logger)
 	loop.SetCompactor(g.compactor)
 
 	reply, err := loop.Run(ctx, agent.RunConfig{
@@ -554,7 +554,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		MaxTokens:       g.deps.Config.Limits.MaxOutputTokens,
 		MaxTurns:        g.deps.Config.Gateway.MaxTurns,
 		InjectedContext: injectedCtx,
-		MaxToolPriority: g.maxToolPriority(),
+		Role:            "primary",
 	}, content)
 	if err != nil {
 		g.logger.Error("agent loop error",
@@ -696,18 +696,6 @@ func (g *Gateway) primaryModel() string {
 	return p.Name
 }
 
-// primaryModelDisplay returns a human-readable model name (without provider prefix).
-// maxToolPriority returns the tool priority cap for the current primary model.
-// Cloud providers (anthropic, gemini, openai) get all tools (0 = no limit).
-// Custom/local providers get only high-priority tools to avoid overwhelming small models.
-func (g *Gateway) maxToolPriority() int {
-	model := g.primaryModel()
-	if strings.HasPrefix(model, "anthropic:") || strings.HasPrefix(model, "gemini:") || strings.HasPrefix(model, "openai:") {
-		return 0
-	}
-	return 50 // only memory (10) and other critical tools
-}
-
 func (g *Gateway) primaryModelDisplay() string {
 	if g.deps.ModelStore != nil {
 		if ref := g.deps.ModelStore.Get("primary"); ref.Name != "" {
@@ -724,10 +712,15 @@ func (g *Gateway) handleResetCommand(ctx context.Context, chatID int64) {
 		return
 	}
 
-	// Refresh model config from DB
+	// Refresh model config and role tools from DB
 	if g.deps.ModelStore != nil {
 		if err := g.deps.ModelStore.Refresh(ctx); err != nil {
 			g.logger.Warn("reset: failed to refresh model config", "error", err)
+		}
+	}
+	if g.deps.RoleTools != nil {
+		if err := g.deps.RoleTools.Refresh(ctx); err != nil {
+			g.logger.Warn("reset: failed to refresh role tools", "error", err)
 		}
 	}
 

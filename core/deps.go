@@ -34,6 +34,9 @@ type Deps struct {
 	// ModelStore reads model assignments from DB (nil = use Config.Models).
 	ModelStore *ModelConfigStore
 
+	// RoleTools maps model roles to allowed tool names (nil = all tools).
+	RoleTools *RoleToolStore
+
 	// Stores provide access to ship DB data without modules querying ship DB directly.
 	Prompts  PromptStore    // system_prompts table (nil = not available)
 	Users    UserStore      // user_profiles table (nil = not available)
@@ -66,6 +69,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		LLM:             d.LLM,
 		Sender:          d.Sender,
 		ModelStore:      d.ModelStore,
+		RoleTools:       d.RoleTools,
 		Prompts:         d.Prompts,
 		Users:           d.Users,
 		Sessions:        d.Sessions,

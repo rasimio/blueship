@@ -117,17 +117,17 @@ func (t *ThinkingJob) runForOwner(ctx context.Context, us *UserState) {
 	}
 
 	cfg := t.gateway.deps.Config
-	loop := agent.NewLoop(t.gateway.provider, t.gateway.store, us.Registry, cfg, t.gateway.logger)
+	loop := agent.NewLoop(t.gateway.provider, t.gateway.store, us.Registry, t.gateway.deps.RoleTools, cfg, t.gateway.logger)
 	loop.SetCompactor(t.gateway.compactor)
 
 	reply, err := loop.Run(thinkCtx, agent.RunConfig{
-		SessionID:       sess.ID,
-		SystemPrompt:    t.gateway.SystemPromptThinking(),
-		CompactSummary:  derefString(sess.CompactSummary),
-		Model:           t.gateway.primaryModel(),
-		MaxTokens:       cfg.Limits.MaxOutputTokens,
-		MaxTurns:        cfg.Gateway.MaxTurns,
-		MaxToolPriority: t.gateway.maxToolPriority(),
+		SessionID:      sess.ID,
+		SystemPrompt:   t.gateway.SystemPromptThinking(),
+		CompactSummary: derefString(sess.CompactSummary),
+		Model:          t.gateway.primaryModel(),
+		MaxTokens:      cfg.Limits.MaxOutputTokens,
+		MaxTurns:       cfg.Gateway.MaxTurns,
+		Role:           "primary",
 	}, "[SYSTEM: autonomous thinking cycle — это НЕ сообщение от пользователя. Пользователь тебе НЕ писал. Следуй инструкциям THINKING.]")
 	if err != nil {
 		if thinkCtx.Err() != nil {

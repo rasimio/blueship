@@ -15,7 +15,8 @@ type Loop struct {
 	provider  bs.CompletionProvider
 	store     bs.MessageStore
 	registry  *bs.ToolRegistry
-	compactor *Compactor // nil = disabled
+	roleTools *bs.RoleToolStore // nil = all tools
+	compactor *Compactor        // nil = disabled
 	logger    *slog.Logger
 	cfg       *bs.Config
 }
@@ -31,19 +32,20 @@ type RunConfig struct {
 	// InjectedContext is prepended to the first user turn (not stored in session).
 	// Used for automatic memory/context injection before the LLM call.
 	InjectedContext string
-	// MaxToolPriority limits tools sent to the LLM (0 = all tools).
-	// For local/small models that can't handle many tool definitions.
-	MaxToolPriority int
+	// Role selects which tools to send (via RoleToolStore).
+	// Empty or unknown role = all tools (backwards-compatible for cloud models).
+	Role string
 }
 
 // NewLoop creates a new agent loop.
-func NewLoop(provider bs.CompletionProvider, store bs.MessageStore, registry *bs.ToolRegistry, cfg *bs.Config, logger *slog.Logger) *Loop {
+func NewLoop(provider bs.CompletionProvider, store bs.MessageStore, registry *bs.ToolRegistry, roleTools *bs.RoleToolStore, cfg *bs.Config, logger *slog.Logger) *Loop {
 	return &Loop{
-		provider: provider,
-		store:    store,
-		registry: registry,
-		cfg:      cfg,
-		logger:   logger,
+		provider:  provider,
+		store:     store,
+		registry:  registry,
+		roleTools: roleTools,
+		cfg:       cfg,
+		logger:    logger,
 	}
 }
 
@@ -72,11 +74,15 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 		return "", fmt.Errorf("append user message: %w", err)
 	}
 
-	// For custom/local providers (mlx, ollama, etc.) limit tools to high-priority only.
-	// Small models can't handle 50+ tool definitions — they ignore them all.
+	// Select tools for this role. Roles with entries in role_tools get only those
+	// tools; roles without entries (or empty role) get all tools.
 	var tools []bs.ToolDefinition
-	if cfg.MaxToolPriority > 0 {
-		tools = a.registry.DefinitionsWithMaxPriority(cfg.MaxToolPriority)
+	if cfg.Role != "" && a.roleTools != nil {
+		if names := a.roleTools.Get(cfg.Role); names != nil {
+			tools = a.registry.DefinitionsForNames(names)
+		} else {
+			tools = a.registry.Definitions()
+		}
 	} else {
 		tools = a.registry.Definitions()
 	}

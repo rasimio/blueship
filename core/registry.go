@@ -15,7 +15,6 @@ type ToolRegistry struct {
 type registeredTool struct {
 	Definition ToolDefinition
 	Handler    ToolHandler
-	Priority   int // lower = first in the list (primacy bias for small models)
 }
 
 // NewToolRegistry creates a new empty tool registry.
@@ -23,7 +22,7 @@ func NewToolRegistry() *ToolRegistry {
 	return &ToolRegistry{tools: make(map[string]registeredTool)}
 }
 
-// Register adds a tool to the registry with default priority (100).
+// Register adds a tool to the registry.
 func (r *ToolRegistry) Register(name, description string, schema json.RawMessage, handler ToolHandler) {
 	r.tools[name] = registeredTool{
 		Definition: ToolDefinition{
@@ -31,70 +30,30 @@ func (r *ToolRegistry) Register(name, description string, schema json.RawMessage
 			Description: description,
 			InputSchema: schema,
 		},
-		Handler:  handler,
-		Priority: 100,
+		Handler: handler,
 	}
 }
 
-// RegisterWithPriority adds a tool with explicit priority (lower = listed first).
-func (r *ToolRegistry) RegisterWithPriority(name, description string, schema json.RawMessage, handler ToolHandler, priority int) {
-	r.tools[name] = registeredTool{
-		Definition: ToolDefinition{
-			Name:        name,
-			Description: description,
-			InputSchema: schema,
-		},
-		Handler:  handler,
-		Priority: priority,
-	}
-}
-
-// DefinitionsWithMaxPriority returns tools with priority <= maxPriority, sorted.
-// Use for small/local models that can't handle many tools.
-func (r *ToolRegistry) DefinitionsWithMaxPriority(maxPriority int) []ToolDefinition {
-	type entry struct {
-		def      ToolDefinition
-		priority int
-	}
-	entries := make([]entry, 0, len(r.tools))
+// Definitions returns all registered tool definitions sorted by name.
+func (r *ToolRegistry) Definitions() []ToolDefinition {
+	defs := make([]ToolDefinition, 0, len(r.tools))
 	for _, t := range r.tools {
-		if t.Priority <= maxPriority {
-			entries = append(entries, entry{def: t.Definition, priority: t.Priority})
-		}
+		defs = append(defs, t.Definition)
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].priority != entries[j].priority {
-			return entries[i].priority < entries[j].priority
-		}
-		return entries[i].def.Name < entries[j].def.Name
+	sort.Slice(defs, func(i, j int) bool {
+		return defs[i].Name < defs[j].Name
 	})
-	defs := make([]ToolDefinition, len(entries))
-	for i, e := range entries {
-		defs[i] = e.def
-	}
 	return defs
 }
 
-// Definitions returns all registered tool definitions sorted by priority (low first).
-// Primacy bias: small models are more likely to use tools that appear early.
-func (r *ToolRegistry) Definitions() []ToolDefinition {
-	type entry struct {
-		def      ToolDefinition
-		priority int
-	}
-	entries := make([]entry, 0, len(r.tools))
-	for _, t := range r.tools {
-		entries = append(entries, entry{def: t.Definition, priority: t.Priority})
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].priority != entries[j].priority {
-			return entries[i].priority < entries[j].priority
+// DefinitionsForNames returns tool definitions for the given names, preserving order.
+// Unknown names are silently skipped.
+func (r *ToolRegistry) DefinitionsForNames(names []string) []ToolDefinition {
+	defs := make([]ToolDefinition, 0, len(names))
+	for _, name := range names {
+		if t, ok := r.tools[name]; ok {
+			defs = append(defs, t.Definition)
 		}
-		return entries[i].def.Name < entries[j].def.Name
-	})
-	defs := make([]ToolDefinition, len(entries))
-	for i, e := range entries {
-		defs[i] = e.def
 	}
 	return defs
 }

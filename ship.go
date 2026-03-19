@@ -83,7 +83,15 @@ func (s *Ship) Run(ctx context.Context) error {
 		}
 	}
 
-	// 2c. Initialize stores for ship DB data (prompts, users, sessions).
+	// 2c. Load role-based tool assignments from DB
+	roleToolStore := core.NewRoleToolStore(shipDB)
+	if err := roleToolStore.Load(ctx); err != nil {
+		s.logger.Warn("role_tools not loaded, all tools enabled for all roles", "error", err)
+	} else {
+		deps.RoleTools = roleToolStore
+	}
+
+	// 2d. Initialize stores for ship DB data (prompts, users, sessions).
 	deps.Prompts = core.NewPromptStore(shipDB)
 	deps.Users = core.NewUserStore(shipDB)
 	deps.Sessions = session.NewStore(shipDB)
