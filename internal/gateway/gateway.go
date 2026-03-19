@@ -733,27 +733,65 @@ func (g *Gateway) executePostActions(ctx context.Context, us *UserState, actions
 	for _, pa := range actions {
 		switch pa.Type {
 		case "save_reflection":
-			content := truncateStr(reply, 500)
-			input := fmt.Sprintf(`{"type":"observation","content":%q}`, content)
+			// Extract a concise insight from the cortex response via Flash.
+			insight := g.extractInsight(ctx, reply, "reflection")
+			if insight == "" {
+				g.logger.Warn("post-action save_reflection: extraction returned empty")
+				continue
+			}
+			input := fmt.Sprintf(`{"type":"observation","content":%q}`, insight)
 			result, isError := us.Registry.Execute(ctx, "memory_self_save", json.RawMessage(input))
 			if isError {
 				g.logger.Warn("post-action save_reflection failed", "error", result)
 			} else {
-				g.logger.Info("post-action save_reflection done", "content_len", len(content))
+				g.logger.Info("post-action save_reflection done", "insight", truncateStr(insight, 100))
 			}
 		case "save_fact":
-			content := truncateStr(reply, 300)
-			input := fmt.Sprintf(`{"fact":%q,"category":"general","source":"reflex"}`, content)
+			insight := g.extractInsight(ctx, reply, "fact")
+			if insight == "" {
+				g.logger.Warn("post-action save_fact: extraction returned empty")
+				continue
+			}
+			input := fmt.Sprintf(`{"fact":%q,"category":"general","source":"reflex"}`, insight)
 			result, isError := us.Registry.Execute(ctx, "memory_save", json.RawMessage(input))
 			if isError {
 				g.logger.Warn("post-action save_fact failed", "error", result)
 			} else {
-				g.logger.Info("post-action save_fact done")
+				g.logger.Info("post-action save_fact done", "insight", truncateStr(insight, 100))
 			}
 		default:
 			g.logger.Warn("unknown post-action type", "type", pa.Type)
 		}
 	}
+}
+
+// extractInsight calls Flash to distill a concise insight from a long cortex response.
+// extractType is "reflection" or "fact".
+func (g *Gateway) extractInsight(ctx context.Context, response, extractType string) string {
+	model := g.reflexModel()
+	if model == "" {
+		return truncateStr(response, 200) // fallback
+	}
+
+	prompt := fmt.Sprintf(`Extract one concise %s (1-2 sentences, max 150 chars) from this AI assistant's response. Return ONLY the insight text, no quotes, no explanation.
+
+Response:
+%s`, extractType, truncateStr(response, 1500))
+
+	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
+		Model:     model,
+		MaxTokens: 128,
+		System:    "You extract concise insights. Return only the insight text.",
+		Messages:  []bs.Message{{Role: "user", Content: prompt}},
+	})
+	if err != nil {
+		g.logger.Warn("extractInsight failed", "error", err)
+		return ""
+	}
+
+	text := strings.TrimSpace(bs.ExtractText(resp.Content))
+	g.logger.Info("extractInsight done", "type", extractType, "result", truncateStr(text, 100))
+	return text
 }
 
 func truncateStr(s string, max int) string {
