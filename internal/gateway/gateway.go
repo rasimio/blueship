@@ -831,11 +831,43 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 		}
 	}
 
-	var result bs.ReflexResult
-	if err := json.Unmarshal([]byte(text), &result); err != nil {
+	// Parse with flexible tools field: Flash sometimes returns objects instead of strings.
+	var raw struct {
+		MatchedRules []string          `json:"matched_rules"`
+		Intent       string            `json:"intent"`
+		Confidence   float64           `json:"confidence"`
+		PreActions   []bs.ToolAction   `json:"pre_actions"`
+		PostActions  []bs.PostAction   `json:"post_actions"`
+		Tools        json.RawMessage   `json:"tools"`
+	}
+	if err := json.Unmarshal([]byte(text), &raw); err != nil {
 		return nil, fmt.Errorf("parse reflex JSON %q: %w", text, err)
 	}
-	return &result, nil
+
+	result := &bs.ReflexResult{
+		MatchedRules: raw.MatchedRules,
+		Intent:       raw.Intent,
+		Confidence:   raw.Confidence,
+		PreActions:   raw.PreActions,
+		PostActions:  raw.PostActions,
+	}
+
+	// Try parsing tools as []string first, then as []{"tool":"name",...} objects.
+	if len(raw.Tools) > 0 {
+		var toolStrings []string
+		if err := json.Unmarshal(raw.Tools, &toolStrings); err == nil {
+			result.Tools = toolStrings
+		} else {
+			var toolObjects []struct{ Tool string `json:"tool"` }
+			if err := json.Unmarshal(raw.Tools, &toolObjects); err == nil {
+				for _, t := range toolObjects {
+					result.Tools = append(result.Tools, t.Tool)
+				}
+			}
+		}
+	}
+
+	return result, nil
 }
 
 func (g *Gateway) keepTyping(ctx context.Context, chatID int64) {
