@@ -547,13 +547,14 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	loop.SetCompactor(g.compactor)
 
 	reply, err := loop.Run(ctx, agent.RunConfig{
-		SessionID:      sess.ID,
-		SystemPrompt:   g.systemPrompt,
-		CompactSummary: derefString(sess.CompactSummary),
-		Model:          g.primaryModel(),
-		MaxTokens:      g.deps.Config.Limits.MaxOutputTokens,
-		MaxTurns:       g.deps.Config.Gateway.MaxTurns,
+		SessionID:       sess.ID,
+		SystemPrompt:    g.systemPrompt,
+		CompactSummary:  derefString(sess.CompactSummary),
+		Model:           g.primaryModel(),
+		MaxTokens:       g.deps.Config.Limits.MaxOutputTokens,
+		MaxTurns:        g.deps.Config.Gateway.MaxTurns,
 		InjectedContext: injectedCtx,
+		MaxToolPriority: g.maxToolPriority(),
 	}, content)
 	if err != nil {
 		g.logger.Error("agent loop error",
@@ -696,6 +697,17 @@ func (g *Gateway) primaryModel() string {
 }
 
 // primaryModelDisplay returns a human-readable model name (without provider prefix).
+// maxToolPriority returns the tool priority cap for the current primary model.
+// Cloud providers (anthropic, gemini, openai) get all tools (0 = no limit).
+// Custom/local providers get only high-priority tools to avoid overwhelming small models.
+func (g *Gateway) maxToolPriority() int {
+	model := g.primaryModel()
+	if strings.HasPrefix(model, "anthropic:") || strings.HasPrefix(model, "gemini:") || strings.HasPrefix(model, "openai:") {
+		return 0
+	}
+	return 50 // only memory (10) and other critical tools
+}
+
 func (g *Gateway) primaryModelDisplay() string {
 	if g.deps.ModelStore != nil {
 		if ref := g.deps.ModelStore.Get("primary"); ref.Name != "" {

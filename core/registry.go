@@ -49,6 +49,32 @@ func (r *ToolRegistry) RegisterWithPriority(name, description string, schema jso
 	}
 }
 
+// DefinitionsWithMaxPriority returns tools with priority <= maxPriority, sorted.
+// Use for small/local models that can't handle many tools.
+func (r *ToolRegistry) DefinitionsWithMaxPriority(maxPriority int) []ToolDefinition {
+	type entry struct {
+		def      ToolDefinition
+		priority int
+	}
+	entries := make([]entry, 0, len(r.tools))
+	for _, t := range r.tools {
+		if t.Priority <= maxPriority {
+			entries = append(entries, entry{def: t.Definition, priority: t.Priority})
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].priority != entries[j].priority {
+			return entries[i].priority < entries[j].priority
+		}
+		return entries[i].def.Name < entries[j].def.Name
+	})
+	defs := make([]ToolDefinition, len(entries))
+	for i, e := range entries {
+		defs[i] = e.def
+	}
+	return defs
+}
+
 // Definitions returns all registered tool definitions sorted by priority (low first).
 // Primacy bias: small models are more likely to use tools that appear early.
 func (r *ToolRegistry) Definitions() []ToolDefinition {

@@ -31,6 +31,9 @@ type RunConfig struct {
 	// InjectedContext is prepended to the first user turn (not stored in session).
 	// Used for automatic memory/context injection before the LLM call.
 	InjectedContext string
+	// MaxToolPriority limits tools sent to the LLM (0 = all tools).
+	// For local/small models that can't handle many tool definitions.
+	MaxToolPriority int
 }
 
 // NewLoop creates a new agent loop.
@@ -69,7 +72,14 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 		return "", fmt.Errorf("append user message: %w", err)
 	}
 
-	tools := a.registry.Definitions()
+	// For custom/local providers (mlx, ollama, etc.) limit tools to high-priority only.
+	// Small models can't handle 50+ tool definitions — they ignore them all.
+	var tools []bs.ToolDefinition
+	if cfg.MaxToolPriority > 0 {
+		tools = a.registry.DefinitionsWithMaxPriority(cfg.MaxToolPriority)
+	} else {
+		tools = a.registry.Definitions()
+	}
 	tokenBudget := a.calculateBudget(cfg.SystemPrompt, tools)
 
 	// Pre-existing compact summary from previous runs

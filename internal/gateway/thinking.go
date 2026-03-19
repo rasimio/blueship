@@ -121,12 +121,13 @@ func (t *ThinkingJob) runForOwner(ctx context.Context, us *UserState) {
 	loop.SetCompactor(t.gateway.compactor)
 
 	reply, err := loop.Run(thinkCtx, agent.RunConfig{
-		SessionID:      sess.ID,
-		SystemPrompt:   t.gateway.SystemPromptThinking(),
-		CompactSummary: derefString(sess.CompactSummary),
-		Model:          t.gateway.primaryModel(),
-		MaxTokens:      cfg.Limits.MaxOutputTokens,
-		MaxTurns:       cfg.Gateway.MaxTurns,
+		SessionID:       sess.ID,
+		SystemPrompt:    t.gateway.SystemPromptThinking(),
+		CompactSummary:  derefString(sess.CompactSummary),
+		Model:           t.gateway.primaryModel(),
+		MaxTokens:       cfg.Limits.MaxOutputTokens,
+		MaxTurns:        cfg.Gateway.MaxTurns,
+		MaxToolPriority: t.gateway.maxToolPriority(),
 	}, "[SYSTEM: autonomous thinking cycle — это НЕ сообщение от пользователя. Пользователь тебе НЕ писал. Следуй инструкциям THINKING.]")
 	if err != nil {
 		if thinkCtx.Err() != nil {
