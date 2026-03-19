@@ -723,35 +723,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 	var toolOverride []string
 	if reflexResult.Tools != nil {
 		toolOverride = reflexResult.Tools
-		// If date-sensitive tools are selected, inject current_time into research block
-		// as a pre-action (Qwen ignores current_time as a tool and guesses dates).
-		needsTime := false
-		for _, t := range toolOverride {
-			if strings.HasPrefix(t, "calendar_") || strings.HasPrefix(t, "tasks_") || strings.HasPrefix(t, "deadlines_") {
-				needsTime = true
-				break
-			}
-		}
-		if needsTime {
-			timeResult, isErr := us.Registry.Execute(ctx, "current_time", json.RawMessage(`{}`))
-			if !isErr {
-				if researchBlock.Len() == 0 {
-					researchBlock.WriteString("[research]\n")
-				}
-				fmt.Fprintf(&researchBlock, "[current_time]\n%s\n\n", timeResult)
-				g.logger.Info("auto-injected current_time into context")
-			}
-		}
-		// Remove current_time from tools — it's already in context.
-		var filtered []string
-		for _, t := range toolOverride {
-			if t != "current_time" {
-				filtered = append(filtered, t)
-			}
-		}
-		toolOverride = filtered
 	}
-	// Close research block if anything was added (pre-actions or auto-injected time).
+
+	// Close research block if any pre-actions produced results.
 	if researchBlock.Len() > 0 {
 		researchBlock.WriteString("[/research]")
 	}
