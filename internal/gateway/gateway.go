@@ -626,11 +626,12 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 %s
 
 Return JSON only, no markdown:
-{"matched_rules":["id1"],"tools":["memory_save"],"intent":"casual_chat","confidence":0.9}
-Rules: include IDs of rules whose triggers match this specific message. Empty array if none match.
-Tools: include tool names if the rule's action requires tool use (e.g. web_search for research, memory_save for saving). Empty array if just conversation.
+{"matched_rules":["id1"],"tools":["web_search","memory_self_save"],"intent":"free_reflection","confidence":0.95}
+
+Rules: include IDs of rules whose triggers match this message. Empty if none.
+Tools: READ the matched rule actions carefully. If an action says to search/read/research → include web_search, web_fetch. If it says to save/remember → include memory_save or memory_self_save. If it says to reflect → include memory_self_save. Only empty if the action is purely conversational with no tool use.
 Intent: one of casual_chat, task_management, memory_operation, free_reflection, emotional_support, information_request.
-Confidence: 0.0-1.0 how sure you are about your classification.`, rulesBlock.String(), toolsList, msgText)
+Confidence: 0.0-1.0.`, rulesBlock.String(), toolsList, msgText)
 
 	reflexResult, err := g.callReflex(ctx, reflexPrompt)
 	if err != nil {
