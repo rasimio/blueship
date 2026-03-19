@@ -1,17 +1,35 @@
 package core
 
-// ReflexResult is the structured output of the reflex (System 1) classification phase.
+import "encoding/json"
+
+// ReflexResult is the structured output of the reflex (System 1) planning phase.
 type ReflexResult struct {
 	// MatchedRules contains IDs of rules whose triggers match the user message.
 	MatchedRules []string `json:"matched_rules"`
-	// Tools lists tool names the cortex model should have access to.
-	// nil = use role default; empty slice = no tools needed.
-	Tools []string `json:"tools"`
 	// Intent classifies the user message purpose.
 	Intent string `json:"intent"`
 	// Confidence is the reflex model's self-assessed confidence (0.0-1.0).
 	// Below threshold → fallback to full context + all role tools.
 	Confidence float64 `json:"confidence"`
+	// PreActions are tools to execute BEFORE cortex. Results become context.
+	PreActions []ToolAction `json:"pre_actions"`
+	// PostActions are actions to execute AFTER cortex response.
+	PostActions []PostAction `json:"post_actions"`
+	// Tools lists tool names the cortex model should have access to during generation.
+	// nil = use role default; empty slice = no tools needed.
+	Tools []string `json:"tools"`
+}
+
+// ToolAction is a tool call planned by reflex, executed by gateway.
+type ToolAction struct {
+	Tool  string          `json:"tool"`
+	Input json.RawMessage `json:"input"`
+}
+
+// PostAction is an action to execute after cortex generates a response.
+type PostAction struct {
+	// Type: "save_reflection", "save_fact"
+	Type string `json:"type"`
 }
 
 // CandidateRule is a rule found by supplementary search, sent to reflex for classification.

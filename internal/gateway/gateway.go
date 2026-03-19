@@ -540,11 +540,12 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 
 	// Build context and run reflex/cortex pipeline.
 	var injectedCtx, reflexGuidance string
-	var toolOverride []string // nil = use role default
+	var toolOverride []string       // nil = use role default
+	var postActions []bs.PostAction // executed after cortex response
 
 	if msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil && g.reflexModel() != "" {
-		// Reflex/Cortex pipeline: structured context → reflex classification → filtered cortex input.
-		injectedCtx, reflexGuidance, toolOverride = g.runReflexPipeline(ctx, us, msgText)
+		// Reflex/Cortex pipeline: structured context → reflex plan → pre-actions → filtered cortex input.
+		injectedCtx, reflexGuidance, toolOverride, postActions = g.runReflexPipeline(ctx, us, msgText)
 	} else if msgText != "" && us.Deps != nil && us.Deps.ContextInjector != nil {
 		// Fallback: legacy ContextInjector (no reflex).
 		injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText)
@@ -574,6 +575,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		return
 	}
 
+	// Execute post-actions (save reflection, etc.) using cortex response.
+	if reply != "" && len(postActions) > 0 {
+		g.executePostActions(ctx, us, postActions, reply)
+	}
+
 	if reply != "" {
 		if err := g.tg.SendLong(ctx, us.ChatID, reply); err != nil {
 			g.logger.Error("send reply error", "chat_id", us.ChatID, "error", err)
@@ -582,32 +588,33 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 }
 
 const reflexConfidenceThreshold = 0.7
+const preActionTimeout = 10 * time.Second
+const maxPreActions = 2
 
 // runReflexPipeline executes the System 1/2 pipeline:
 // 1. ReflexPreparer → structured context (traces + candidate rules)
-// 2. Reflex LLM (Gemini Flash) → classification (matched rules, tools, confidence)
-// 3. If confidence > threshold: filtered context + tool override
-// 4. If confidence <= threshold: full context + role default tools
-// Returns (injectedContext, reflexGuidance, toolOverride).
-func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText string) (string, string, []string) {
+// 2. Reflex LLM (Gemini Flash) → plan (matched rules, pre/post actions, tools)
+// 3. Execute pre-actions (web_search etc.) → inject results into context
+// 4. Build cortex context: matched rules + research + AME traces
+// Returns (injectedContext, reflexGuidance, toolOverride, postActions).
+func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText string) (string, string, []string, []bs.PostAction) {
 	rc := us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText)
 	if rc == nil {
-		return "", "", nil
+		return "", "", nil, nil
 	}
 
-	// Build reflex prompt with candidate rules
+	// No rules to classify — skip reflex, use full context.
 	if len(rc.CandidateRules) == 0 {
-		// No rules to classify — skip reflex, use full context.
-		return rc.FullContext, "", nil
+		return rc.FullContext, "", nil, nil
 	}
 
+	// Build reflex prompt.
 	var rulesBlock strings.Builder
 	for _, r := range rc.CandidateRules {
 		fmt.Fprintf(&rulesBlock, "[%s] WHEN: %s → DO: %s (sr=%.0f%%)\n",
 			r.ID, r.Trigger, r.Action, r.SuccessRate*100)
 	}
 
-	// Build tools list from role_tools (cortex role), not hardcoded.
 	toolsList := "none configured"
 	if g.deps.RoleTools != nil {
 		if names := g.deps.RoleTools.Get("cortex"); len(names) > 0 {
@@ -615,7 +622,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		}
 	}
 
-	reflexPrompt := fmt.Sprintf(`Classify the user message. Match applicable rules. Select needed tools.
+	reflexPrompt := fmt.Sprintf(`Create an execution plan for this user message.
 
 ## Rules
 %s
@@ -626,36 +633,70 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 %s
 
 Return JSON only, no markdown:
-{"matched_rules":["id1"],"tools":["web_search","memory_self_save"],"intent":"free_reflection","confidence":0.95}
+{"matched_rules":["id1"],"intent":"free_reflection","confidence":0.95,"pre_actions":[{"tool":"web_search","input":{"query":"topic"}}],"post_actions":[{"type":"save_reflection"}],"tools":[]}
 
-Rules: include IDs of rules whose triggers match this message. Empty if none.
-Tools: READ the matched rule actions carefully. If an action says to search/read/research → include web_search, web_fetch. If it says to save/remember → include memory_save or memory_self_save. If it says to reflect → include memory_self_save. Only empty if the action is purely conversational with no tool use.
-Intent: one of casual_chat, task_management, memory_operation, free_reflection, emotional_support, information_request.
-Confidence: 0.0-1.0.`, rulesBlock.String(), toolsList, msgText)
+matched_rules: IDs of rules whose triggers match this message. Empty if none.
+intent: casual_chat, task_management, memory_operation, free_reflection, emotional_support, information_request.
+confidence: 0.0-1.0.
+
+pre_actions: tools to execute BEFORE response generation. Results become additional context.
+  Use when matched rule actions require research/reading: web_search with a relevant query.
+  Empty if no research needed.
+
+post_actions: actions AFTER response generation.
+  "save_reflection" — auto-save the response as a self-reflection. Use when intent is free_reflection or rule says to reflect/synthesize.
+  Empty if nothing to save.
+
+tools: tools the model can call DURING generation (e.g. memory_save for "запомни X", tasks_create for task requests).
+  Usually empty when pre/post actions handle everything.`, rulesBlock.String(), toolsList, msgText)
 
 	reflexResult, err := g.callReflex(ctx, reflexPrompt)
 	if err != nil {
 		g.logger.Warn("reflex failed, using full context", "error", err)
-		return rc.FullContext, "", nil
+		return rc.FullContext, "", nil, nil
 	}
 
-	g.logger.Info("reflex result",
+	g.logger.Info("reflex plan",
 		"intent", reflexResult.Intent,
 		"confidence", reflexResult.Confidence,
 		"matched_rules", reflexResult.MatchedRules,
+		"pre_actions", len(reflexResult.PreActions),
+		"post_actions", len(reflexResult.PostActions),
 		"tools", reflexResult.Tools,
 	)
 
-	// Low confidence → fallback to full context.
+	// Low confidence → full fallback (all context, all role tools, no pre/post actions).
 	if reflexResult.Confidence < reflexConfidenceThreshold {
-		g.logger.Info("reflex low confidence, using full context",
+		g.logger.Info("reflex low confidence, full fallback",
 			"confidence", reflexResult.Confidence,
-			"threshold", reflexConfidenceThreshold,
 		)
-		return rc.FullContext, "", nil
+		return rc.FullContext, "", nil, nil
 	}
 
-	// High confidence → build filtered context.
+	// Execute pre-actions (web_search etc.) with timeout.
+	var researchBlock strings.Builder
+	preActionsToRun := reflexResult.PreActions
+	if len(preActionsToRun) > maxPreActions {
+		preActionsToRun = preActionsToRun[:maxPreActions]
+	}
+	for _, pa := range preActionsToRun {
+		paCtx, cancel := context.WithTimeout(ctx, preActionTimeout)
+		result, isError := us.Registry.Execute(paCtx, pa.Tool, pa.Input)
+		cancel()
+		if isError {
+			g.logger.Warn("reflex pre-action failed", "tool", pa.Tool, "error", result)
+			continue
+		}
+		g.logger.Info("reflex pre-action done", "tool", pa.Tool, "result_len", len(result))
+		if researchBlock.Len() == 0 {
+			researchBlock.WriteString("[research]\n")
+		}
+		fmt.Fprintf(&researchBlock, "[%s result]\n%s\n\n", pa.Tool, truncateStr(result, 2000))
+	}
+	if researchBlock.Len() > 0 {
+		researchBlock.WriteString("[/research]")
+	}
+
 	// Expand matched rules into directive block.
 	var guidance strings.Builder
 	if len(reflexResult.MatchedRules) > 0 {
@@ -672,13 +713,55 @@ Confidence: 0.0-1.0.`, rulesBlock.String(), toolsList, msgText)
 		guidance.WriteString("[/active rules]")
 	}
 
-	// Tool override: use reflex selection if non-nil.
+	// Assemble: guidance (rules) + research + traces
+	if researchBlock.Len() > 0 {
+		guidance.WriteString("\n\n")
+		guidance.WriteString(researchBlock.String())
+	}
+
+	// Tool override
 	var toolOverride []string
 	if reflexResult.Tools != nil {
 		toolOverride = reflexResult.Tools
 	}
 
-	return rc.FormattedTraces, guidance.String(), toolOverride
+	return rc.FormattedTraces, guidance.String(), toolOverride, reflexResult.PostActions
+}
+
+// executePostActions runs post-cortex actions (save reflection, etc.).
+func (g *Gateway) executePostActions(ctx context.Context, us *UserState, actions []bs.PostAction, reply string) {
+	for _, pa := range actions {
+		switch pa.Type {
+		case "save_reflection":
+			content := truncateStr(reply, 500)
+			input := fmt.Sprintf(`{"type":"observation","content":%q}`, content)
+			result, isError := us.Registry.Execute(ctx, "memory_self_save", json.RawMessage(input))
+			if isError {
+				g.logger.Warn("post-action save_reflection failed", "error", result)
+			} else {
+				g.logger.Info("post-action save_reflection done", "content_len", len(content))
+			}
+		case "save_fact":
+			content := truncateStr(reply, 300)
+			input := fmt.Sprintf(`{"fact":%q,"category":"general","source":"reflex"}`, content)
+			result, isError := us.Registry.Execute(ctx, "memory_save", json.RawMessage(input))
+			if isError {
+				g.logger.Warn("post-action save_fact failed", "error", result)
+			} else {
+				g.logger.Info("post-action save_fact done")
+			}
+		default:
+			g.logger.Warn("unknown post-action type", "type", pa.Type)
+		}
+	}
+}
+
+func truncateStr(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
 }
 
 // callReflex sends a classification request to the reflex model and parses JSON.
@@ -690,7 +773,7 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 
 	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
 		Model:     model,
-		MaxTokens: 256,
+		MaxTokens: 512,
 		System:    "You are a message classifier. Return valid JSON only, no markdown fences.",
 		Messages: []bs.Message{
 			{Role: "user", Content: prompt},
