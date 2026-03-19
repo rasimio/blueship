@@ -646,11 +646,11 @@ func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 		commit = "local"
 	}
 
-	realTokens := sess.TokenCount * 2
-	maxTokens := 200000
+	maxContext := g.deps.Config.Limits.MaxContext
+	contextTokens := sess.TokenCount
 	pct := 0
-	if maxTokens > 0 {
-		pct = realTokens * 100 / maxTokens
+	if maxContext > 0 {
+		pct = contextTokens * 100 / maxContext
 	}
 
 	ago := time.Since(sess.UpdatedAt).Truncate(time.Second)
@@ -666,7 +666,7 @@ func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 		buildDate, commit,
 		g.primaryModelDisplay(),
 		sess.MessageCount, sess.TokenCount/1000,
-		realTokens/1000, maxTokens/1000, pct,
+		contextTokens/1000, maxContext/1000, pct,
 		shortID(sess.ID), ago,
 		compactK,
 	)
