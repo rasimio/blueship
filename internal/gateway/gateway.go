@@ -719,10 +719,24 @@ tools: tools the model can call DURING generation (e.g. memory_save for "зап�
 		guidance.WriteString(researchBlock.String())
 	}
 
-	// Tool override
+	// Tool override. Always include current_time if any calendar tool is selected —
+	// without it the model doesn't know today's date and picks wrong dates.
 	var toolOverride []string
 	if reflexResult.Tools != nil {
 		toolOverride = reflexResult.Tools
+		needsTime := false
+		hasTime := false
+		for _, t := range toolOverride {
+			if strings.HasPrefix(t, "calendar_") || strings.HasPrefix(t, "tasks_") || strings.HasPrefix(t, "deadlines_") {
+				needsTime = true
+			}
+			if t == "current_time" {
+				hasTime = true
+			}
+		}
+		if needsTime && !hasTime {
+			toolOverride = append([]string{"current_time"}, toolOverride...)
+		}
 	}
 
 	return rc.FormattedTraces, guidance.String(), toolOverride, reflexResult.PostActions
