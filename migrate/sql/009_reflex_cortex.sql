@@ -11,3 +11,9 @@ ON CONFLICT DO NOTHING;
 
 -- role_tools: rename primary → cortex
 UPDATE role_tools SET role = 'cortex' WHERE role = 'primary';
+
+-- Add web tools to cortex (needed for "взлетай" autonomous research)
+INSERT INTO role_tools (role, tool_name, sort_order) VALUES
+    ('cortex', 'web_search', 10),
+    ('cortex', 'web_fetch', 11)
+ON CONFLICT DO NOTHING;

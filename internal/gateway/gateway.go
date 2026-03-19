@@ -607,12 +607,20 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 			r.ID, r.Trigger, r.Action, r.SuccessRate*100)
 	}
 
+	// Build tools list from role_tools (cortex role), not hardcoded.
+	toolsList := "none configured"
+	if g.deps.RoleTools != nil {
+		if names := g.deps.RoleTools.Get("cortex"); len(names) > 0 {
+			toolsList = strings.Join(names, ", ")
+		}
+	}
+
 	reflexPrompt := fmt.Sprintf(`Classify the user message. Match applicable rules. Select needed tools.
 
 ## Rules
 %s
 ## Available Tools
-memory_save, memory_self_save, memory_search, memory_associate, memory_correct, tasks_list, tasks_create, tasks_update, deadlines_check
+%s
 
 ## Message
 %s
@@ -620,9 +628,9 @@ memory_save, memory_self_save, memory_search, memory_associate, memory_correct, 
 Return JSON only, no markdown:
 {"matched_rules":["id1"],"tools":["memory_save"],"intent":"casual_chat","confidence":0.9}
 Rules: include IDs of rules whose triggers match this specific message. Empty array if none match.
-Tools: include tool names only if this message requires tool use. Empty array if just conversation.
+Tools: include tool names if the rule's action requires tool use (e.g. web_search for research, memory_save for saving). Empty array if just conversation.
 Intent: one of casual_chat, task_management, memory_operation, free_reflection, emotional_support, information_request.
-Confidence: 0.0-1.0 how sure you are about your classification.`, rulesBlock.String(), msgText)
+Confidence: 0.0-1.0 how sure you are about your classification.`, rulesBlock.String(), toolsList, msgText)
 
 	reflexResult, err := g.callReflex(ctx, reflexPrompt)
 	if err != nil {
@@ -633,7 +641,7 @@ Confidence: 0.0-1.0 how sure you are about your classification.`, rulesBlock.Str
 	g.logger.Info("reflex result",
 		"intent", reflexResult.Intent,
 		"confidence", reflexResult.Confidence,
-		"matched_rules", len(reflexResult.MatchedRules),
+		"matched_rules", reflexResult.MatchedRules,
 		"tools", reflexResult.Tools,
 	)
 
