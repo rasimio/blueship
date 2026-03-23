@@ -38,6 +38,12 @@ type GatewayConfig = core.GatewayConfig
 type Deps = core.Deps
 type Response = core.Response
 
+// Agent task types
+type AgentHandler = core.AgentHandler
+type AgentTask = core.AgentTask
+type AgentDeps = core.AgentDeps
+type IterationResult = core.IterationResult
+
 // Convenience re-exports
 
 func NewToolRegistry() *ToolRegistry { return core.NewToolRegistry() }

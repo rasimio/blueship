@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/internal/agenttask"
 	"github.com/rasimio/blueship/internal/anthropic"
 	"github.com/rasimio/blueship/internal/gemini"
 	"github.com/rasimio/blueship/internal/gateway"
@@ -21,13 +22,15 @@ import (
 	"github.com/rasimio/blueship/internal/web"
 	"github.com/rasimio/blueship/migrate"
 	"github.com/rasimio/blueship/session"
+	"github.com/rasimio/blueship/tool"
 )
 
 // Ship is the main BlueShip runtime instance.
 type Ship struct {
-	cfg     Config
-	modules []Module
-	logger  *slog.Logger
+	cfg      Config
+	modules  []Module
+	handlers map[string]core.AgentHandler
+	logger   *slog.Logger
 }
 
 // New creates a new BlueShip instance with the given configuration.
@@ -45,6 +48,15 @@ func New(cfg Config) *Ship {
 // RegisterModule adds a module to the BlueShip instance.
 func (s *Ship) RegisterModule(m Module) {
 	s.modules = append(s.modules, m)
+}
+
+// RegisterAgentHandler registers a named handler for autonomous agent tasks.
+// Handlers are dispatched by the agent task scheduler based on the handler field in agent_tasks.
+func (s *Ship) RegisterAgentHandler(name string, h core.AgentHandler) {
+	if s.handlers == nil {
+		s.handlers = make(map[string]core.AgentHandler)
+	}
+	s.handlers[name] = h
 }
 
 // Run starts BlueShip: connects to DB, initializes providers, starts transport, runs jobs.
@@ -132,6 +144,39 @@ func (s *Ship) Run(ctx context.Context) error {
 		}
 	}
 
+	// 4b. Start agent task scheduler (if handlers registered).
+	if len(s.handlers) > 0 {
+		// Build a global tool registry for agent tasks.
+		globalRegistry := core.NewToolRegistry()
+		tool.RegisterBuiltinTools(globalRegistry, deps)
+		reg.RegisterAllTools(globalRegistry, deps)
+
+		taskStore := core.NewAgentTaskStore(shipDB)
+		msgStore := session.NewStore(shipDB) // MessageStore for agent loops
+
+		// Notification callback: send message to user via Sender.
+		var notifyFn func(ctx context.Context, userID uuid.UUID, text string)
+		if deps.Sender != nil && deps.Users != nil {
+			notifyFn = func(ctx context.Context, userID uuid.UUID, text string) {
+				profile, err := deps.Users.GetByID(ctx, userID.String())
+				if err != nil {
+					s.logger.Warn("agent-tasks: user lookup for notify failed", "error", err)
+					return
+				}
+				if _, err := deps.Sender.SendMessage(ctx, profile.ChatID, text); err != nil {
+					s.logger.Warn("agent-tasks: notify failed", "error", err)
+				}
+			}
+		}
+
+		agentSched := agenttask.NewScheduler(taskStore, s.handlers, globalRegistry, msgStore, deps, notifyFn, s.logger)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			scheduler.RunLoop(ctx, s.logger, "agent-tasks", 1*time.Minute, agentSched.Run)
+		}()
+	}
+
 	// 5. Start Telegram Gateway
 	if s.cfg.Transport.Type == "telegram" && s.cfg.Transport.BotToken != "" {
 		gw, err := gateway.NewGateway(deps, reg, s.logger)
@@ -143,14 +188,6 @@ func (s *Ship) Run(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			gw.Run(ctx)
-		}()
-
-		// Heartbeat
-		hb := gateway.NewHeartbeatJob(gw)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			scheduler.RunLoop(ctx, s.logger, "heartbeat", 30*time.Minute, hb.Run)
 		}()
 
 		// Thinking (autonomous agent)

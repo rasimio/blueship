@@ -78,6 +78,18 @@ func (r *ToolRegistry) Execute(ctx context.Context, name string, input json.RawM
 	return string(data), false
 }
 
+// SubsetForNames creates a new ToolRegistry containing only the named tools.
+// Both definitions and handlers are copied, so the subset is fully executable.
+func (r *ToolRegistry) SubsetForNames(names []string) *ToolRegistry {
+	sub := NewToolRegistry()
+	for _, name := range names {
+		if t, ok := r.tools[name]; ok {
+			sub.tools[name] = t
+		}
+	}
+	return sub
+}
+
 // Count returns the number of registered tools.
 func (r *ToolRegistry) Count() int {
 	return len(r.tools)

@@ -19,4 +19,7 @@ type MessageStore interface {
 
 	// CompactSession replaces old messages with a summary, keeping keepCount recent messages.
 	CompactSession(ctx context.Context, sessionID string, summary string, keepCount int) error
+
+	// CreateSession creates a new chat session, returning its ID.
+	CreateSession(ctx context.Context, userID, model string) (sessionID string, err error)
 }

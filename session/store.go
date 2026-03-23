@@ -55,6 +55,15 @@ func (s *Store) CreateWithPrevious(ctx context.Context, userID, model, previousI
 	return &sess, nil
 }
 
+// CreateSession creates a new chat session, returning its ID. Satisfies core.MessageStore.
+func (s *Store) CreateSession(ctx context.Context, userID, model string) (string, error) {
+	sess, err := s.Create(ctx, userID, model)
+	if err != nil {
+		return "", err
+	}
+	return sess.ID, nil
+}
+
 // GetOrCreate returns the latest active session for a user, or creates a new one.
 func (s *Store) GetOrCreate(ctx context.Context, userID, model string) (*Session, error) {
 	var sess Session
