@@ -40,7 +40,6 @@ type Gateway struct {
 
 	systemPrompt          string
 	systemPromptHeartbeat string
-	systemPromptThinking  string
 
 	// Reflex pipeline prompts (loaded from system_prompts table).
 	reflexSystemPrompt   string // system prompt for reflex LLM call
@@ -61,11 +60,6 @@ type UserState struct {
 	Deps     *bs.Deps // per-user deps (carries ContextInjector set by modules)
 	LoopBusy bool
 	debounce *debouncer
-
-	// Thinking cancellation: set while thinking loop is active.
-	// processMessages cancels thinking before acquiring Mu.
-	thinkingCancel context.CancelFunc
-	thinkingDone   chan struct{}
 }
 
 // ModuleRegistry is an adapter interface for the module system.
@@ -166,12 +160,6 @@ func (g *Gateway) loadSystemPromptsFromDB(db *sqlx.DB) error {
 	if prompts["heartbeat"] != "" {
 		g.systemPromptHeartbeat = g.systemPrompt + "\n\n" + prompts["heartbeat"]
 	}
-	if prompts["thinking"] != "" {
-		g.systemPromptThinking = g.systemPrompt + "\n\n" + prompts["thinking"]
-	} else {
-		g.systemPromptThinking = g.systemPrompt
-	}
-
 	if g.compactor != nil && prompts["compact"] != "" {
 		g.compactor.SetSystemPrompt(prompts["compact"])
 	}
@@ -224,13 +212,6 @@ func (g *Gateway) loadSystemPrompts(workspacePath string) error {
 	g.systemPromptHeartbeat = preambleStr + string(soul) + "\n\n" + string(agents) + "\n\n" + string(heartbeat)
 
 	// Thinking prompt (optional — fall back to regular system prompt if missing)
-	if thinking, err := os.ReadFile(filepath.Join(workspacePath, "THINKING.md")); err == nil {
-		g.systemPromptThinking = preambleStr + string(soul) + "\n\n" + string(agents) + "\n\n" + string(thinking)
-	} else {
-		g.logger.Warn("THINKING.md not found, thinking will use regular system prompt", "path", filepath.Join(workspacePath, "THINKING.md"))
-		g.systemPromptThinking = g.systemPrompt
-	}
-
 	return nil
 }
 
@@ -495,19 +476,6 @@ func (g *Gateway) notifyOwnerError(ctx context.Context, source string, err error
 }
 
 func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pendingMsg) {
-	// Cancel any running thinking loop so we can process user message immediately.
-	us.Mu.Lock()
-	cancelFn := us.thinkingCancel
-	done := us.thinkingDone
-	us.Mu.Unlock()
-
-	if cancelFn != nil {
-		cancelFn()
-		if done != nil {
-			<-done // wait for thinking cleanup
-		}
-	}
-
 	us.Mu.Lock()
 	defer us.Mu.Unlock()
 	us.LoopBusy = true
@@ -924,9 +892,6 @@ func (g *Gateway) todayResetTime() time.Time {
 
 // Timezone returns the configured timezone.
 func (g *Gateway) Timezone() *time.Location { return g.tz }
-
-// SystemPromptThinking returns the thinking system prompt.
-func (g *Gateway) SystemPromptThinking() string { return g.systemPromptThinking }
 
 func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 	us, err := g.getOrInitUser(ctx, chatID)

@@ -68,6 +68,15 @@ func (s *AgentTaskStore) Fail(ctx context.Context, id uuid.UUID, errMsg string) 
 	return err
 }
 
+// Cancel marks a pending or running task as done with cancellation message.
+func (s *AgentTaskStore) Cancel(ctx context.Context, id uuid.UUID) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE agent_tasks
+		SET status = 'done', result = 'Cancelled by user', completed_at = NOW()
+		WHERE id = $1 AND status IN ('pending', 'running')`, id)
+	return err
+}
+
 // ResetStale resets tasks stuck in 'running' state back to 'pending' (crash recovery).
 func (s *AgentTaskStore) ResetStale(ctx context.Context, staleAfter time.Duration) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `

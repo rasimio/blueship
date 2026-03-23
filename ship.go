@@ -190,15 +190,6 @@ func (s *Ship) Run(ctx context.Context) error {
 			gw.Run(ctx)
 		}()
 
-		// Thinking (autonomous agent)
-		if !deps.Config.Gateway.DisableThinking {
-			th := gateway.NewThinkingJob(gw)
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				scheduler.RunLoop(ctx, s.logger, "thinking", 60*time.Minute, th.Run)
-			}()
-		}
 	}
 
 	// 6. Block until done

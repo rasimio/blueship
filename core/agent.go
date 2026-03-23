@@ -54,6 +54,15 @@ type IterationResult struct {
 	Notify   string          // send to user immediately (milestone, blocker)
 }
 
+// TaskProgress is structured progress for multi-iteration background tasks.
+// Handlers marshal this into IterationResult.Progress between iterations.
+type TaskProgress struct {
+	Phase     string   `json:"phase"`      // "researching", "synthesizing", "complete"
+	Findings  []string `json:"findings"`   // accumulated results
+	NextSteps []string `json:"next_steps"` // plan for next iteration
+	Summary   string   `json:"summary"`    // running summary for status checks
+}
+
 // AgentDeps is a focused dependency bundle for agent handlers.
 type AgentDeps struct {
 	LLM       CompletionProvider

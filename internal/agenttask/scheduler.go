@@ -21,7 +21,7 @@ type Scheduler struct {
 	logger   *slog.Logger
 
 	mu   sync.Mutex
-	busy map[string]bool // handler name → currently executing
+	busy map[string]bool // task ID → currently executing
 }
 
 // NewScheduler creates an agent task scheduler.
@@ -71,7 +71,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			continue
 		}
 
-		if s.isBusy(task.Handler) {
+		if s.isBusy(task.ID.String()) {
 			continue
 		}
 
@@ -87,8 +87,8 @@ func (s *Scheduler) Run(ctx context.Context) error {
 }
 
 func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handler core.AgentHandler) {
-	s.setBusy(task.Handler, true)
-	defer s.setBusy(task.Handler, false)
+	s.setBusy(task.ID.String(), true)
+	defer s.setBusy(task.ID.String(), false)
 
 	s.logger.Info("agent-tasks: starting",
 		"task_id", task.ID,
