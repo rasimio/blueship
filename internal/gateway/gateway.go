@@ -719,9 +719,10 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		guidance.WriteString(researchBlock.String())
 	}
 
-	// Tool override.
+	// Tool override: only apply if reflex explicitly selected tools.
+	// Empty slice from JSON ("tools":[]") means "unspecified", not "no tools".
 	var toolOverride []string
-	if reflexResult.Tools != nil {
+	if len(reflexResult.Tools) > 0 {
 		toolOverride = reflexResult.Tools
 	}
 
