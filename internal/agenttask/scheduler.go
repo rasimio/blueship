@@ -139,11 +139,10 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			"handler", task.Handler,
 			"error", err,
 		)
-		if fErr := s.store.Fail(ctx, task.ID, err.Error()); fErr != nil {
-			s.logger.Error("agent-tasks: fail update error", "error", fErr)
-		}
-		if s.notify != nil {
-			s.notify(ctx, task.UserID, "Task failed: "+task.Title+"\n"+err.Error())
+		// Set back to pending for automatic retry on next tick.
+		// Iteration is NOT incremented — the failed attempt doesn't count.
+		if fErr := s.store.SetPending(ctx, task.ID); fErr != nil {
+			s.logger.Error("agent-tasks: reset after fail error", "error", fErr)
 		}
 		return
 	}

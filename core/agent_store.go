@@ -32,30 +32,39 @@ func (s *AgentTaskStore) PendingTasks(ctx context.Context) ([]AgentTask, error) 
 	return tasks, err
 }
 
-// SetRunning atomically marks a task as running and increments the iteration.
+// SetRunning marks a task as running. Does NOT increment iteration —
+// iteration is incremented only on successful completion (Complete/UpdateProgress)
+// so that crashes don't waste iterations.
 func (s *AgentTaskStore) SetRunning(ctx context.Context, id uuid.UUID) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks
-		SET status = 'running', last_run_at = NOW(), iteration = iteration + 1
+		SET status = 'running', last_run_at = NOW()
 		WHERE id = $1`, id)
 	return err
 }
 
-// UpdateProgress saves intermediate state and sets the task back to pending.
+// UpdateProgress saves intermediate state, increments iteration, and sets the task back to pending.
 func (s *AgentTaskStore) UpdateProgress(ctx context.Context, id uuid.UUID, progress json.RawMessage) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks
-		SET progress = $2, status = 'pending'
+		SET progress = $2, status = 'pending', iteration = iteration + 1
 		WHERE id = $1`, id, progress)
 	return err
 }
 
-// Complete marks a task as done with a final result.
+// Complete marks a task as done with a final result and increments iteration.
 func (s *AgentTaskStore) Complete(ctx context.Context, id uuid.UUID, result string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks
-		SET status = 'done', result = $2, completed_at = NOW()
+		SET status = 'done', result = $2, completed_at = NOW(), iteration = iteration + 1
 		WHERE id = $1`, id, result)
+	return err
+}
+
+// SetPending resets a task back to pending (for retry after transient errors).
+func (s *AgentTaskStore) SetPending(ctx context.Context, id uuid.UUID) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE agent_tasks SET status = 'pending' WHERE id = $1`, id)
 	return err
 }
 
