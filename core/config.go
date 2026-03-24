@@ -49,8 +49,9 @@ type TransportConfig struct {
 
 // ModelRef identifies a model and its provider.
 type ModelRef struct {
-	Provider string
-	Name     string
+	Provider       string
+	Name           string
+	ThinkingBudget int
 }
 
 // ForRouter returns "provider:name" for use with LLMRouter.
