@@ -113,15 +113,16 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	}
 
 	agentDeps := core.AgentDeps{
-		LLM:       s.deps.LLM,
-		Registry:  registry,
-		RoleTools: s.deps.RoleTools,
-		Store:     s.msgStore,
-		Prompts:   s.deps.Prompts,
-		Logger:    s.logger,
-		DB:        s.deps.DB,
-		UserID:    task.UserID,
-		Config:    s.deps.Config,
+		LLM:        s.deps.LLM,
+		Registry:   registry,
+		RoleTools:  s.deps.RoleTools,
+		ModelStore: s.deps.ModelStore,
+		Store:      s.msgStore,
+		Prompts:    s.deps.Prompts,
+		Logger:     s.logger,
+		DB:         s.deps.DB,
+		UserID:     task.UserID,
+		Config:     s.deps.Config,
 	}
 
 	// Apply deadline as context timeout.

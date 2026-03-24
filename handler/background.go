@@ -86,12 +86,20 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		return core.IterationResult{}, fmt.Errorf("create session: %w", err)
 	}
 
+	// Resolve model: prefer "background" role from ModelStore, fallback to primary.
+	model := deps.Config.Models.Primary.ForRouter()
+	if deps.ModelStore != nil {
+		if m := deps.ModelStore.ForRouter("background"); m != "" {
+			model = m
+		}
+	}
+
 	loop := agent.NewLoop(deps.LLM, deps.Store, deps.Registry, deps.RoleTools, deps.Config, deps.Logger)
 
 	reply, err := loop.Run(ctx, agent.RunConfig{
 		SessionID:    sessID,
 		SystemPrompt: systemPrompt,
-		Model:        deps.Config.Models.Primary.ForRouter(),
+		Model:        model,
 		MaxTokens:    deps.Config.Limits.MaxOutputTokens,
 		MaxTurns:     deps.Config.Gateway.MaxTurns,
 		Role:         "background",

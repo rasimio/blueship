@@ -65,15 +65,16 @@ type TaskProgress struct {
 
 // AgentDeps is a focused dependency bundle for agent handlers.
 type AgentDeps struct {
-	LLM       CompletionProvider
-	Registry  *ToolRegistry
-	RoleTools *RoleToolStore
-	Store     MessageStore // session/message persistence for agent loops
-	Prompts   PromptStore
-	Logger    *slog.Logger
-	DB        func(module string) (*sqlx.DB, error)
-	UserID    uuid.UUID
-	Config    *Config
+	LLM        CompletionProvider
+	Registry   *ToolRegistry
+	RoleTools  *RoleToolStore
+	ModelStore *ModelConfigStore // model role → provider:model (nil = use Config.Models)
+	Store      MessageStore     // session/message persistence for agent loops
+	Prompts    PromptStore
+	Logger     *slog.Logger
+	DB         func(module string) (*sqlx.DB, error)
+	UserID     uuid.UUID
+	Config     *Config
 }
 
 // SessionManager creates and manages chat sessions for agent handlers.
