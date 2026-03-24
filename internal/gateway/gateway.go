@@ -46,6 +46,8 @@ type Gateway struct {
 	reflexPlanTemplate   string // user prompt template (has %s placeholders for rules, tools, message)
 	extractInsightPrompt string // system prompt for insight extraction
 
+	encoder *memoryEncoder
+
 	mu    sync.Mutex
 	users map[int64]*UserState
 }
@@ -103,6 +105,26 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 		tz:        tz,
 		logger:    logger,
 		users:     make(map[int64]*UserState),
+	}
+
+	// Initialize memory encoder (Recall → Compare → React).
+	if cfg.LLM != nil && cfg.Embedder != nil {
+		memDB, _ := deps.DB("core")
+		if memDB != nil {
+			extractModel := "gemini:gemini-2.5-flash"
+			if deps.ModelStore != nil {
+				if m := deps.ModelStore.ForRouter("compact"); m != "" {
+					extractModel = m
+				}
+			}
+			gw.encoder = &memoryEncoder{
+				llm:      cfg.LLM,
+				embedder: cfg.Embedder.Embed,
+				db:       memDB,
+				logger:   logger,
+				model:    extractModel,
+			}
+		}
 	}
 
 	// Load system prompts: DB first, filesystem second, error if neither
@@ -494,10 +516,24 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	var content any
+	var msgText string
 	if len(blocks) == 1 && blocks[0].Type == "text" {
-		content = blocks[0].Text // backwards compat: plain string
+		msgText = blocks[0].Text
+		content = msgText
 	} else {
 		content = blocks
+		// Extract text for memory encoding
+		for _, b := range blocks {
+			if b.Type == "text" {
+				msgText = b.Text
+				break
+			}
+		}
+	}
+
+	// Memory encoding: Recall → Compare → React (non-blocking).
+	if msgText != "" && g.encoder != nil {
+		go g.encoder.encode(context.Background(), us.UserID.String(), msgText)
 	}
 
 	sess, err := g.GetOrCreateSession(ctx, us)
@@ -514,8 +550,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		"blocks", len(blocks),
 	)
 
-	// Collect message text for context injection.
-	msgText := ""
+	// Collect message text for context injection (msgText already set above for single-block).
 	for _, m := range msgs {
 		if m.text != "" {
 			if msgText != "" {
