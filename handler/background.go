@@ -109,8 +109,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	}
 
 	// 6. Parse response
+	// Only finish on the last iteration. LLM may output [DONE] early — ignore it.
 	isLastIteration := task.MaxIterations > 0 && task.Iteration+1 >= task.MaxIterations
-	isDone := strings.Contains(reply, "[DONE]") || isLastIteration
+	isDone := isLastIteration
 
 	if isDone {
 		clean := strings.ReplaceAll(reply, "[DONE]", "")
