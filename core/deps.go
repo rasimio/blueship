@@ -51,6 +51,10 @@ type Deps struct {
 	// Falls back to ContextInjector if not set.
 	ReflexPreparer func(ctx context.Context, userID, message string) *ReflexContext
 
+	// MessageEncoder is called after each user message to extract and save facts.
+	// Runs non-blocking in background. Implementations handle their own DB, embeddings, emotions.
+	MessageEncoder func(ctx context.Context, userID, message string)
+
 	pool *dbPool
 }
 
