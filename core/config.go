@@ -53,6 +53,7 @@ type ModelRef struct {
 	Name           string
 	MaxTokens      int
 	ThinkingBudget int
+	Temperature    float64
 }
 
 // ForRouter returns "provider:name" for use with LLMRouter.

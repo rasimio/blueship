@@ -47,6 +47,7 @@ type generateRequest struct {
 
 type genConfig struct {
 	MaxOutputTokens int             `json:"maxOutputTokens,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
 	ThinkingConfig  *thinkingConfig `json:"thinkingConfig,omitempty"`
 }
 
@@ -157,6 +158,10 @@ func (p *CompletionProvider) sendOnce(ctx context.Context, req bs.CompletionRequ
 	}
 
 	generation := &genConfig{MaxOutputTokens: req.MaxTokens}
+	if req.Temperature > 0 {
+		t := req.Temperature
+		generation.Temperature = &t
+	}
 	if req.ThinkingBudget >= 0 {
 		generation.ThinkingConfig = &thinkingConfig{ThinkingBudget: req.ThinkingBudget}
 	}

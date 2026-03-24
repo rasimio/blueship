@@ -546,6 +546,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	systemWithTime := fmt.Sprintf("[current_datetime: %s]\n\n%s",
 		now.Format("2006-01-02 15:04 MST (Monday)"), g.systemPrompt)
 
+	var cortexTemp float64
+	if g.deps.ModelStore != nil {
+		cortexTemp = g.deps.ModelStore.Get("cortex").Temperature
+	}
+
 	reply, err := loop.Run(ctx, agent.RunConfig{
 		SessionID:       sess.ID,
 		SystemPrompt:    systemWithTime,
@@ -557,6 +562,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		ReflexGuidance:  reflexGuidance,
 		Role:            "cortex",
 		ToolOverride:    toolOverride,
+		Temperature:     cortexTemp,
 	}, content)
 	if err != nil {
 		g.logger.Error("agent loop error",

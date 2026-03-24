@@ -25,7 +25,7 @@ func NewModelConfigStore(db *sqlx.DB) *ModelConfigStore {
 
 // Load reads all model assignments from DB into cache.
 func (s *ModelConfigStore) Load(ctx context.Context) error {
-	rows, err := s.db.QueryxContext(ctx, "SELECT role, provider, model_name, max_tokens, thinking_budget FROM model_config")
+	rows, err := s.db.QueryxContext(ctx, "SELECT role, provider, model_name, max_tokens, thinking_budget, COALESCE(temperature, 0) FROM model_config")
 	if err != nil {
 		return err
 	}
@@ -35,10 +35,11 @@ func (s *ModelConfigStore) Load(ctx context.Context) error {
 	for rows.Next() {
 		var role, provider, modelName string
 		var maxTokens, thinkingBudget int
-		if err := rows.Scan(&role, &provider, &modelName, &maxTokens, &thinkingBudget); err != nil {
+		var temperature float64
+		if err := rows.Scan(&role, &provider, &modelName, &maxTokens, &thinkingBudget, &temperature); err != nil {
 			return err
 		}
-		m[role] = ModelRef{Provider: provider, Name: modelName, MaxTokens: maxTokens, ThinkingBudget: thinkingBudget}
+		m[role] = ModelRef{Provider: provider, Name: modelName, MaxTokens: maxTokens, ThinkingBudget: thinkingBudget, Temperature: temperature}
 	}
 
 	s.mu.Lock()

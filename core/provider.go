@@ -17,7 +17,8 @@ type CompletionRequest struct {
 	Messages       []Message
 	Tools          []ToolDefinition
 	MaxTokens      int
-	ThinkingBudget int // -1 = provider default, 0 = disabled, >0 = explicit thinking budget
+	ThinkingBudget int     // -1 = provider default, 0 = disabled, >0 = explicit thinking budget
+	Temperature    float64 // 0 = provider default, >0 = explicit temperature (0.0-2.0)
 }
 
 // CompletionResponse is the output of CompletionProvider.Complete.

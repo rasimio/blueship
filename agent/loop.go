@@ -42,6 +42,8 @@ type RunConfig struct {
 	// ToolOverride overrides role-based tool selection with an explicit list.
 	// nil = use role default; empty slice = no tools.
 	ToolOverride []string
+	// Temperature for LLM generation (0 = provider default).
+	Temperature float64
 }
 
 // NewLoop creates a new agent loop.
@@ -168,6 +170,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 			Messages:       messages,
 			Tools:          tools,
 			ThinkingBudget: normalizeThinkingBudget(a.cfg.Limits.ThinkingBudget),
+			Temperature:    cfg.Temperature,
 		})
 		if err != nil {
 			return "", fmt.Errorf("LLM API: %w", err)
