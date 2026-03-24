@@ -49,6 +49,8 @@ func NewScheduler(
 // Run executes one scheduler tick: picks up pending tasks and dispatches handlers.
 // Called by scheduler.RunLoop every 60 seconds.
 func (s *Scheduler) Run(ctx context.Context) error {
+	s.logger.Info("agent-tasks: tick")
+
 	// Crash recovery: reset tasks stuck in 'running' for > 10 min.
 	if n, err := s.store.ResetStale(ctx, 10*time.Minute); err != nil {
 		s.logger.Warn("agent-tasks: reset stale failed", "error", err)
@@ -58,8 +60,11 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 	tasks, err := s.store.PendingTasks(ctx)
 	if err != nil {
+		s.logger.Error("agent-tasks: pending query failed", "error", err)
 		return err
 	}
+
+	s.logger.Info("agent-tasks: pending", "count", len(tasks))
 
 	for _, task := range tasks {
 		handler, ok := s.handlers[task.Handler]
