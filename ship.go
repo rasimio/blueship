@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -163,7 +164,12 @@ func (s *Ship) Run(ctx context.Context) error {
 					s.logger.Warn("agent-tasks: user lookup for notify failed", "error", err)
 					return
 				}
-				if _, err := deps.Sender.SendMessage(ctx, profile.ChatID, text); err != nil {
+				// Strip transport prefix (e.g. "telegram:5452235517" → "5452235517").
+				chatID := profile.ChatID
+				if idx := strings.Index(chatID, ":"); idx >= 0 {
+					chatID = chatID[idx+1:]
+				}
+				if _, err := deps.Sender.SendMessage(ctx, chatID, text); err != nil {
 					s.logger.Warn("agent-tasks: notify failed", "error", err)
 				}
 			}
