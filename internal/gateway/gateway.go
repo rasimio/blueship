@@ -700,6 +700,11 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		toolOverride = reflexResult.Tools
 	}
 
+	// memory_save ALWAYS available — cortex decides what to remember, not reflex.
+	if !containsTool(toolOverride, "memory_save") {
+		toolOverride = append(toolOverride, "memory_save")
+	}
+
 	// Intent-based tool enforcement.
 	switch reflexResult.Intent {
 	case "background_research":
@@ -707,7 +712,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 			toolOverride = append(toolOverride, "agent_task_create")
 		}
 	case "memory_operation":
-		for _, t := range []string{"memory_save", "memory_search", "memory_update"} {
+		for _, t := range []string{"memory_search", "memory_update"} {
 			if !containsTool(toolOverride, t) {
 				toolOverride = append(toolOverride, t)
 			}
