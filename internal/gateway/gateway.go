@@ -121,6 +121,7 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 				llm:      cfg.LLM,
 				embedder: cfg.Embedder.Embed,
 				db:       memDB,
+				prompts:  deps.Prompts,
 				logger:   logger,
 				model:    extractModel,
 			}

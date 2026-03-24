@@ -18,6 +18,7 @@ type memoryEncoder struct {
 	llm      bs.CompletionProvider
 	embedder func(ctx context.Context, text string) ([]float32, error)
 	db       *sqlx.DB
+	prompts  bs.PromptStore
 	logger   *slog.Logger
 	model    string // extraction model (Flash)
 }
@@ -27,12 +28,8 @@ type claim struct {
 	Importance float64 `json:"importance"`
 }
 
-const extractPrompt = `Extract factual claims from the user's message. Return JSON array.
-Only include concrete facts about the user: preferences, plans, feelings, events, decisions, purchases.
-Skip greetings, questions, commands, and meta-conversation.
-If nothing worth remembering — return empty array [].
-
-Format: [{"content": "fact in third person", "importance": 0.0-1.0}]`
+// extractPromptKey is the system_prompts DB key for the memory extraction prompt.
+const extractPromptKey = "memory-extract"
 
 // encode runs the full Recall → Compare → React cycle for a user message.
 func (e *memoryEncoder) encode(ctx context.Context, userID, message string) {
@@ -55,9 +52,24 @@ func (e *memoryEncoder) extractClaims(ctx context.Context, message string) []cla
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
+	// Load extraction prompt from DB, prepend preamble+soul for persona context.
+	var parts []string
+	for _, key := range []string{"preamble", "soul", extractPromptKey} {
+		p, err := e.prompts.Get(ctx, key)
+		if err != nil {
+			if key == extractPromptKey {
+				e.logger.Warn("memory_encode: prompt not found", "key", key, "error", err)
+				return nil
+			}
+			continue // preamble/soul optional
+		}
+		parts = append(parts, p)
+	}
+	systemPrompt := strings.Join(parts, "\n\n")
+
 	resp, err := e.llm.Complete(ctx, bs.CompletionRequest{
 		Model:     e.model,
-		System:    extractPrompt,
+		System:    systemPrompt,
 		MaxTokens: 512,
 		Messages:  []bs.Message{{Role: "user", Content: bs.NormalizeContent(message)}},
 	})
