@@ -51,6 +51,9 @@ func NewScheduler(
 func (s *Scheduler) Run(ctx context.Context) error {
 	s.logger.Info("agent-tasks: tick")
 
+	// Auto-complete tasks that exhausted iterations but weren't marked done.
+	s.store.CompleteExhausted(ctx)
+
 	// Crash recovery: reset tasks stuck in 'running' for > 10 min.
 	if n, err := s.store.ResetStale(ctx, 10*time.Minute); err != nil {
 		s.logger.Warn("agent-tasks: reset stale failed", "error", err)

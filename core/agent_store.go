@@ -61,6 +61,13 @@ func (s *AgentTaskStore) Complete(ctx context.Context, id uuid.UUID, result stri
 	return err
 }
 
+// CompleteExhausted marks tasks as done if they've used all iterations but weren't completed.
+func (s *AgentTaskStore) CompleteExhausted(ctx context.Context) {
+	s.db.ExecContext(ctx, `
+		UPDATE agent_tasks SET status = 'done', completed_at = NOW()
+		WHERE status = 'pending' AND max_iterations > 0 AND iteration >= max_iterations`)
+}
+
 // SetPending resets a task back to pending (for retry after transient errors).
 func (s *AgentTaskStore) SetPending(ctx context.Context, id uuid.UUID) error {
 	_, err := s.db.ExecContext(ctx, `
