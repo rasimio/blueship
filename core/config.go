@@ -51,6 +51,7 @@ type TransportConfig struct {
 type ModelRef struct {
 	Provider       string
 	Name           string
+	MaxTokens      int
 	ThinkingBudget int
 }
 
