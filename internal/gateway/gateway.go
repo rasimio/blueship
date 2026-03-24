@@ -700,9 +700,24 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		toolOverride = reflexResult.Tools
 	}
 
-	// Intent-based tool enforcement: background_research must have agent_task_create.
-	if reflexResult.Intent == "background_research" && !containsTool(toolOverride, "agent_task_create") {
-		toolOverride = append(toolOverride, "agent_task_create")
+	// Intent-based tool enforcement.
+	switch reflexResult.Intent {
+	case "background_research":
+		if !containsTool(toolOverride, "agent_task_create") {
+			toolOverride = append(toolOverride, "agent_task_create")
+		}
+	case "memory_operation":
+		for _, t := range []string{"memory_save", "memory_search", "memory_update"} {
+			if !containsTool(toolOverride, t) {
+				toolOverride = append(toolOverride, t)
+			}
+		}
+	case "task_management":
+		for _, t := range []string{"memory_search", "memory_update", "agent_task_list", "agent_task_status"} {
+			if !containsTool(toolOverride, t) {
+				toolOverride = append(toolOverride, t)
+			}
+		}
 	}
 
 	// Close research block if any pre-actions produced results.
