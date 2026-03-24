@@ -84,4 +84,6 @@ type TransportSender interface {
 // Used by higher-level modules that need to send messages outside the gateway flow.
 type MessageSender interface {
 	SendMessage(ctx context.Context, chatID string, text string) (messageID int, err error)
+	// SendLong sends a potentially long message, splitting into chunks as needed.
+	SendLong(ctx context.Context, chatID string, text string) error
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -169,7 +170,7 @@ func (s *Ship) Run(ctx context.Context) error {
 				if idx := strings.Index(chatID, ":"); idx >= 0 {
 					chatID = chatID[idx+1:]
 				}
-				if _, err := deps.Sender.SendMessage(ctx, chatID, text); err != nil {
+				if err := deps.Sender.SendLong(ctx, chatID, text); err != nil {
 					s.logger.Warn("agent-tasks: notify failed", "error", err)
 				}
 			}
@@ -320,4 +321,13 @@ func (a *telegramSenderAdapter) SendMessage(ctx context.Context, chatID string, 
 		return 0, err
 	}
 	return result.Result.MessageID, nil
+}
+
+func (a *telegramSenderAdapter) SendLong(ctx context.Context, chatID string, text string) error {
+	id, err := strconv.ParseInt(chatID, 10, 64)
+	if err != nil {
+		_, err = a.client.SendMessage(ctx, chatID, text)
+		return err
+	}
+	return a.client.SendLong(ctx, id, text)
 }
