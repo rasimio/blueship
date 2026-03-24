@@ -142,22 +142,25 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	}
 
 	result, err := handler.Run(execCtx, task, agentDeps)
+
+	// Use background context for all post-handler DB ops — parent ctx may be cancelled on shutdown.
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer dbCancel()
+
 	if err != nil {
 		s.logger.Error("agent-tasks: handler failed",
 			"task_id", task.ID,
 			"handler", task.Handler,
 			"error", err,
 		)
-		// Set back to pending for automatic retry on next tick.
-		// Iteration is NOT incremented — the failed attempt doesn't count.
-		if fErr := s.store.SetPending(ctx, task.ID); fErr != nil {
+		if fErr := s.store.SetPending(dbCtx, task.ID); fErr != nil {
 			s.logger.Error("agent-tasks: reset after fail error", "error", fErr)
 		}
 		return
 	}
 
 	if result.Notify != "" && s.notify != nil {
-		s.notify(ctx, task.UserID, result.Notify)
+		s.notify(dbCtx, task.UserID, result.Notify)
 	}
 
 	if result.Done {
@@ -165,17 +168,17 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			"task_id", task.ID,
 			"handler", task.Handler,
 		)
-		if err := s.store.Complete(ctx, task.ID, result.Output); err != nil {
+		if err := s.store.Complete(dbCtx, task.ID, result.Output); err != nil {
 			s.logger.Error("agent-tasks: complete update error", "error", err)
 		}
 		// Recurring tasks: reset for next run.
 		if task.Schedule != nil {
-			if err := s.store.ResetForNextRun(ctx, task.ID); err != nil {
+			if err := s.store.ResetForNextRun(dbCtx, task.ID); err != nil {
 				s.logger.Error("agent-tasks: reset for next run error", "error", err)
 			}
 		}
 		if result.Output != "" && s.notify != nil {
-			s.notify(ctx, task.UserID, "Task done: "+task.Title+"\n\n"+result.Output)
+			s.notify(dbCtx, task.UserID, "Task done: "+task.Title+"\n\n"+result.Output)
 		}
 	} else {
 		s.logger.Info("agent-tasks: iteration done",
@@ -183,7 +186,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			"handler", task.Handler,
 			"iteration", task.Iteration+1,
 		)
-		if err := s.store.UpdateProgress(ctx, task.ID, result.Progress); err != nil {
+		if err := s.store.UpdateProgress(dbCtx, task.ID, result.Progress); err != nil {
 			s.logger.Error("agent-tasks: progress update error", "error", err)
 		}
 	}
