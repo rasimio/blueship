@@ -12,23 +12,22 @@ import (
 )
 
 // Background implements core.AgentHandler for generic multi-iteration tasks.
-// Loads "background-task" system prompt, injects task context and progress,
-// runs an agent loop, parses LLM response to determine completion.
+// Uses a shared session across all iterations so LLM has full conversation history.
+// Iteration 0 = planning, 1..N-2 = execution, N-1 = synthesis.
 type Background struct {
 	tz *time.Location
 }
 
-// NewBackground creates a background task handler.
 func NewBackground(tz *time.Location) *Background {
 	return &Background{tz: tz}
 }
 
 func (b *Background) DefaultTools() []string {
-	return nil // determined by task.Tools or role
+	return nil
 }
 
 func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.AgentDeps) (core.IterationResult, error) {
-	// 1. Load system prompt: preamble + soul + agents + background-task
+	// 1. Load system prompt
 	var parts []string
 	for _, key := range []string{"preamble", "soul", "agents", "background-task"} {
 		p, err := deps.Prompts.Get(ctx, key)
@@ -39,54 +38,17 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	}
 	systemPrompt := strings.Join(parts, "\n\n")
 
-	// 2. Inject datetime
 	now := time.Now().In(b.tz)
 	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s",
 		now.Format("2006-01-02 15:04 MST (Monday)"), systemPrompt)
 
-	// 3. Parse existing progress
-	var progress core.TaskProgress
+	// 2. Parse progress (contains session_id for shared session + plan)
+	var progress bgProgress
 	if len(task.Progress) > 0 && string(task.Progress) != "{}" {
 		json.Unmarshal(task.Progress, &progress)
 	}
 
-	// 4. Build user message
-	desc := ""
-	if task.Description != nil {
-		desc = *task.Description
-	}
-	var msg strings.Builder
-	fmt.Fprintf(&msg, "[BACKGROUND TASK: %s]\n", task.Title)
-	fmt.Fprintf(&msg, "Mission: %s\n", desc)
-	fmt.Fprintf(&msg, "Iteration: %d/%d\n", task.Iteration+1, task.MaxIterations)
-	if task.Deadline != nil {
-		fmt.Fprintf(&msg, "Deadline: %s\n", task.Deadline.In(b.tz).Format("2006-01-02 15:04"))
-	}
-
-	if progress.Phase != "" {
-		msg.WriteString("\n[PREVIOUS PROGRESS]\n")
-		fmt.Fprintf(&msg, "Phase: %s\n", progress.Phase)
-		if progress.Summary != "" {
-			fmt.Fprintf(&msg, "Summary: %s\n", progress.Summary)
-		}
-		for _, f := range progress.Findings {
-			fmt.Fprintf(&msg, "- %s\n", f)
-		}
-		if len(progress.NextSteps) > 0 {
-			msg.WriteString("Next steps:\n")
-			for _, s := range progress.NextSteps {
-				fmt.Fprintf(&msg, "- %s\n", s)
-			}
-		}
-	}
-
-	// 5. Create session and run agent loop
-	sessID, err := deps.Store.CreateSession(ctx, task.UserID.String(), deps.Config.Models.Primary.ForRouter())
-	if err != nil {
-		return core.IterationResult{}, fmt.Errorf("create session: %w", err)
-	}
-
-	// Resolve model: prefer "background" role from ModelStore, fallback to primary.
+	// 3. Resolve model
 	model := deps.Config.Models.Primary.ForRouter()
 	if deps.ModelStore != nil {
 		if m := deps.ModelStore.ForRouter("background"); m != "" {
@@ -94,6 +56,56 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		}
 	}
 
+	// 4. Get or create shared session (one session for the entire task lifecycle)
+	sessID := progress.SessionID
+	if sessID == "" {
+		var err error
+		sessID, err = deps.Store.CreateSession(ctx, task.UserID.String(), model)
+		if err != nil {
+			return core.IterationResult{}, fmt.Errorf("create session: %w", err)
+		}
+		progress.SessionID = sessID
+	}
+
+	// 5. Build user message based on iteration phase
+	desc := ""
+	if task.Description != nil {
+		desc = *task.Description
+	}
+
+	isFirst := task.Iteration == 0
+	isLast := task.MaxIterations > 0 && task.Iteration+1 >= task.MaxIterations
+
+	var msg string
+	if isFirst {
+		// Planning iteration: ask LLM to create a plan
+		msg = fmt.Sprintf(
+			"[TASK: %s]\nMission: %s\nTotal iterations: %d\n\n"+
+				"This is iteration 1/%d — PLANNING.\n"+
+				"Create a detailed research plan. Break the mission into %d steps (one per iteration).\n"+
+				"Then execute step 1. Use web_search and web_fetch to find real data.\n"+
+				"Save important findings via memory_save.",
+			task.Title, desc, task.MaxIterations,
+			task.MaxIterations, task.MaxIterations-1)
+	} else if isLast {
+		// Synthesis iteration
+		msg = fmt.Sprintf(
+			"This is the FINAL iteration %d/%d — SYNTHESIS.\n"+
+				"Review everything found in previous iterations (it's all in our conversation history above).\n"+
+				"Write a comprehensive final report. Be specific, cite sources.\n"+
+				"Save the final summary via memory_save.",
+			task.Iteration+1, task.MaxIterations)
+	} else {
+		// Execution iteration
+		msg = fmt.Sprintf(
+			"This is iteration %d/%d — EXECUTION.\n"+
+				"Continue the research plan from previous iterations.\n"+
+				"Look at what was already done above and do the NEXT step.\n"+
+				"Use web_search and web_fetch for fresh data. Save findings via memory_save.",
+			task.Iteration+1, task.MaxIterations)
+	}
+
+	// 6. Run agent loop (shared session — LLM sees full history)
 	loop := agent.NewLoop(deps.LLM, deps.Store, deps.Registry, deps.RoleTools, deps.Config, deps.Logger)
 
 	reply, err := loop.Run(ctx, agent.RunConfig{
@@ -103,21 +115,25 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		MaxTokens:    deps.Config.Limits.MaxOutputTokens,
 		MaxTurns:     deps.Config.Gateway.MaxTurns,
 		Role:         "background",
-	}, msg.String())
+	}, msg)
 	if err != nil {
 		return core.IterationResult{}, fmt.Errorf("agent loop: %w", err)
 	}
 
-	// 6. Parse response
-	// Only finish on the last iteration. LLM may output [DONE] early — ignore it.
-	isLastIteration := task.MaxIterations > 0 && task.Iteration+1 >= task.MaxIterations
-	isDone := isLastIteration
+	// 7. Save progress with session ID
+	progress.Phase = fmt.Sprintf("iteration_%d", task.Iteration+1)
+	progress.Summary = truncate(reply, 500)
+	progressJSON, _ := json.Marshal(progress)
 
-	if isDone {
+	if isLast {
 		clean := strings.ReplaceAll(reply, "[DONE]", "")
 		clean = strings.ReplaceAll(clean, "[CONTINUE]", "")
 		clean = strings.ReplaceAll(clean, "[MILESTONE]", "")
 		clean = strings.TrimSpace(clean)
+
+		// Archive session
+		deps.Store.CompactSession(ctx, sessID, "task completed", 0)
+
 		return core.IterationResult{
 			Done:   true,
 			Output: clean,
@@ -125,18 +141,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		}, nil
 	}
 
-	// Continue: update progress
-	newProgress := core.TaskProgress{
-		Phase:    "in_progress",
-		Findings: progress.Findings,
-		Summary:  truncate(reply, 500),
-	}
-	newProgress.Findings = append(newProgress.Findings, truncate(reply, 300))
-	progressJSON, _ := json.Marshal(newProgress)
-
 	var notify string
 	if strings.Contains(reply, "[MILESTONE]") {
-		notify = fmt.Sprintf("📋 %s (iteration %d/%d)\n\n%s",
+		notify = fmt.Sprintf("%s (iteration %d/%d)\n\n%s",
 			task.Title, task.Iteration+1, task.MaxIterations, truncate(reply, 400))
 	}
 
@@ -145,6 +152,12 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		Progress: progressJSON,
 		Notify:   notify,
 	}, nil
+}
+
+// bgProgress extends TaskProgress with session management.
+type bgProgress struct {
+	core.TaskProgress
+	SessionID string `json:"session_id"` // shared session across iterations
 }
 
 func truncate(s string, n int) string {
