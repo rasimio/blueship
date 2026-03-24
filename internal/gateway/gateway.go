@@ -694,6 +694,11 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		toolOverride = reflexResult.Tools
 	}
 
+	// Intent-based tool enforcement: background_research must have agent_task_create.
+	if reflexResult.Intent == "background_research" && !containsTool(toolOverride, "agent_task_create") {
+		toolOverride = append(toolOverride, "agent_task_create")
+	}
+
 	// Close research block if any pre-actions produced results.
 	if researchBlock.Len() > 0 {
 		researchBlock.WriteString("[/research]")
@@ -892,6 +897,15 @@ func (g *Gateway) todayResetTime() time.Time {
 
 // Timezone returns the configured timezone.
 func (g *Gateway) Timezone() *time.Location { return g.tz }
+
+func containsTool(tools []string, name string) bool {
+	for _, t := range tools {
+		if t == name {
+			return true
+		}
+	}
+	return false
+}
 
 func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 	us, err := g.getOrInitUser(ctx, chatID)
