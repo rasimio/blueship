@@ -1056,8 +1056,10 @@ func (g *Gateway) handleResetCommand(ctx context.Context, chatID int64) {
 		}
 	}
 
-	// Archive current session
-	sess, err := g.store.GetOrCreate(ctx, us.UserID.String(), g.cortexModel())
+	// Archive current session and create a new one immediately.
+	uid := us.UserID.String()
+	model := g.cortexModelDisplay()
+	sess, err := g.store.GetOrCreate(ctx, uid, g.cortexModel())
 	if err == nil && sess != nil {
 		_ = g.store.Archive(ctx, sess.ID)
 		g.logger.Info("reset: archived session",
@@ -1067,8 +1069,13 @@ func (g *Gateway) handleResetCommand(ctx context.Context, chatID int64) {
 		)
 	}
 
-	model := g.cortexModelDisplay()
-	msg := fmt.Sprintf("Session reset.\nModel: %s", model)
+	// Create new session right away so no race between archive and next message.
+	newSess, err := g.store.Create(ctx, uid, model)
+	sessionInfo := ""
+	if err == nil && newSess != nil {
+		sessionInfo = fmt.Sprintf("\nSession: %s", newSess.ID)
+	}
+	msg := fmt.Sprintf("Session reset.\nModel: %s%s", model, sessionInfo)
 	if err := g.tg.SendLong(ctx, chatID, msg); err != nil {
 		g.logger.Error("reset command: send error", "error", err)
 	}
