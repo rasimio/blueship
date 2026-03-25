@@ -155,6 +155,18 @@ func (s *AgentTaskStore) Get(ctx context.Context, id uuid.UUID) (AgentTask, erro
 	return task, err
 }
 
+// EnsureRecurring creates a recurring task if one doesn't exist for (user_id, handler).
+// If one exists, updates the schedule. Uses the unique partial index from migration 014.
+func (s *AgentTaskStore) EnsureRecurring(ctx context.Context, userID uuid.UUID, handler, schedule, title string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO agent_tasks (user_id, handler, schedule, title, status, max_iterations, config, progress)
+		VALUES ($1, $2, $3, $4, 'pending', 1, '{}', '{}')
+		ON CONFLICT (user_id, handler) WHERE schedule IS NOT NULL AND status != 'failed'
+		DO UPDATE SET schedule = EXCLUDED.schedule, title = EXCLUDED.title`,
+		userID, handler, schedule, title)
+	return err
+}
+
 // ListForUser returns tasks for a user, optionally filtered by status.
 func (s *AgentTaskStore) ListForUser(ctx context.Context, userID uuid.UUID, status string) ([]AgentTask, error) {
 	var tasks []AgentTask

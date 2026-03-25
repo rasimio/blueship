@@ -122,11 +122,14 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 
 	agentDeps := core.AgentDeps{
 		LLM:        s.deps.LLM,
+		Embedder:   s.deps.Embedder,
 		Registry:   registry,
 		RoleTools:  s.deps.RoleTools,
 		ModelStore: s.deps.ModelStore,
 		Store:      s.msgStore,
 		Prompts:    s.deps.Prompts,
+		Users:      s.deps.Users,
+		Sessions:   s.deps.Sessions,
 		Logger:     s.logger,
 		DB:         s.deps.DB,
 		UserID:     task.UserID,
