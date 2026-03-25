@@ -19,6 +19,8 @@ type Session struct {
 	CompactSummary   *string   `db:"compact_summary" json:"compact_summary,omitempty"`
 	PreviousID       *string   `db:"previous_id" json:"previous_id,omitempty"`
 	Active           bool      `db:"active" json:"active"`
+	Source           string    `db:"source" json:"source"`
+	SourceID         *string   `db:"source_id" json:"source_id,omitempty"`
 	CreatedAt        time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
 }

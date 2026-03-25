@@ -60,7 +60,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	sessID := progress.SessionID
 	if sessID == "" {
 		var err error
-		sessID, err = deps.Store.CreateSession(ctx, task.UserID.String(), model)
+		sessID, err = deps.Store.CreateSessionWithSource(ctx, task.UserID.String(), model, "agent_task", task.ID.String())
 		if err != nil {
 			return core.IterationResult{}, fmt.Errorf("create session: %w", err)
 		}

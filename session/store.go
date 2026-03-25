@@ -64,6 +64,31 @@ func (s *Store) CreateSession(ctx context.Context, userID, model string) (string
 	return sess.ID, nil
 }
 
+// CreateSessionWithSource creates a session tagged with source and optional source_id.
+func (s *Store) CreateSessionWithSource(ctx context.Context, userID, model, source, sourceID string) (string, error) {
+	var sess Session
+	var err error
+	if sourceID != "" {
+		err = s.db.QueryRowxContext(ctx,
+			`INSERT INTO chat_sessions (user_id, model, source, source_id)
+			 VALUES ($1, $2, $3, $4)
+			 RETURNING *`,
+			userID, model, source, sourceID,
+		).StructScan(&sess)
+	} else {
+		err = s.db.QueryRowxContext(ctx,
+			`INSERT INTO chat_sessions (user_id, model, source)
+			 VALUES ($1, $2, $3)
+			 RETURNING *`,
+			userID, model, source,
+		).StructScan(&sess)
+	}
+	if err != nil {
+		return "", fmt.Errorf("create session with source: %w", err)
+	}
+	return sess.ID, nil
+}
+
 // GetOrCreate returns the latest active session for a user, or creates a new one.
 func (s *Store) GetOrCreate(ctx context.Context, userID, model string) (*Session, error) {
 	var sess Session
