@@ -131,8 +131,8 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		clean = strings.ReplaceAll(clean, "[MILESTONE]", "")
 		clean = strings.TrimSpace(clean)
 
-		// Archive session
-		deps.Store.CompactSession(ctx, sessID, "task completed", 0)
+		// Archive session (one-shot, no reuse after task completion).
+		deps.Store.ArchiveSession(ctx, sessID)
 
 		return core.IterationResult{
 			Done:   true,

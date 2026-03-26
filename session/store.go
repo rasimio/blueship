@@ -116,6 +116,11 @@ func (s *Store) IsActive(ctx context.Context, sessionID string) (bool, error) {
 	return active, nil
 }
 
+// ArchiveSession marks a session as inactive. Satisfies core.MessageStore.
+func (s *Store) ArchiveSession(ctx context.Context, sessionID string) error {
+	return s.Archive(ctx, sessionID)
+}
+
 // Archive marks a session as inactive.
 func (s *Store) Archive(ctx context.Context, sessionID string) error {
 	res, err := s.db.ExecContext(ctx,

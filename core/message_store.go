@@ -26,4 +26,7 @@ type MessageStore interface {
 	// CreateSessionWithSource creates a session tagged with who created it.
 	// source: "chat", "agent_task", "cli". sourceID: agent_tasks.id or empty.
 	CreateSessionWithSource(ctx context.Context, userID, model, source, sourceID string) (sessionID string, err error)
+
+	// ArchiveSession marks a session as inactive.
+	ArchiveSession(ctx context.Context, sessionID string) error
 }
