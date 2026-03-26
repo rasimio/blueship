@@ -48,11 +48,15 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		json.Unmarshal(task.Progress, &progress)
 	}
 
-	// 3. Resolve model
-	model := deps.Config.Models.Primary.ForRouter()
+	// 3. Resolve model: router format for LLM, display name for session.
+	routerModel := deps.Config.Models.Primary.ForRouter()
+	displayModel := deps.Config.Models.Primary.Name
 	if deps.ModelStore != nil {
 		if m := deps.ModelStore.ForRouter("background"); m != "" {
-			model = m
+			routerModel = m
+		}
+		if ref := deps.ModelStore.Get("background"); ref.Name != "" {
+			displayModel = ref.Name
 		}
 	}
 
@@ -60,7 +64,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	sessID := progress.SessionID
 	if sessID == "" {
 		var err error
-		sessID, err = deps.Store.CreateSessionWithSource(ctx, task.UserID.String(), model, "agent_task", task.ID.String())
+		sessID, err = deps.Store.CreateSessionWithSource(ctx, task.UserID.String(), displayModel, "agent_task", task.ID.String())
 		if err != nil {
 			return core.IterationResult{}, fmt.Errorf("create session: %w", err)
 		}
@@ -111,7 +115,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	reply, err := loop.Run(ctx, agent.RunConfig{
 		SessionID:    sessID,
 		SystemPrompt: systemPrompt,
-		Model:        model,
+		Model:        routerModel,
 		MaxTokens:    deps.Config.Limits.MaxOutputTokens,
 		MaxTurns:     deps.Config.Gateway.MaxTurns,
 		Role:         "background",
