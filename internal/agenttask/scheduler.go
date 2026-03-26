@@ -3,6 +3,7 @@ package agenttask
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -180,7 +181,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 				s.logger.Error("agent-tasks: reset for next run error", "error", err)
 			}
 		}
-		if result.Output != "" && s.notify != nil {
+		if result.Output != "" && s.notify != nil && !strings.Contains(result.Output, "[no-op]") {
 			s.notify(dbCtx, task.UserID, "Task done: "+task.Title+"\n\n"+result.Output)
 		}
 	} else {
