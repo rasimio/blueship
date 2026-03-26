@@ -27,20 +27,12 @@ import (
 	"github.com/rasimio/blueship/tool"
 )
 
-// recurringDef holds a recurring task definition to seed on startup.
-type recurringDef struct {
-	handler  string
-	schedule string
-	title    string
-}
-
 // Ship is the main BlueShip runtime instance.
 type Ship struct {
-	cfg       Config
-	modules   []Module
-	handlers  map[string]core.AgentHandler
-	recurring []recurringDef
-	logger    *slog.Logger
+	cfg      Config
+	modules  []Module
+	handlers map[string]core.AgentHandler
+	logger   *slog.Logger
 }
 
 // New creates a new BlueShip instance with the given configuration.
@@ -67,11 +59,6 @@ func (s *Ship) RegisterAgentHandler(name string, h core.AgentHandler) {
 		s.handlers = make(map[string]core.AgentHandler)
 	}
 	s.handlers[name] = h
-}
-
-// RegisterRecurringTask declares a task that should be seeded into agent_tasks on startup.
-func (s *Ship) RegisterRecurringTask(handler, schedule, title string) {
-	s.recurring = append(s.recurring, recurringDef{handler: handler, schedule: schedule, title: title})
 }
 
 // Run starts BlueShip: connects to DB, initializes providers, starts transport, runs jobs.
@@ -139,16 +126,6 @@ func (s *Ship) Run(ctx context.Context) error {
 	}
 	deps.UserID = uid
 	s.logger.Info("running as owner", "user_id", uid.String())
-
-	// 2e. Seed recurring agent tasks.
-	if len(s.recurring) > 0 {
-		taskStore := core.NewAgentTaskStore(shipDB)
-		for _, r := range s.recurring {
-			if err := taskStore.EnsureRecurring(ctx, uid, r.handler, r.schedule, r.title); err != nil {
-				s.logger.Warn("seed recurring task", "handler", r.handler, "error", err)
-			}
-		}
-	}
 
 	// 3. Create module registry adapter
 	reg := &moduleRegistry{
