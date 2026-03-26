@@ -156,7 +156,7 @@ func (s *Ship) Run(ctx context.Context) error {
 		taskStore := core.NewAgentTaskStore(shipDB)
 		msgStore := session.NewStore(shipDB) // MessageStore for agent loops
 
-		// Notification callback: send message to user via Sender.
+		// Notification callback: append to chat session (so cortex sees it) + send to Telegram.
 		var notifyFn func(ctx context.Context, userID uuid.UUID, text string)
 		if deps.Sender != nil && deps.Users != nil {
 			notifyFn = func(ctx context.Context, userID uuid.UUID, text string) {
@@ -165,7 +165,20 @@ func (s *Ship) Run(ctx context.Context) error {
 					s.logger.Warn("agent-tasks: user lookup for notify failed", "error", err)
 					return
 				}
-				// Strip transport prefix (e.g. "telegram:5452235517" → "5452235517").
+
+				// Append to active chat session so cortex sees it in conversation history.
+				uid := userID.String()
+				var sessID string
+				_ = shipDB.GetContext(ctx, &sessID,
+					`SELECT id FROM chat_sessions WHERE user_id = $1 AND source = 'chat' AND active = true ORDER BY updated_at DESC LIMIT 1`, uid)
+				if sessID != "" {
+					_ = msgStore.Append(ctx, sessID, core.Message{
+						Role:    "assistant",
+						Content: core.NormalizeContent(text),
+					})
+				}
+
+				// Send to Telegram.
 				chatID := profile.ChatID
 				if idx := strings.Index(chatID, ":"); idx >= 0 {
 					chatID = chatID[idx+1:]
