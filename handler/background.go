@@ -138,6 +138,10 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		// Archive session (one-shot, no reuse after task completion).
 		deps.Store.ArchiveSession(ctx, sessID)
 
+		// Filter no-op — nothing to report.
+		if clean == "" || strings.Contains(clean, "[no-op]") {
+			return core.IterationResult{Done: true}, nil
+		}
 		return core.IterationResult{
 			Done:   true,
 			Output: clean,
