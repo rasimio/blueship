@@ -80,34 +80,18 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	isFirst := task.Iteration == 0
 	isLast := task.MaxIterations > 0 && task.Iteration+1 >= task.MaxIterations
 
-	var msg string
+	// Load phase-specific prompt templates from DB (fallback to minimal defaults).
+	phaseKey := "background-execution"
 	if isFirst {
-		// Planning iteration: ask LLM to create a plan
-		msg = fmt.Sprintf(
-			"[TASK: %s]\nMission: %s\nTotal iterations: %d\n\n"+
-				"This is iteration 1/%d — PLANNING.\n"+
-				"Create a detailed research plan. Break the mission into %d steps (one per iteration).\n"+
-				"Then execute step 1. Use web_search and web_fetch to find real data.\n"+
-				"Save important findings via memory_save.",
-			task.Title, desc, task.MaxIterations,
-			task.MaxIterations, task.MaxIterations-1)
+		phaseKey = "background-planning"
 	} else if isLast {
-		// Synthesis iteration
-		msg = fmt.Sprintf(
-			"This is the FINAL iteration %d/%d — SYNTHESIS.\n"+
-				"Review everything found in previous iterations (it's all in our conversation history above).\n"+
-				"Write a comprehensive final report. Be specific, cite sources.\n"+
-				"Save the final summary via memory_save.",
-			task.Iteration+1, task.MaxIterations)
-	} else {
-		// Execution iteration
-		msg = fmt.Sprintf(
-			"This is iteration %d/%d — EXECUTION.\n"+
-				"Continue the research plan from previous iterations.\n"+
-				"Look at what was already done above and do the NEXT step.\n"+
-				"Use web_search and web_fetch for fresh data. Save findings via memory_save.",
-			task.Iteration+1, task.MaxIterations)
+		phaseKey = "background-synthesis"
 	}
+	phasePrompt, _ := deps.Prompts.Get(ctx, phaseKey)
+
+	// Build message with task context + phase instructions.
+	msg := fmt.Sprintf("[TASK: %s]\nMission: %s\nIteration: %d/%d\n\n%s",
+		task.Title, desc, task.Iteration+1, task.MaxIterations, phasePrompt)
 
 	// 6. Run agent loop (shared session — LLM sees full history)
 	loop := agent.NewLoop(deps.LLM, deps.Store, deps.Registry, deps.RoleTools, deps.Config, deps.Logger)
