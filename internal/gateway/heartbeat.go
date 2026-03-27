@@ -61,25 +61,17 @@ func (h *HeartbeatJob) runForUser(ctx context.Context, us *UserState) {
 	}
 
 	cfg := h.gateway.deps.Config
-
-	// Inject active notes so heartbeat can check deadlines.
-	var injectedCtx string
-	if us.Deps != nil && us.Deps.ContextInjector != nil {
-		injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), "heartbeat")
-	}
-
 	loop := agent.NewLoop(h.gateway.provider, h.gateway.store, us.Registry, h.gateway.deps.RoleTools, cfg, h.gateway.logger)
 	loop.SetCompactor(h.gateway.compactor)
 
 	reply, err := loop.Run(ctx, agent.RunConfig{
-		SessionID:       sess.ID,
-		SystemPrompt:    h.gateway.systemPromptHeartbeat,
-		CompactSummary:  derefString(sess.CompactSummary),
-		InjectedContext: injectedCtx,
-		Model:           h.gateway.cortexModel(),
-		MaxTokens:       cfg.Limits.MaxOutputTokens,
-		MaxTurns:        cfg.Gateway.MaxTurns,
-		Role:            "background",
+		SessionID:      sess.ID,
+		SystemPrompt:   h.gateway.systemPromptHeartbeat,
+		CompactSummary: derefString(sess.CompactSummary),
+		Model:          h.gateway.cortexModel(),
+		MaxTokens:      cfg.Limits.MaxOutputTokens,
+		MaxTurns:       cfg.Gateway.MaxTurns,
+		Role:           "background",
 	}, "heartbeat")
 	if err != nil {
 		h.gateway.logger.Error("heartbeat agent loop error",
