@@ -163,7 +163,8 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		return
 	}
 
-	if result.Notify != "" && s.notify != nil {
+	// Notify user only if handler explicitly requested it (not scheduler's decision).
+	if result.Notify != "" && s.notify != nil && !strings.Contains(result.Notify, "[no-op]") {
 		s.notify(dbCtx, task.UserID, result.Notify)
 	}
 
@@ -180,9 +181,6 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			if err := s.store.ResetForNextRun(dbCtx, task.ID); err != nil {
 				s.logger.Error("agent-tasks: reset for next run error", "error", err)
 			}
-		}
-		if result.Output != "" && s.notify != nil && !strings.Contains(result.Output, "[no-op]") {
-			s.notify(dbCtx, task.UserID, "Task done: "+task.Title+"\n\n"+result.Output)
 		}
 	} else {
 		s.logger.Info("agent-tasks: iteration done",
