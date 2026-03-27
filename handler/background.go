@@ -124,6 +124,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 		// Filter no-op — nothing to report.
 		if clean == "" || strings.Contains(clean, "[no-op]") {
+			deps.Store.ArchiveSession(ctx, sessID)
 			return core.IterationResult{Done: true}, nil
 		}
 		return core.IterationResult{
