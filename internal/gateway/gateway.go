@@ -617,7 +617,11 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		g.logger.Warn("reflex-plan prompt not in DB, skipping reflex")
 		return rc.FullContext, "", nil, nil
 	}
-	reflexPrompt := fmt.Sprintf(g.reflexPlanTemplate, rulesBlock.String(), toolsList, msgText)
+	notesBlock := rc.ActiveNotes
+	if notesBlock == "" {
+		notesBlock = "(нет активных заметок)"
+	}
+	reflexPrompt := fmt.Sprintf(g.reflexPlanTemplate, rulesBlock.String(), toolsList, notesBlock, msgText)
 
 	reflexResult, err := g.callReflex(ctx, reflexPrompt)
 	if err != nil {

@@ -52,6 +52,8 @@ type ReflexContext struct {
 	CandidateRules []CandidateRule
 	// FullContext is the complete formatted context (traces + rules) for fallback.
 	FullContext string
+	// ActiveNotes is a formatted summary of active notes/tasks for reflex classification.
+	ActiveNotes string
 	// Strategy from AME (warm, neutral, etc.)
 	Strategy string
 	// ContextTokens estimated token count
