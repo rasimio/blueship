@@ -599,11 +599,6 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		return "", "", nil, nil
 	}
 
-	// No rules to classify — skip reflex, use full context.
-	if len(rc.CandidateRules) == 0 {
-		return rc.FullContext, "", nil, nil
-	}
-
 	// Build reflex prompt.
 	var rulesBlock strings.Builder
 	for _, r := range rc.CandidateRules {
