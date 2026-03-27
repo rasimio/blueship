@@ -78,6 +78,9 @@ type AgentDeps struct {
 	DB         func(module string) (*sqlx.DB, error)
 	UserID     uuid.UUID
 	Config     *Config
+
+	// ContextInjector builds per-request context (active notes, etc.) for the agent loop.
+	ContextInjector func(ctx context.Context, userID, message string) string
 }
 
 // SessionManager creates and manages chat sessions for agent handlers.

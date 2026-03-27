@@ -27,9 +27,20 @@ func (b *Background) DefaultTools() []string {
 }
 
 func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.AgentDeps) (core.IterationResult, error) {
-	// 1. Load system prompt
+	// 1. Load system prompt.
+	// Task config may override the instruction prompt key (default: "background-task").
+	instructionKey := "background-task"
+	if task.Config != nil {
+		var cfg struct {
+			Prompt string `json:"prompt"`
+		}
+		if json.Unmarshal(task.Config, &cfg) == nil && cfg.Prompt != "" {
+			instructionKey = cfg.Prompt
+		}
+	}
+
 	var parts []string
-	for _, key := range []string{"preamble", "soul", "agents", "background-task"} {
+	for _, key := range []string{"preamble", "soul", "agents", instructionKey} {
 		p, err := deps.Prompts.Get(ctx, key)
 		if err != nil {
 			return core.IterationResult{}, fmt.Errorf("load prompt %q: %w", key, err)
@@ -93,16 +104,23 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	msg := fmt.Sprintf("[TASK: %s]\nMission: %s\nIteration: %d/%d\n\n%s",
 		task.Title, desc, task.Iteration+1, task.MaxIterations, phasePrompt)
 
-	// 6. Run agent loop (shared session — LLM sees full history)
+	// 6. Inject context (active notes, etc.) if available.
+	var injectedCtx string
+	if deps.ContextInjector != nil {
+		injectedCtx = deps.ContextInjector(ctx, task.UserID.String(), msg)
+	}
+
+	// 7. Run agent loop (shared session — LLM sees full history)
 	loop := agent.NewLoop(deps.LLM, deps.Store, deps.Registry, deps.RoleTools, deps.Config, deps.Logger)
 
 	reply, err := loop.Run(ctx, agent.RunConfig{
-		SessionID:    sessID,
-		SystemPrompt: systemPrompt,
-		Model:        routerModel,
-		MaxTokens:    deps.Config.Limits.MaxOutputTokens,
-		MaxTurns:     deps.Config.Gateway.MaxTurns,
-		Role:         "background",
+		SessionID:       sessID,
+		SystemPrompt:    systemPrompt,
+		InjectedContext: injectedCtx,
+		Model:           routerModel,
+		MaxTokens:       deps.Config.Limits.MaxOutputTokens,
+		MaxTurns:        deps.Config.Gateway.MaxTurns,
+		Role:            "background",
 	}, msg)
 	if err != nil {
 		return core.IterationResult{}, fmt.Errorf("agent loop: %w", err)

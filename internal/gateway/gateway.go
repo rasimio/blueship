@@ -38,8 +38,7 @@ type Gateway struct {
 	tz        *time.Location
 	logger    *slog.Logger
 
-	systemPrompt          string
-	systemPromptHeartbeat string
+	systemPrompt string
 
 	// Reflex pipeline prompts (loaded from system_prompts table).
 	reflexSystemPrompt   string // system prompt for reflex LLM call
@@ -156,10 +155,6 @@ func (g *Gateway) loadSystemPromptsFromDB(db *sqlx.DB) error {
 
 	preamble := prompts["preamble"] + "\n"
 	g.systemPrompt = preamble + prompts["soul"] + "\n\n" + prompts["agents"]
-	g.systemPromptHeartbeat = g.systemPrompt
-	if prompts["heartbeat"] != "" {
-		g.systemPromptHeartbeat = g.systemPrompt + "\n\n" + prompts["heartbeat"]
-	}
 	if g.compactor != nil && prompts["compact"] != "" {
 		g.compactor.SetSystemPrompt(prompts["compact"])
 	}
@@ -175,17 +170,12 @@ func (g *Gateway) loadSystemPromptsFromDB(db *sqlx.DB) error {
 		g.extractInsightPrompt = prompts["extract-insight"]
 	}
 
-	g.logger.Info("system prompts loaded from DB",
-		"preamble", len(prompts["preamble"]),
-		"soul", len(prompts["soul"]),
-		"agents", len(prompts["agents"]),
-		"heartbeat", len(prompts["heartbeat"]),
-		"thinking", len(prompts["thinking"]),
-		"compact", len(prompts["compact"]),
-		"reflex-system", len(prompts["reflex-system"]),
-		"reflex-plan", len(prompts["reflex-plan"]),
-		"extract-insight", len(prompts["extract-insight"]),
-	)
+	// Log all loaded prompts dynamically.
+	logArgs := make([]any, 0, len(prompts)*2)
+	for k, v := range prompts {
+		logArgs = append(logArgs, k, len(v))
+	}
+	g.logger.Info("system prompts loaded from DB", logArgs...)
 	return nil
 }
 
@@ -202,14 +192,8 @@ func (g *Gateway) loadSystemPrompts(workspacePath string) error {
 	if err != nil {
 		return fmt.Errorf("read AGENTS.md: %w", err)
 	}
-	heartbeat, err := os.ReadFile(filepath.Join(workspacePath, "HEARTBEAT.md"))
-	if err != nil {
-		return fmt.Errorf("read HEARTBEAT.md: %w", err)
-	}
-
 	preambleStr := string(preamble) + "\n"
 	g.systemPrompt = preambleStr + string(soul) + "\n\n" + string(agents)
-	g.systemPromptHeartbeat = preambleStr + string(soul) + "\n\n" + string(agents) + "\n\n" + string(heartbeat)
 
 	// Thinking prompt (optional — fall back to regular system prompt if missing)
 	return nil
