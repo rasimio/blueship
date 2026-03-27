@@ -88,21 +88,27 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		desc = *task.Description
 	}
 
-	isFirst := task.Iteration == 0
 	isLast := task.MaxIterations > 0 && task.Iteration+1 >= task.MaxIterations
 
-	// Load phase-specific prompt templates from DB (fallback to minimal defaults).
-	phaseKey := "background-execution"
-	if isFirst {
-		phaseKey = "background-planning"
-	} else if isLast {
-		phaseKey = "background-synthesis"
-	}
-	phasePrompt, _ := deps.Prompts.Get(ctx, phaseKey)
+	// Build user message. Tasks with a custom prompt (config.prompt) are
+	// self-contained — no multi-phase planning/execution/synthesis overlay.
+	var msg string
+	if instructionKey != "background-task" {
+		msg = fmt.Sprintf("[TASK: %s]\n%s", task.Title, desc)
+	} else {
+		isFirst := task.Iteration == 0
 
-	// Build message with task context + phase instructions.
-	msg := fmt.Sprintf("[TASK: %s]\nMission: %s\nIteration: %d/%d\n\n%s",
-		task.Title, desc, task.Iteration+1, task.MaxIterations, phasePrompt)
+		phaseKey := "background-execution"
+		if isFirst {
+			phaseKey = "background-planning"
+		} else if isLast {
+			phaseKey = "background-synthesis"
+		}
+		phasePrompt, _ := deps.Prompts.Get(ctx, phaseKey)
+
+		msg = fmt.Sprintf("[TASK: %s]\nMission: %s\nIteration: %d/%d\n\n%s",
+			task.Title, desc, task.Iteration+1, task.MaxIterations, phasePrompt)
+	}
 
 	// 6. Inject context (active notes, etc.) if available.
 	var injectedCtx string
