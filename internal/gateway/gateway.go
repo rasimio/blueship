@@ -713,6 +713,12 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 				toolOverride = append(toolOverride, t)
 			}
 		}
+		if rc.ActiveNotes != "" && guidance.Len() == 0 {
+			guidance.WriteString("[active_notes]\n")
+			guidance.WriteString(rc.ActiveNotes)
+			guidance.WriteString("[/active_notes]\n")
+			guidance.WriteString("Если пользователь сообщает о выполнении — вызови memory_update(id, status=done).\n")
+		}
 	case "task_management":
 		for _, t := range []string{"memory_search", "memory_update", "agent_task_list", "agent_task_status"} {
 			if !containsTool(toolOverride, t) {
