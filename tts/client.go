@@ -14,17 +14,19 @@ import (
 type Client struct {
 	endpoint string
 	model    string
+	speed    float64
 	client   *http.Client
 }
 
 // NewClient creates a TTS client for the given endpoint and model.
-func NewClient(endpoint, model string, timeout time.Duration) *Client {
+func NewClient(endpoint, model string, speed float64, timeout time.Duration) *Client {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
 	return &Client{
 		endpoint: endpoint,
 		model:    model,
+		speed:    speed,
 		client:   &http.Client{Timeout: timeout},
 	}
 }
@@ -41,6 +43,9 @@ func (c *Client) Synthesize(ctx context.Context, text, voice, instruct string) (
 	}
 	if instruct != "" {
 		payload["instruct"] = instruct
+	}
+	if c.speed > 0 && c.speed != 1.0 {
+		payload["speed"] = c.speed
 	}
 
 	body, err := json.Marshal(payload)
