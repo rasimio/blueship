@@ -55,20 +55,29 @@ func NewElevenLabsClient(apiKey, voiceID, model string, speed float64, timeout t
 // For OpenAI-compatible: returns WAV.
 func (c *Client) Synthesize(ctx context.Context, text, voice, instruct string) ([]byte, error) {
 	if c.apiKey != "" {
-		return c.synthesizeElevenLabs(ctx, text)
+		return c.synthesizeElevenLabs(ctx, text, instruct)
 	}
 	return c.synthesizeOpenAI(ctx, text, voice, instruct)
 }
 
-func (c *Client) synthesizeElevenLabs(ctx context.Context, text string) ([]byte, error) {
+func (c *Client) synthesizeElevenLabs(ctx context.Context, text, instruct string) ([]byte, error) {
+	// Map instruct to voice_settings: more emotional = lower stability, higher style.
+	stability := 0.75
+	style := 0.05
+	if instruct != "" {
+		// Emotional instructs → more expressive
+		stability = 0.55
+		style = 0.25
+	}
+
 	payload := map[string]any{
 		"text":          text,
 		"model_id":      c.model,
 		"language_code": "ru",
 		"voice_settings": map[string]any{
-			"stability":         0.80,
-			"similarity_boost":  0.60,
-			"style":             0.0,
+			"stability":         stability,
+			"similarity_boost":  0.85,
+			"style":             style,
 			"use_speaker_boost": true,
 		},
 	}
