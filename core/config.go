@@ -19,7 +19,8 @@ type Config struct {
 	Transcriber TranscriptionProvider  // default: nil (voice disabled)
 	TTS              TTSProvider                   // default: nil (text-to-speech disabled)
 	TTSVoice         string                        // default TTS voice name
-	TTSInstructMapper func(strategy string) string // maps emotion strategy to TTS instruct
+	TTSInstructMapper func(strategy string) string    // maps emotion strategy to TTS instruct
+	TTSTextCleaner   func(text string) string         // strips kaomoji/markdown for TTS
 	TTSConverter     func(wav []byte) ([]byte, error) // WAV→OGG converter (nil = send WAV as-is)
 	Sender           MessageSender                 // default: nil (message sending disabled)
 

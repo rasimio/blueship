@@ -616,6 +616,11 @@ func (g *Gateway) sendVoiceReply(ctx context.Context, us *UserState, text string
 		instruct = cfg.TTSInstructMapper(us.LastStrategy)
 	}
 
+	// Clean text for TTS (strip kaomoji, markdown, etc.)
+	if cfg.TTSTextCleaner != nil {
+		text = cfg.TTSTextCleaner(text)
+	}
+
 	wav, err := cfg.TTS.Synthesize(ctx, text, voice, instruct)
 	if err != nil {
 		g.logger.Warn("tts: synthesize failed", "error", err)
