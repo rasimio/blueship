@@ -68,7 +68,7 @@ func (c *Client) synthesizeElevenLabs(ctx context.Context, text, instruct string
 		"voice_settings": map[string]any{
 			"stability":         0.65,
 			"similarity_boost":  0.95,
-			"style":             0.20,
+			"style":             0.80,
 			"use_speaker_boost": true,
 		},
 	}
