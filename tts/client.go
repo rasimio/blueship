@@ -61,22 +61,14 @@ func (c *Client) Synthesize(ctx context.Context, text, voice, instruct string) (
 }
 
 func (c *Client) synthesizeElevenLabs(ctx context.Context, text, instruct string) ([]byte, error) {
-	// Map instruct to voice_settings: more emotional = lower stability, higher style.
-	stability := 0.50
-	style := 0.15
-	if instruct != "" {
-		stability = 0.35
-		style = 0.40
-	}
-
 	payload := map[string]any{
 		"text":          text,
 		"model_id":      c.model,
 		"language_code": "ru",
 		"voice_settings": map[string]any{
-			"stability":         stability,
-			"similarity_boost":  0.85,
-			"style":             style,
+			"stability":         0.65,
+			"similarity_boost":  0.95,
+			"style":             0.20,
 			"use_speaker_boost": true,
 		},
 	}
