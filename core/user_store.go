@@ -25,6 +25,18 @@ type UserProfile struct {
 	UpdatedAt   time.Time       `db:"updated_at" json:"updated_at"`
 }
 
+// VoiceEnabled returns true if the user has voice mode on (from preferences JSONB).
+func (u *UserProfile) VoiceEnabled() bool {
+	if len(u.Preferences) == 0 {
+		return false
+	}
+	var prefs struct {
+		Voice bool `json:"voice_enabled"`
+	}
+	json.Unmarshal(u.Preferences, &prefs)
+	return prefs.Voice
+}
+
 // UserStore provides access to user profiles stored in the ship database.
 type UserStore interface {
 	ResolveByChatID(ctx context.Context, chatID string) (uuid.UUID, error)
@@ -36,6 +48,7 @@ type UserStore interface {
 	Create(ctx context.Context, chatID, displayName, trustLevel, timezone string) (*UserProfile, error)
 	Update(ctx context.Context, id, displayName, trustLevel, timezone string) (*UserProfile, error)
 	Delete(ctx context.Context, id string) error
+	SetPreference(ctx context.Context, id, key string, value any) error
 }
 
 type userStore struct {
@@ -175,4 +188,17 @@ func (s *userStore) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("user not found: %s", id)
 	}
 	return nil
+}
+
+func (s *userStore) SetPreference(ctx context.Context, id, key string, value any) error {
+	valJSON, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Errorf("marshal preference: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE user_profiles
+		SET preferences = jsonb_set(COALESCE(preferences, '{}'), $2, $3),
+		    updated_at = NOW()
+		WHERE id = $1`, id, "{"+key+"}", string(valJSON))
+	return err
 }

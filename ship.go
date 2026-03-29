@@ -344,3 +344,7 @@ func (a *telegramSenderAdapter) SendLong(ctx context.Context, chatID string, tex
 	}
 	return a.client.SendLong(ctx, id, text)
 }
+
+func (a *telegramSenderAdapter) SendVoice(ctx context.Context, chatID string, audio []byte) error {
+	return a.client.SendVoice(ctx, chatID, audio)
+}

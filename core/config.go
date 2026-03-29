@@ -17,7 +17,11 @@ type Config struct {
 	Fetcher     WebFetcher             // default: nil (auto-created if nil)
 	Calendar    CalendarProvider       // default: nil
 	Transcriber TranscriptionProvider  // default: nil (voice disabled)
-	Sender      MessageSender          // default: nil (message sending disabled)
+	TTS              TTSProvider                   // default: nil (text-to-speech disabled)
+	TTSVoice         string                        // default TTS voice name
+	TTSInstructMapper func(strategy string) string // maps emotion strategy to TTS instruct
+	TTSConverter     func(wav []byte) ([]byte, error) // WAV→OGG converter (nil = send WAV as-is)
+	Sender           MessageSender                 // default: nil (message sending disabled)
 
 	// --- Optional infrastructure ---
 	Redis    string // Redis address (default: "" = no cache)

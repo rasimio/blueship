@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"mime/multipart"
 	"net/url"
 	"regexp"
 	"strings"
@@ -253,6 +254,44 @@ func (c *Client) DownloadFile(ctx context.Context, fileID string, maxBytes int64
 	defer dlResp.Body.Close()
 
 	return io.ReadAll(io.LimitReader(dlResp.Body, maxBytes))
+}
+
+// SendVoice sends an OGG Opus voice message to a chat.
+func (c *Client) SendVoice(ctx context.Context, chatID string, audio []byte) error {
+	if !c.IsConfigured() {
+		return fmt.Errorf("telegram bot not configured")
+	}
+
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	_ = w.WriteField("chat_id", chatID)
+	part, err := w.CreateFormFile("voice", "voice.ogg")
+	if err != nil {
+		return fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := part.Write(audio); err != nil {
+		return fmt.Errorf("write audio: %w", err)
+	}
+	w.Close()
+
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendVoice", c.token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, &body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("sendVoice: status %d: %s", resp.StatusCode, string(errBody))
+	}
+	return nil
 }
 
 const maxTelegramMessageLength = 4096

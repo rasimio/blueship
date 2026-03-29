@@ -75,6 +75,11 @@ type TranscriptionProvider interface {
 	Transcribe(ctx context.Context, audio []byte, filename string) (string, error)
 }
 
+// TTSProvider synthesizes text to speech audio.
+type TTSProvider interface {
+	Synthesize(ctx context.Context, text, voice, instruct string) ([]byte, error)
+}
+
 // TransportSender sends messages to users via a messaging platform.
 type TransportSender interface {
 	SendText(ctx context.Context, chatID int64, text string) error
@@ -87,4 +92,6 @@ type MessageSender interface {
 	SendMessage(ctx context.Context, chatID string, text string) (messageID int, err error)
 	// SendLong sends a potentially long message, splitting into chunks as needed.
 	SendLong(ctx context.Context, chatID string, text string) error
+	// SendVoice sends an OGG Opus voice message.
+	SendVoice(ctx context.Context, chatID string, audio []byte) error
 }

@@ -59,6 +59,9 @@ type UserState struct {
 	Deps     *bs.Deps // per-user deps (carries ContextInjector set by modules)
 	LoopBusy bool
 	debounce *debouncer
+
+	// Emotion state from last reflex prep — used for TTS instruct.
+	LastStrategy string
 }
 
 // ModuleRegistry is an adapter interface for the module system.
@@ -313,6 +316,10 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 	}
 	if text == "/model" {
 		go g.handleModelCommand(ctx, chatID)
+		return
+	}
+	if text == "/voice" {
+		go g.handleVoiceCommand(ctx, chatID)
 		return
 	}
 
@@ -579,6 +586,55 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		if err := g.tg.SendLong(ctx, us.ChatID, reply); err != nil {
 			g.logger.Error("send reply error", "chat_id", us.ChatID, "error", err)
 		}
+		// TTS: send voice message async if voice mode enabled.
+		if g.deps.Config.TTS != nil && g.isVoiceEnabled(ctx, us) {
+			go g.sendVoiceReply(ctx, us, reply)
+		}
+	}
+}
+
+// isVoiceEnabled checks if the user has voice mode on.
+func (g *Gateway) isVoiceEnabled(ctx context.Context, us *UserState) bool {
+	if g.deps.Users == nil {
+		return false
+	}
+	profile, err := g.deps.Users.GetByID(ctx, us.UserID.String())
+	if err != nil {
+		return false
+	}
+	return profile.VoiceEnabled()
+}
+
+// sendVoiceReply synthesizes text to speech and sends as Telegram voice message.
+func (g *Gateway) sendVoiceReply(ctx context.Context, us *UserState, text string) {
+	cfg := g.deps.Config
+	voice := cfg.TTSVoice
+
+	// Map emotional state to TTS instruct via callback (set by Arlene).
+	var instruct string
+	if cfg.TTSInstructMapper != nil {
+		instruct = cfg.TTSInstructMapper(us.LastStrategy)
+	}
+
+	wav, err := cfg.TTS.Synthesize(ctx, text, voice, instruct)
+	if err != nil {
+		g.logger.Warn("tts: synthesize failed", "error", err)
+		return
+	}
+
+	// Convert WAV → OGG Opus via callback (set by Arlene, uses ffmpeg).
+	if cfg.TTSConverter != nil {
+		ogg, err := cfg.TTSConverter(wav)
+		if err != nil {
+			g.logger.Warn("tts: convert failed", "error", err)
+			return
+		}
+		wav = ogg
+	}
+
+	chatID := fmt.Sprintf("%d", us.ChatID)
+	if err := g.deps.Sender.SendVoice(ctx, chatID, wav); err != nil {
+		g.logger.Warn("tts: send voice failed", "error", err)
 	}
 }
 
@@ -598,6 +654,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 	if rc == nil {
 		return "", "", nil, nil
 	}
+
+	// Store emotional strategy for TTS instruct mapping.
+	us.LastStrategy = rc.Strategy
 
 	// Build reflex prompt.
 	var rulesBlock strings.Builder
@@ -1068,6 +1127,36 @@ func (g *Gateway) handleResetCommand(ctx context.Context, chatID int64) {
 	if err := g.tg.SendLong(ctx, chatID, msg); err != nil {
 		g.logger.Error("reset command: send error", "error", err)
 	}
+}
+
+func (g *Gateway) handleVoiceCommand(ctx context.Context, chatID int64) {
+	us, err := g.getOrInitUser(ctx, chatID)
+	if err != nil {
+		return
+	}
+	if g.deps.Users == nil {
+		g.tg.SendLong(ctx, chatID, "Voice: user store not available.")
+		return
+	}
+
+	profile, err := g.deps.Users.GetByID(ctx, us.UserID.String())
+	if err != nil {
+		g.tg.SendLong(ctx, chatID, "Voice: user not found.")
+		return
+	}
+
+	newState := !profile.VoiceEnabled()
+	if err := g.deps.Users.SetPreference(ctx, us.UserID.String(), "voice_enabled", newState); err != nil {
+		g.logger.Error("voice command: set preference error", "error", err)
+		g.tg.SendLong(ctx, chatID, "Voice: failed to update preference.")
+		return
+	}
+
+	msg := "Voice mode: OFF"
+	if newState {
+		msg = "Voice mode: ON"
+	}
+	g.tg.SendLong(ctx, chatID, msg)
 }
 
 func shortID(id string) string {
