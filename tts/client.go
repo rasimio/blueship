@@ -65,9 +65,9 @@ func (c *Client) synthesizeElevenLabs(ctx context.Context, text string) ([]byte,
 		"model_id":      c.model,
 		"language_code": "ru",
 		"voice_settings": map[string]any{
-			"stability":        0.65,
-			"similarity_boost": 0.75,
-			"style":            0.1,
+			"stability":        0.80,
+			"similarity_boost": 0.60,
+			"style":            0.0,
 			"use_speaker_boost": true,
 		},
 	}
