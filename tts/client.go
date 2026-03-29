@@ -10,15 +10,16 @@ import (
 	"time"
 )
 
-// Client is an OpenAI-compatible TTS HTTP client.
+// Client is a TTS HTTP client supporting OpenAI-compatible and ElevenLabs APIs.
 type Client struct {
 	endpoint string
 	model    string
 	speed    float64
+	apiKey   string // for ElevenLabs (xi-api-key header)
 	client   *http.Client
 }
 
-// NewClient creates a TTS client for the given endpoint and model.
+// NewClient creates a TTS client for an OpenAI-compatible endpoint.
 func NewClient(endpoint, model string, speed float64, timeout time.Duration) *Client {
 	if timeout == 0 {
 		timeout = 30 * time.Second
@@ -31,8 +32,67 @@ func NewClient(endpoint, model string, speed float64, timeout time.Duration) *Cl
 	}
 }
 
-// Synthesize sends text to the TTS API and returns WAV audio bytes.
+// NewElevenLabsClient creates a TTS client for the ElevenLabs API.
+func NewElevenLabsClient(apiKey, voiceID, model string, timeout time.Duration) *Client {
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	if model == "" {
+		model = "eleven_multilingual_v2"
+	}
+	endpoint := fmt.Sprintf("https://api.elevenlabs.io/v1/text-to-speech/%s?output_format=opus_48000_128", voiceID)
+	return &Client{
+		endpoint: endpoint,
+		model:    model,
+		apiKey:   apiKey,
+		client:   &http.Client{Timeout: timeout},
+	}
+}
+
+// Synthesize sends text to the TTS API and returns audio bytes.
+// For ElevenLabs: returns OGG Opus directly (no conversion needed).
+// For OpenAI-compatible: returns WAV.
 func (c *Client) Synthesize(ctx context.Context, text, voice, instruct string) ([]byte, error) {
+	if c.apiKey != "" {
+		return c.synthesizeElevenLabs(ctx, text)
+	}
+	return c.synthesizeOpenAI(ctx, text, voice, instruct)
+}
+
+func (c *Client) synthesizeElevenLabs(ctx context.Context, text string) ([]byte, error) {
+	payload := map[string]any{
+		"text":          text,
+		"model_id":      c.model,
+		"language_code": "ru",
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("tts: marshal: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("tts: request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("xi-api-key", c.apiKey)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("tts: http: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("tts: status %d: %s", resp.StatusCode, string(errBody))
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+func (c *Client) synthesizeOpenAI(ctx context.Context, text, voice, instruct string) ([]byte, error) {
 	payload := map[string]any{
 		"model":           c.model,
 		"input":           text,
