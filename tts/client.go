@@ -33,7 +33,7 @@ func NewClient(endpoint, model string, speed float64, timeout time.Duration) *Cl
 }
 
 // NewElevenLabsClient creates a TTS client for the ElevenLabs API.
-func NewElevenLabsClient(apiKey, voiceID, model string, timeout time.Duration) *Client {
+func NewElevenLabsClient(apiKey, voiceID, model string, speed float64, timeout time.Duration) *Client {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
@@ -44,6 +44,7 @@ func NewElevenLabsClient(apiKey, voiceID, model string, timeout time.Duration) *
 	return &Client{
 		endpoint: endpoint,
 		model:    model,
+		speed:    speed,
 		apiKey:   apiKey,
 		client:   &http.Client{Timeout: timeout},
 	}
@@ -65,11 +66,14 @@ func (c *Client) synthesizeElevenLabs(ctx context.Context, text string) ([]byte,
 		"model_id":      c.model,
 		"language_code": "ru",
 		"voice_settings": map[string]any{
-			"stability":        0.80,
-			"similarity_boost": 0.60,
-			"style":            0.0,
+			"stability":         0.80,
+			"similarity_boost":  0.60,
+			"style":             0.0,
 			"use_speaker_boost": true,
 		},
+	}
+	if c.speed > 0 && c.speed != 1.0 {
+		payload["speed"] = c.speed
 	}
 
 	body, err := json.Marshal(payload)
