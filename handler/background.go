@@ -40,7 +40,8 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	}
 
 	var parts []string
-	for _, key := range []string{"preamble", "soul", "agents", instructionKey} {
+	promptKeys := append(deps.Config.SystemPromptKeys, instructionKey)
+	for _, key := range promptKeys {
 		p, err := deps.Prompts.Get(ctx, key)
 		if err != nil {
 			return core.IterationResult{}, fmt.Errorf("load prompt %q: %w", key, err)

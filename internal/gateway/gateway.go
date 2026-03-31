@@ -149,15 +149,19 @@ func (g *Gateway) loadSystemPromptsFromDB(db *sqlx.DB) error {
 		prompts[key] = content
 	}
 
-	// Require at least preamble + soul + agents
-	for _, required := range []string{"preamble", "soul", "agents"} {
+	// Require all configured system prompt keys.
+	for _, required := range g.deps.Config.SystemPromptKeys {
 		if prompts[required] == "" {
 			return fmt.Errorf("missing required prompt: %s", required)
 		}
 	}
 
-	preamble := prompts["preamble"] + "\n"
-	g.systemPrompt = preamble + prompts["soul"] + "\n\n" + prompts["agents"]
+	// Compose system prompt from configured keys.
+	var parts []string
+	for _, key := range g.deps.Config.SystemPromptKeys {
+		parts = append(parts, prompts[key])
+	}
+	g.systemPrompt = strings.Join(parts, "\n\n")
 	if g.compactor != nil && prompts["compact"] != "" {
 		g.compactor.SetSystemPrompt(prompts["compact"])
 	}
@@ -183,22 +187,16 @@ func (g *Gateway) loadSystemPromptsFromDB(db *sqlx.DB) error {
 }
 
 func (g *Gateway) loadSystemPrompts(workspacePath string) error {
-	preamble, err := os.ReadFile(filepath.Join(workspacePath, "PREAMBLE.md"))
-	if err != nil {
-		return fmt.Errorf("read PREAMBLE.md: %w", err)
+	var parts []string
+	for _, key := range g.deps.Config.SystemPromptKeys {
+		filename := strings.ToUpper(key) + ".md"
+		data, err := os.ReadFile(filepath.Join(workspacePath, filename))
+		if err != nil {
+			return fmt.Errorf("read %s: %w", filename, err)
+		}
+		parts = append(parts, string(data))
 	}
-	soul, err := os.ReadFile(filepath.Join(workspacePath, "SOUL.md"))
-	if err != nil {
-		return fmt.Errorf("read SOUL.md: %w", err)
-	}
-	agents, err := os.ReadFile(filepath.Join(workspacePath, "AGENTS.md"))
-	if err != nil {
-		return fmt.Errorf("read AGENTS.md: %w", err)
-	}
-	preambleStr := string(preamble) + "\n"
-	g.systemPrompt = preambleStr + string(soul) + "\n\n" + string(agents)
-
-	// Thinking prompt (optional — fall back to regular system prompt if missing)
+	g.systemPrompt = strings.Join(parts, "\n\n")
 	return nil
 }
 
@@ -610,7 +608,7 @@ func (g *Gateway) sendVoiceReply(ctx context.Context, us *UserState, text string
 	cfg := g.deps.Config
 	voice := cfg.TTSVoice
 
-	// Map emotional state to TTS instruct via callback (set by Arlene).
+	// Map emotional state to TTS instruct via callback.
 	var instruct string
 	if cfg.TTSInstructMapper != nil {
 		instruct = cfg.TTSInstructMapper(us.LastStrategy)
@@ -628,7 +626,7 @@ func (g *Gateway) sendVoiceReply(ctx context.Context, us *UserState, text string
 		return
 	}
 
-	// Convert WAV → OGG Opus via callback (set by Arlene, uses ffmpeg).
+	// Convert WAV → OGG Opus via callback (e.g. ffmpeg).
 	if cfg.TTSConverter != nil {
 		ogg, err := cfg.TTSConverter(wav)
 		if err != nil {

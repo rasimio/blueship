@@ -29,6 +29,11 @@ type Config struct {
 	Prompts  string // directory with .md prompt files (default: "" = no files)
 	Timezone string // default: "UTC"
 
+	// SystemPromptKeys defines prompt keys that compose the system prompt.
+	// Loaded from DB (system_prompts) or workspace files (KEY.md).
+	// Default: ["preamble", "soul", "agents"]
+	SystemPromptKeys []string
+
 	// --- Owner (single-user mode) ---
 	Owner OwnerConfig
 
@@ -43,7 +48,7 @@ type Config struct {
 // OwnerConfig identifies the single owner of this instance.
 type OwnerConfig struct {
 	ChatID      string // e.g. "telegram:5452235517"
-	DisplayName string // e.g. "Расим"
+	DisplayName string // e.g. "Alice"
 }
 
 // TransportConfig holds transport configuration.
@@ -115,6 +120,9 @@ type GatewayConfig struct {
 func (c *Config) ApplyDefaults() {
 	if c.Timezone == "" {
 		c.Timezone = "UTC"
+	}
+	if len(c.SystemPromptKeys) == 0 {
+		c.SystemPromptKeys = []string{"preamble", "soul", "agents"}
 	}
 
 	// Models
