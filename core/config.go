@@ -55,6 +55,15 @@ type OwnerConfig struct {
 type TransportConfig struct {
 	Type     string // "telegram"
 	BotToken string
+
+	// WebSocket server for voice/desktop clients (runs alongside Telegram).
+	WebSocket WebSocketConfig
+}
+
+// WebSocketConfig configures the optional WebSocket server.
+type WebSocketConfig struct {
+	Port  int    // 0 = disabled
+	Token string // bearer auth token
 }
 
 // ModelRef identifies a model and its provider.

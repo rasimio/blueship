@@ -375,9 +375,24 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 		return nil, fmt.Errorf("core DB: %w", err)
 	}
 
+	// For non-telegram transports (e.g. "voice:owner"), resolve owner and
+	// reuse the existing Telegram UserState if available. This ensures
+	// shared session context between voice and chat.
 	userID, err := user.ResolveByChatID(ctx, coreDB, chatID)
 	if err != nil {
-		return nil, fmt.Errorf("resolve user: %w", err)
+		ownerID, ownerErr := user.ResolveOwner(ctx, coreDB)
+		if ownerErr != nil {
+			return nil, fmt.Errorf("resolve user %s: %w", chatID, err)
+		}
+		userID = ownerID
+
+		// Reuse existing owner UserState (from Telegram) for cross-transport session sharing.
+		for _, existing := range g.users {
+			if existing.UserID == userID {
+				g.users[chatID] = existing // alias this chatID to the same state
+				return existing, nil
+			}
+		}
 	}
 
 	var isOwner bool

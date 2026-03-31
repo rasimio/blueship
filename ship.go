@@ -17,6 +17,7 @@ import (
 	"github.com/rasimio/blueship/internal/anthropic"
 	"github.com/rasimio/blueship/internal/gemini"
 	"github.com/rasimio/blueship/internal/gateway"
+	"github.com/rasimio/blueship/internal/infrastructure/ws"
 	"github.com/rasimio/blueship/internal/openai"
 	"github.com/rasimio/blueship/internal/scheduler"
 	"github.com/rasimio/blueship/internal/telegram"
@@ -198,8 +199,10 @@ func (s *Ship) Run(ctx context.Context) error {
 	}
 
 	// 5. Start Telegram Gateway
+	var gw *gateway.Gateway
 	if s.cfg.Transport.Type == "telegram" && s.cfg.Transport.BotToken != "" {
-		gw, err := gateway.NewGateway(deps, reg, s.logger)
+		var err error
+		gw, err = gateway.NewGateway(deps, reg, s.logger)
 		if err != nil {
 			return fmt.Errorf("create gateway: %w", err)
 		}
@@ -209,10 +212,21 @@ func (s *Ship) Run(ctx context.Context) error {
 			defer wg.Done()
 			gw.Run(ctx)
 		}()
-
 	}
 
-	// 6. Block until done
+	// 6. Start WebSocket server (voice/desktop clients)
+	if wsCfg := s.cfg.Transport.WebSocket; wsCfg.Port > 0 && gw != nil {
+		wsSrv := ws.NewServer(gw, wsCfg, s.logger)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := wsSrv.Run(ctx); err != nil {
+				s.logger.Error("websocket server error", "error", err)
+			}
+		}()
+	}
+
+	// 7. Block until done
 	<-ctx.Done()
 	s.logger.Info("shutting down, waiting for jobs...")
 	wg.Wait()
