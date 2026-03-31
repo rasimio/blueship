@@ -306,7 +306,8 @@ func (s *Store) AllMessagesForAPI(ctx context.Context, sessionID string) ([]bs.M
 	return result, nil
 }
 
-// MessagesSince returns messages for a user since a given time (across all sessions).
+// MessagesSince returns messages for a user since a given time (across user chat sessions only).
+// Excludes background task sessions (source != 'chat') to avoid polluting summaries.
 // Satisfies core.SessionQuerier (returns []bs.SessionMessage).
 func (s *Store) MessagesSince(ctx context.Context, userID string, since time.Time) ([]bs.SessionMessage, error) {
 	var msgs []bs.SessionMessage
@@ -314,7 +315,7 @@ func (s *Store) MessagesSince(ctx context.Context, userID string, since time.Tim
 		`SELECT m.id, m.session_id, m.role, m.content, m.tool_use_id, m.token_estimate, m.created_at
 		 FROM chat_messages m
 		 JOIN chat_sessions s ON s.id = m.session_id
-		 WHERE s.user_id = $1 AND m.created_at >= $2
+		 WHERE s.user_id = $1 AND m.created_at >= $2 AND s.source = 'chat'
 		 ORDER BY m.created_at ASC`,
 		userID, since,
 	)
