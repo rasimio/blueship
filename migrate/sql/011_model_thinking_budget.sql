@@ -1,1 +1,0 @@
-ALTER TABLE model_config ADD COLUMN IF NOT EXISTS thinking_budget INT DEFAULT 0;

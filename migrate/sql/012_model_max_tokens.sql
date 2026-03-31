@@ -1,1 +1,0 @@
-ALTER TABLE model_config ADD COLUMN IF NOT EXISTS max_tokens INT DEFAULT 8192;
