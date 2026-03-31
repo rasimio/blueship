@@ -642,7 +642,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			g.logger.Error("send reply error", "chat_id", us.ChatID, "error", err)
 		}
 		// TTS: synthesize and send voice via sink.
-		if g.deps.Config.TTS != nil && g.shouldSendVoice(ctx, us) {
+		if g.deps.Config.TTS != nil && g.shouldSendVoice(ctx, us, sink) {
 			go g.synthesizeAndSendVoice(ctx, sink, us, reply)
 		}
 	}
@@ -759,8 +759,13 @@ func splitSentences(text string) []string {
 	return sentences
 }
 
-// shouldSendVoice checks if voice response should be sent for this user.
-func (g *Gateway) shouldSendVoice(ctx context.Context, us *UserState) bool {
+// shouldSendVoice checks if voice response should be sent.
+// Always true for streaming sinks (WebSocket voice transport).
+// For Telegram, checks user preference (/voice toggle).
+func (g *Gateway) shouldSendVoice(ctx context.Context, us *UserState, sink bs.ResponseSink) bool {
+	if _, ok := sink.(bs.StreamingVoiceSink); ok {
+		return true // voice transport always gets audio
+	}
 	return g.isVoiceEnabled(ctx, us)
 }
 
