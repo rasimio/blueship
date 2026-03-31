@@ -46,13 +46,13 @@ type Gateway struct {
 	extractInsightPrompt string // system prompt for insight extraction
 
 	mu sync.Mutex
-	users map[int64]*UserState
+	users map[string]*UserState // keyed by canonical chatID ("telegram:123", "voice:owner")
 }
 
 // UserState holds per-user runtime state.
 type UserState struct {
 	Mu       sync.Mutex
-	ChatID   int64
+	ChatID   string // canonical chat ID ("telegram:123", "voice:owner")
 	UserID   uuid.UUID
 	IsOwner  bool
 	Registry *bs.ToolRegistry
@@ -104,7 +104,7 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 		whisper:   whisperProvider,
 		tz:        tz,
 		logger:    logger,
-		users:     make(map[int64]*UserState),
+		users:     make(map[string]*UserState),
 	}
 
 	// Load system prompts: DB first, filesystem second, error if neither
@@ -302,22 +302,23 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 		return
 	}
 
-	chatID := msg.Chat.ID
+	rawChatID := msg.Chat.ID
+	chatID := tgCanonical(rawChatID)
 
 	if text == "/session" {
-		go g.handleSessionCommand(ctx, chatID)
+		go g.handleSessionCommand(ctx, rawChatID)
 		return
 	}
 	if text == "/reset" {
-		go g.handleResetCommand(ctx, chatID)
+		go g.handleResetCommand(ctx, rawChatID)
 		return
 	}
 	if text == "/model" {
-		go g.handleModelCommand(ctx, chatID)
+		go g.handleModelCommand(ctx, rawChatID)
 		return
 	}
 	if text == "/voice" {
-		go g.handleVoiceCommand(ctx, chatID)
+		go g.handleVoiceCommand(ctx, rawChatID)
 		return
 	}
 
@@ -361,7 +362,7 @@ func isTextFile(doc *telegram.Document) bool {
 	return false
 }
 
-func (g *Gateway) getOrInitUser(ctx context.Context, chatID int64) (*UserState, error) {
+func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -374,8 +375,7 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID int64) (*UserState, 
 		return nil, fmt.Errorf("core DB: %w", err)
 	}
 
-	chatIDStr := fmt.Sprintf("telegram:%d", chatID)
-	userID, err := user.ResolveByChatID(ctx, coreDB, chatIDStr)
+	userID, err := user.ResolveByChatID(ctx, coreDB, chatID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve user: %w", err)
 	}
@@ -389,11 +389,10 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID int64) (*UserState, 
 	// Single-user mode: reject non-owner messages
 	if !isOwner {
 		g.logger.Info("rejected non-owner message", "chat_id", chatID, "user_id", userID.String())
-		_ = g.tg.SendLong(ctx, chatID, "This bot is private.")
 		return nil, fmt.Errorf("non-owner user rejected")
 	}
 
-	userDeps := g.deps.ForUser(userID, chatIDStr, isOwner)
+	userDeps := g.deps.ForUser(userID, chatID, isOwner)
 	registry := bs.NewToolRegistry()
 	tool.RegisterBuiltinTools(registry, userDeps)
 	g.modules.RegisterAllTools(registry, userDeps)
@@ -407,7 +406,8 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID int64) (*UserState, 
 	}
 
 	us.debounce = newDebouncer(g.deps.Config.Gateway.DebounceWindow, g.deps.Config.Gateway.DebounceCap, func(msgs []pendingMsg) {
-		go g.processMessages(ctx, us, msgs)
+		sink := g.newTelegramSink(chatID)
+		go g.processMessages(ctx, us, msgs, sink)
 	})
 
 	g.users[chatID] = us
@@ -421,7 +421,7 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID int64) (*UserState, 
 }
 
 // GetUser returns an existing user state. Returns nil if not initialized.
-func (g *Gateway) GetUser(chatID int64) *UserState {
+func (g *Gateway) GetUser(chatID string) *UserState {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.users[chatID]
@@ -439,14 +439,13 @@ func (g *Gateway) GetOwnerUser() *UserState {
 	return nil
 }
 
-// sendDebugError sends the actual error to the owner via Telegram when debug mode is on.
-// For non-owner users, always sends the generic "Sorry" message.
-func (g *Gateway) sendDebugError(ctx context.Context, chatID int64, source string, err error) {
+// sendDebugError sends the actual error via sink when debug mode is on.
+func (g *Gateway) sendDebugError(ctx context.Context, sink bs.ResponseSink, source string, err error) {
 	if g.deps.Config.Gateway.Debug {
 		msg := fmt.Sprintf("[%s] %v", source, err)
-		g.tg.SendLong(ctx, chatID, msg)
+		sink.SendText(ctx, msg)
 	} else {
-		g.tg.SendLong(ctx, chatID, "Sorry, something went wrong internally.")
+		sink.SendText(ctx, "Sorry, something went wrong internally.")
 	}
 }
 
@@ -461,17 +460,60 @@ func (g *Gateway) notifyOwnerError(ctx context.Context, source string, err error
 		return
 	}
 	msg := fmt.Sprintf("[%s] %v", source, err)
-	g.tg.SendLong(ctx, owner.ChatID, msg)
+	sink := g.newTelegramSink(owner.ChatID)
+	sink.SendText(ctx, msg)
 }
 
-func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pendingMsg) {
+// ProcessInbound is the public entry point for external transports (WebSocket, etc.).
+// Resolves user, converts InboundMessage to internal format, and runs the full pipeline.
+func (g *Gateway) ProcessInbound(ctx context.Context, chatID string, messages []bs.InboundMessage, sink bs.ResponseSink) error {
+	us, err := g.getOrInitUser(ctx, chatID)
+	if err != nil {
+		return fmt.Errorf("resolve user: %w", err)
+	}
+
+	// Transcribe audio if present.
+	for i, m := range messages {
+		if len(m.Audio) > 0 && g.whisper != nil && g.whisper.IsConfigured() {
+			transcript, err := g.whisper.Transcribe(ctx, m.Audio, "voice.wav")
+			if err != nil {
+				g.logger.Warn("transcribe failed", "error", err)
+				continue
+			}
+			if messages[i].Text != "" {
+				messages[i].Text += "\n\n" + transcript
+			} else {
+				messages[i].Text = transcript
+			}
+		}
+	}
+
+	var pending []pendingMsg
+	for _, m := range messages {
+		if m.Text == "" && len(m.Images) == 0 {
+			continue
+		}
+		pending = append(pending, pendingMsg{
+			text:   m.Text,
+			images: m.Images,
+		})
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	g.processMessages(ctx, us, pending, sink)
+	return nil
+}
+
+func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pendingMsg, sink bs.ResponseSink) {
 	us.Mu.Lock()
 	defer us.Mu.Unlock()
 	us.LoopBusy = true
 	defer func() { us.LoopBusy = false }()
 
 	typingCtx, stopTyping := context.WithCancel(ctx)
-	go g.keepTyping(typingCtx, us.ChatID)
+	go g.keepTypingViaSink(typingCtx, sink)
 	defer stopTyping()
 
 	var blocks []bs.ContentBlock
@@ -506,7 +548,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	sess, err := g.GetOrCreateSession(ctx, us)
 	if err != nil {
 		g.logger.Error("session error", "error", err)
-		g.sendDebugError(ctx, us.ChatID, "session", err)
+		g.sendDebugError(ctx, sink, "session", err)
 		return
 	}
 
@@ -571,7 +613,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			"chat_id", us.ChatID,
 			"error", err,
 		)
-		g.sendDebugError(ctx, us.ChatID, "agent", err)
+		g.sendDebugError(ctx, sink, "agent", err)
 		return
 	}
 
@@ -581,12 +623,12 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	if reply != "" {
-		if err := g.tg.SendLong(ctx, us.ChatID, reply); err != nil {
+		if err := sink.SendText(ctx, reply); err != nil {
 			g.logger.Error("send reply error", "chat_id", us.ChatID, "error", err)
 		}
-		// TTS: send voice message async if voice mode enabled.
-		if g.deps.Config.TTS != nil && g.isVoiceEnabled(ctx, us) {
-			go g.sendVoiceReply(ctx, us, reply)
+		// TTS: synthesize and send voice via sink.
+		if g.deps.Config.TTS != nil && g.shouldSendVoice(ctx, us) {
+			go g.synthesizeAndSendVoice(ctx, sink, us, reply)
 		}
 	}
 }
@@ -603,8 +645,8 @@ func (g *Gateway) isVoiceEnabled(ctx context.Context, us *UserState) bool {
 	return profile.VoiceEnabled()
 }
 
-// sendVoiceReply synthesizes text to speech and sends as Telegram voice message.
-func (g *Gateway) sendVoiceReply(ctx context.Context, us *UserState, text string) {
+// synthesizeAndSendVoice synthesizes TTS and sends audio via ResponseSink.
+func (g *Gateway) synthesizeAndSendVoice(ctx context.Context, sink bs.ResponseSink, us *UserState, text string) {
 	cfg := g.deps.Config
 	voice := cfg.TTSVoice
 
@@ -620,7 +662,7 @@ func (g *Gateway) sendVoiceReply(ctx context.Context, us *UserState, text string
 	}
 	g.logger.Info("tts: synthesizing", "text_len", len(text), "voice", voice, "text_preview", truncateStr(text, 200))
 
-	wav, err := cfg.TTS.Synthesize(ctx, text, voice, instruct)
+	audio, err := cfg.TTS.Synthesize(ctx, text, voice, instruct)
 	if err != nil {
 		g.logger.Warn("tts: synthesize failed", "error", err)
 		return
@@ -628,18 +670,57 @@ func (g *Gateway) sendVoiceReply(ctx context.Context, us *UserState, text string
 
 	// Convert WAV → OGG Opus via callback (e.g. ffmpeg).
 	if cfg.TTSConverter != nil {
-		ogg, err := cfg.TTSConverter(wav)
+		converted, err := cfg.TTSConverter(audio)
 		if err != nil {
 			g.logger.Warn("tts: convert failed", "error", err)
 			return
 		}
-		wav = ogg
+		audio = converted
 	}
 
-	chatID := fmt.Sprintf("%d", us.ChatID)
-	if err := g.deps.Sender.SendVoice(ctx, chatID, wav); err != nil {
+	if err := sink.SendVoice(ctx, audio); err != nil {
 		g.logger.Warn("tts: send voice failed", "error", err)
 	}
+}
+
+// shouldSendVoice checks if voice response should be sent for this user.
+func (g *Gateway) shouldSendVoice(ctx context.Context, us *UserState) bool {
+	return g.isVoiceEnabled(ctx, us)
+}
+
+// telegramSink implements bs.ResponseSink for Telegram transport.
+type telegramSink struct {
+	gw     *Gateway
+	chatID int64
+}
+
+func (g *Gateway) newTelegramSink(canonicalChatID string) *telegramSink {
+	return &telegramSink{gw: g, chatID: tgChatID(canonicalChatID)}
+}
+
+func (s *telegramSink) SendText(ctx context.Context, text string) error {
+	return s.gw.tg.SendLong(ctx, s.chatID, text)
+}
+
+func (s *telegramSink) SendVoice(ctx context.Context, audio []byte) error {
+	chatID := fmt.Sprintf("%d", s.chatID)
+	return s.gw.deps.Sender.SendVoice(ctx, chatID, audio)
+}
+
+func (s *telegramSink) SendTyping(ctx context.Context) error {
+	return s.gw.tg.SendChatAction(ctx, s.chatID, "typing")
+}
+
+// tgChatID extracts int64 from canonical "telegram:NNN" string.
+func tgChatID(canonical string) int64 {
+	var id int64
+	fmt.Sscanf(canonical, "telegram:%d", &id)
+	return id
+}
+
+// tgCanonical converts int64 Telegram chat ID to canonical string.
+func tgCanonical(chatID int64) string {
+	return fmt.Sprintf("telegram:%d", chatID)
 }
 
 const reflexConfidenceThreshold = 0.7
@@ -941,8 +1022,8 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 	return result, nil
 }
 
-func (g *Gateway) keepTyping(ctx context.Context, chatID int64) {
-	_ = g.tg.SendChatAction(ctx, chatID, "typing")
+func (g *Gateway) keepTypingViaSink(ctx context.Context, sink bs.ResponseSink) {
+	_ = sink.SendTyping(ctx)
 	ticker := time.NewTicker(4 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -950,7 +1031,7 @@ func (g *Gateway) keepTyping(ctx context.Context, chatID int64) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = g.tg.SendChatAction(ctx, chatID, "typing")
+			_ = sink.SendTyping(ctx)
 		}
 	}
 }
@@ -999,7 +1080,7 @@ func containsTool(tools []string, name string) bool {
 }
 
 func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
-	us, err := g.getOrInitUser(ctx, chatID)
+	us, err := g.getOrInitUser(ctx, tgCanonical(chatID))
 	if err != nil {
 		g.logger.Debug("session command: ignored", "chat_id", chatID, "error", err)
 		return
@@ -1090,7 +1171,7 @@ func (g *Gateway) cortexModelDisplay() string {
 }
 
 func (g *Gateway) handleResetCommand(ctx context.Context, chatID int64) {
-	us, err := g.getOrInitUser(ctx, chatID)
+	us, err := g.getOrInitUser(ctx, tgCanonical(chatID))
 	if err != nil {
 		g.logger.Debug("reset command: ignored", "chat_id", chatID, "error", err)
 		return
@@ -1134,7 +1215,7 @@ func (g *Gateway) handleResetCommand(ctx context.Context, chatID int64) {
 }
 
 func (g *Gateway) handleVoiceCommand(ctx context.Context, chatID int64) {
-	us, err := g.getOrInitUser(ctx, chatID)
+	us, err := g.getOrInitUser(ctx, tgCanonical(chatID))
 	if err != nil {
 		return
 	}
