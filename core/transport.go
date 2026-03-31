@@ -16,3 +16,14 @@ type ResponseSink interface {
 	SendVoice(ctx context.Context, audio []byte) error
 	SendTyping(ctx context.Context) error
 }
+
+// StreamingVoiceSink extends ResponseSink with chunked audio delivery.
+// Transports that support streaming (WebSocket) implement this for
+// sentence-level TTS pipelining: audio chunks are sent as they're
+// synthesized, allowing the client to start playback immediately.
+type StreamingVoiceSink interface {
+	ResponseSink
+	// SendVoiceChunk sends one audio chunk with sequence number.
+	// final=true indicates the last chunk.
+	SendVoiceChunk(ctx context.Context, audio []byte, seq int, final bool) error
+}

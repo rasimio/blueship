@@ -86,8 +86,10 @@ type InMsg struct {
 
 // OutMsg is the server→client JSON message.
 type OutMsg struct {
-	Type string `json:"type"` // "text", "audio", "thinking", "error"
-	Data string `json:"data"`
+	Type  string `json:"type"`            // "text", "audio", "audio_chunk", "thinking", "error"
+	Data  string `json:"data"`
+	Seq   int    `json:"seq,omitempty"`   // chunk sequence number
+	Final bool   `json:"final,omitempty"` // true = last chunk
 }
 
 func (s *Server) handleConnection(ctx context.Context, conn *websocket.Conn) {
@@ -149,6 +151,11 @@ func (s *wsSink) SendText(ctx context.Context, text string) error {
 func (s *wsSink) SendVoice(ctx context.Context, audio []byte) error {
 	encoded := base64.StdEncoding.EncodeToString(audio)
 	return writeJSON(ctx, s.conn, OutMsg{Type: "audio", Data: encoded})
+}
+
+func (s *wsSink) SendVoiceChunk(ctx context.Context, audio []byte, seq int, final bool) error {
+	encoded := base64.StdEncoding.EncodeToString(audio)
+	return writeJSON(ctx, s.conn, OutMsg{Type: "audio_chunk", Data: encoded, Seq: seq, Final: final})
 }
 
 func (s *wsSink) SendTyping(ctx context.Context) error {

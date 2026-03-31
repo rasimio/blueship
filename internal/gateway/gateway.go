@@ -661,20 +661,55 @@ func (g *Gateway) isVoiceEnabled(ctx context.Context, us *UserState) bool {
 }
 
 // synthesizeAndSendVoice synthesizes TTS and sends audio via ResponseSink.
+// If sink supports StreamingVoiceSink, uses sentence-level pipelining
+// for lower latency (client starts playback before full audio is ready).
 func (g *Gateway) synthesizeAndSendVoice(ctx context.Context, sink bs.ResponseSink, us *UserState, text string) {
 	cfg := g.deps.Config
 	voice := cfg.TTSVoice
 
-	// Map emotional state to TTS instruct via callback.
 	var instruct string
 	if cfg.TTSInstructMapper != nil {
 		instruct = cfg.TTSInstructMapper(us.LastStrategy)
 	}
-
-	// Clean text for TTS (kaomoji → audio tags, strip markdown, etc.)
 	if cfg.TTSTextCleaner != nil {
 		text = cfg.TTSTextCleaner(text)
 	}
+
+	// Sentence-level pipelining for streaming transports.
+	if streamSink, ok := sink.(bs.StreamingVoiceSink); ok {
+		sentences := splitSentences(text)
+		if len(sentences) <= 1 {
+			// Single sentence — no pipelining benefit, use batch.
+			g.synthesizeBatch(ctx, sink, text, voice, instruct)
+			return
+		}
+
+		g.logger.Info("tts: streaming", "sentences", len(sentences), "text_len", len(text))
+		for i, sentence := range sentences {
+			audio, err := cfg.TTS.Synthesize(ctx, sentence, voice, instruct)
+			if err != nil {
+				g.logger.Warn("tts: chunk synthesis failed", "sentence", i, "error", err)
+				continue
+			}
+			if cfg.TTSConverter != nil {
+				if converted, err := cfg.TTSConverter(audio); err == nil {
+					audio = converted
+				}
+			}
+			if err := streamSink.SendVoiceChunk(ctx, audio, i+1, i == len(sentences)-1); err != nil {
+				g.logger.Warn("tts: send chunk failed", "error", err)
+				return
+			}
+		}
+		return
+	}
+
+	// Batch mode for non-streaming transports (Telegram).
+	g.synthesizeBatch(ctx, sink, text, voice, instruct)
+}
+
+func (g *Gateway) synthesizeBatch(ctx context.Context, sink bs.ResponseSink, text, voice, instruct string) {
+	cfg := g.deps.Config
 	g.logger.Info("tts: synthesizing", "text_len", len(text), "voice", voice, "text_preview", truncateStr(text, 200))
 
 	audio, err := cfg.TTS.Synthesize(ctx, text, voice, instruct)
@@ -682,20 +717,46 @@ func (g *Gateway) synthesizeAndSendVoice(ctx context.Context, sink bs.ResponseSi
 		g.logger.Warn("tts: synthesize failed", "error", err)
 		return
 	}
-
-	// Convert WAV → OGG Opus via callback (e.g. ffmpeg).
 	if cfg.TTSConverter != nil {
-		converted, err := cfg.TTSConverter(audio)
-		if err != nil {
+		if converted, err := cfg.TTSConverter(audio); err == nil {
+			audio = converted
+		} else {
 			g.logger.Warn("tts: convert failed", "error", err)
 			return
 		}
-		audio = converted
 	}
-
 	if err := sink.SendVoice(ctx, audio); err != nil {
 		g.logger.Warn("tts: send voice failed", "error", err)
 	}
+}
+
+// splitSentences splits text on sentence boundaries for TTS pipelining.
+func splitSentences(text string) []string {
+	var sentences []string
+	var current []rune
+	runes := []rune(text)
+
+	for i, r := range runes {
+		current = append(current, r)
+		if (r == '.' || r == '!' || r == '?' || r == '…') && i+1 < len(runes) {
+			next := runes[i+1]
+			// End sentence if followed by space + uppercase or newline.
+			if next == ' ' || next == '\n' {
+				s := strings.TrimSpace(string(current))
+				if len([]rune(s)) >= 10 { // min sentence length to avoid splitting abbreviations
+					sentences = append(sentences, s)
+					current = nil
+				}
+			}
+		}
+	}
+	if len(current) > 0 {
+		s := strings.TrimSpace(string(current))
+		if s != "" {
+			sentences = append(sentences, s)
+		}
+	}
+	return sentences
 }
 
 // shouldSendVoice checks if voice response should be sent for this user.
