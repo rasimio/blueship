@@ -64,7 +64,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		OriginPatterns: []string{"*"},
+		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		s.logger.Warn("ws: accept failed", "error", err)
