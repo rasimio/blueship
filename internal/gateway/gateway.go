@@ -610,7 +610,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		cortexTemp = g.deps.ModelStore.Get("cortex").Temperature
 	}
 
-	reply, err := loop.Run(ctx, agent.RunConfig{
+	runCfg := agent.RunConfig{
 		SessionID:       sess.ID,
 		SystemPrompt:    systemWithTime,
 		CompactSummary:  derefString(sess.CompactSummary),
@@ -622,7 +622,84 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		Role:            "cortex",
 		ToolOverride:    toolOverride,
 		Temperature:     cortexTemp,
-	}, content)
+	}
+
+	// Voice transport: use streaming LLM with inline sentence-level TTS.
+	// Each sentence is TTS'd and sent as an audio chunk as soon as the LLM produces it.
+	streamSink, isStreaming := sink.(bs.StreamingVoiceSink)
+	if isStreaming && g.deps.Config.TTS != nil {
+		var sentenceBuf strings.Builder
+		chunkSeq := 0
+
+		cfg := g.deps.Config
+		voice := cfg.TTSVoice
+		var instruct string
+		if cfg.TTSInstructMapper != nil {
+			instruct = cfg.TTSInstructMapper(us.LastStrategy)
+		}
+		mp3Provider, hasMP3 := cfg.TTS.(bs.TTSProviderMP3)
+		synthesize := cfg.TTS.Synthesize
+		if hasMP3 {
+			synthesize = mp3Provider.SynthesizeMP3
+		}
+
+		onText := func(chunk string) {
+			if cfg.TTSTextCleaner != nil {
+				chunk = cfg.TTSTextCleaner(chunk)
+			}
+			sentenceBuf.WriteString(chunk)
+			text := sentenceBuf.String()
+
+			// Check for sentence boundary
+			for _, delim := range []string{". ", "! ", "? ", ".\n", "!\n", "?\n"} {
+				if idx := strings.LastIndex(text, delim); idx >= 10 {
+					sentence := strings.TrimSpace(text[:idx+1])
+					sentenceBuf.Reset()
+					sentenceBuf.WriteString(text[idx+len(delim):])
+
+					chunkSeq++
+					seq := chunkSeq
+					audio, err := synthesize(ctx, sentence, voice, instruct)
+					if err != nil {
+						g.logger.Warn("tts: stream chunk failed", "error", err)
+						return
+					}
+					streamSink.SendVoiceChunk(ctx, audio, seq, false)
+					return
+				}
+			}
+		}
+
+		reply, err := loop.RunStream(ctx, runCfg, content, onText)
+		if err != nil {
+			g.logger.Error("agent loop error", "chat_id", us.ChatID, "error", err)
+			g.sendDebugError(ctx, sink, "agent", err)
+			return
+		}
+
+		// Flush remaining text as final chunk
+		if remaining := strings.TrimSpace(sentenceBuf.String()); remaining != "" {
+			chunkSeq++
+			if audio, err := synthesize(ctx, remaining, voice, instruct); err == nil {
+				streamSink.SendVoiceChunk(ctx, audio, chunkSeq, true)
+			}
+		} else if chunkSeq > 0 {
+			// Mark last sent chunk as final (re-send empty final marker)
+			streamSink.SendVoiceChunk(ctx, nil, chunkSeq, true)
+		}
+
+		// Also send text for logging
+		if reply != "" {
+			sink.SendText(ctx, reply)
+		}
+		if reply != "" && len(postActions) > 0 {
+			g.executePostActions(ctx, us, postActions, reply)
+		}
+		return
+	}
+
+	// Non-streaming path (Telegram)
+	reply, err := loop.Run(ctx, runCfg, content)
 	if err != nil {
 		g.logger.Error("agent loop error",
 			"chat_id", us.ChatID,
@@ -632,7 +709,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		return
 	}
 
-	// Execute post-actions (save reflection, etc.) using cortex response.
 	if reply != "" && len(postActions) > 0 {
 		g.executePostActions(ctx, us, postActions, reply)
 	}
@@ -641,7 +717,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		if err := sink.SendText(ctx, reply); err != nil {
 			g.logger.Error("send reply error", "chat_id", us.ChatID, "error", err)
 		}
-		// TTS: synthesize and send voice via sink.
 		if g.deps.Config.TTS != nil && g.shouldSendVoice(ctx, us, sink) {
 			go g.synthesizeAndSendVoice(ctx, sink, us, reply)
 		}

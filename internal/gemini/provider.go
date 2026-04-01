@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha1"
@@ -17,6 +18,7 @@ import (
 )
 
 const generateContentURL = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s"
+const streamContentURL = "https://generativelanguage.googleapis.com/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s"
 
 // CompletionProvider implements bs.CompletionProvider using Gemini generateContent.
 type CompletionProvider struct {
@@ -237,6 +239,153 @@ func (p *CompletionProvider) sendOnce(ctx context.Context, req bs.CompletionRequ
 		StopReason: stopReason,
 		Usage:      toUsage(result.UsageMetadata),
 	}, nil
+}
+
+// StreamComplete sends a streaming request. Calls onText for each text chunk.
+// Returns the full CompletionResponse when done (for storage/tool dispatch).
+func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.CompletionRequest, onText func(string)) (*bs.CompletionResponse, error) {
+	if p.apiKey == "" {
+		return nil, fmt.Errorf("gemini not configured: missing API key")
+	}
+
+	contents := buildContents(req.Messages)
+	var sys *content
+	if strings.TrimSpace(req.System) != "" {
+		sys = &content{Role: "system", Parts: []part{{Text: req.System}}}
+	}
+
+	generation := &genConfig{MaxOutputTokens: req.MaxTokens}
+	if req.Temperature > 0 {
+		t := req.Temperature
+		generation.Temperature = &t
+	}
+	if req.ThinkingBudget >= 0 {
+		generation.ThinkingConfig = &thinkingConfig{ThinkingBudget: req.ThinkingBudget}
+	}
+
+	payload := generateRequest{
+		SystemInstruction: sys,
+		Contents:          contents,
+		Tools:             buildTools(req.Tools),
+		GenerationConfig:  generation,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
+
+	url := fmt.Sprintf(streamContentURL, req.Model, p.apiKey)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Use a client without global timeout for streaming
+	streamClient := &http.Client{}
+	resp, err := streamClient.Do(httpReq)
+	if err != nil {
+		errStr := strings.ReplaceAll(err.Error(), p.apiKey, "***")
+		return nil, fmt.Errorf("gemini stream request: %s", errStr)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp generateResponse
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		msg := fmt.Sprintf("gemini stream API returned %d", resp.StatusCode)
+		if errResp.Error != nil {
+			msg += ": " + errResp.Error.Message
+		}
+		return nil, fmt.Errorf("%s", msg)
+	}
+
+	// Parse SSE stream
+	var allBlocks []bs.ContentBlock
+	var lastStopReason string
+	var usage bs.Usage
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+
+		var chunk generateResponse
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+
+		if len(chunk.Candidates) == 0 {
+			continue
+		}
+		cand := chunk.Candidates[0]
+		if cand.FinishReason != "" {
+			lastStopReason = cand.FinishReason
+		}
+		if chunk.UsageMetadata != nil {
+			usage = toUsage(chunk.UsageMetadata)
+		}
+
+		// Extract text chunks and call onText
+		for _, p := range cand.Content.Parts {
+			if p.Text != "" && onText != nil {
+				onText(p.Text)
+			}
+		}
+
+		blocks := toContentBlocks(cand.Content)
+		allBlocks = append(allBlocks, blocks...)
+	}
+
+	if len(allBlocks) == 0 {
+		return nil, fmt.Errorf("gemini stream: empty response")
+	}
+
+	stopReason := mapStopReason(lastStopReason)
+	if hasToolUseBlock(allBlocks) {
+		stopReason = "tool_use"
+	}
+
+	// Deduplicate text blocks (SSE sends incrementally)
+	allBlocks = deduplicateBlocks(allBlocks)
+
+	p.logger.Info("LLM response (stream)",
+		"stop_reason", stopReason,
+		"input_tokens", usage.InputTokens,
+		"output_tokens", usage.OutputTokens,
+	)
+
+	return &bs.CompletionResponse{
+		Content:    allBlocks,
+		StopReason: stopReason,
+		Usage:      usage,
+	}, nil
+}
+
+// deduplicateBlocks merges streaming text chunks into single blocks.
+func deduplicateBlocks(blocks []bs.ContentBlock) []bs.ContentBlock {
+	var result []bs.ContentBlock
+	var textAccum strings.Builder
+	for _, b := range blocks {
+		if b.Type == "text" {
+			textAccum.WriteString(b.Text)
+		} else {
+			if textAccum.Len() > 0 {
+				result = append(result, bs.ContentBlock{Type: "text", Text: textAccum.String()})
+				textAccum.Reset()
+			}
+			result = append(result, b)
+		}
+	}
+	if textAccum.Len() > 0 {
+		result = append(result, bs.ContentBlock{Type: "text", Text: textAccum.String()})
+	}
+	return result
 }
 
 func buildContents(messages []bs.Message) []content {

@@ -250,6 +250,153 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 	return "", fmt.Errorf("agent loop exceeded %d turns with no text output", cfg.MaxTurns)
 }
 
+// RunStream is like Run but streams text chunks via onText callback.
+// Used by voice transport for sentence-level TTS pipelining.
+// Tool call turns use batch mode; only the final text response is streamed.
+func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, onText func(string)) (string, error) {
+	streamProvider, ok := a.provider.(bs.StreamCompletionProvider)
+	if !ok {
+		// Fallback to batch if provider doesn't support streaming
+		return a.Run(ctx, cfg, userMessage)
+	}
+
+	if cfg.MaxTurns <= 0 {
+		cfg.MaxTurns = a.cfg.Gateway.MaxTurns
+	}
+	if cfg.MaxTokens <= 0 {
+		cfg.MaxTokens = a.cfg.Limits.MaxOutputTokens
+	}
+	if cfg.Model == "" {
+		cfg.Model = a.cfg.Models.Primary.Name
+	}
+
+	err := a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: userMessage})
+	if err != nil {
+		return "", fmt.Errorf("append user message: %w", err)
+	}
+
+	var tools []bs.ToolDefinition
+	if cfg.ToolOverride != nil {
+		tools = a.registry.DefinitionsForNames(cfg.ToolOverride)
+	} else if cfg.Role != "" && a.roleTools != nil {
+		if names := a.roleTools.Get(cfg.Role); names != nil {
+			tools = a.registry.DefinitionsForNames(names)
+		} else {
+			tools = a.registry.Definitions()
+		}
+	} else {
+		tools = a.registry.Definitions()
+	}
+	tokenBudget := a.calculateBudget(cfg.SystemPrompt, tools)
+	compactSummary := cfg.CompactSummary
+
+	var accumulated strings.Builder
+
+	for turn := 0; turn < cfg.MaxTurns; turn++ {
+		effectiveSystem := cfg.SystemPrompt
+		if compactSummary != "" {
+			effectiveSystem += SummaryHeader + compactSummary
+		}
+
+		messages, err := a.store.MessagesForAPI(ctx, cfg.SessionID, tokenBudget)
+		if err != nil {
+			return "", fmt.Errorf("load messages: %w", err)
+		}
+
+		if turn == 0 && cfg.ReflexGuidance != "" && cfg.InjectedContext != "" {
+			cfg.InjectedContext = cfg.ReflexGuidance + "\n\n" + cfg.InjectedContext
+		} else if turn == 0 && cfg.ReflexGuidance != "" {
+			cfg.InjectedContext = cfg.ReflexGuidance
+		}
+		if turn == 0 && cfg.InjectedContext != "" && len(messages) > 0 {
+			last := &messages[len(messages)-1]
+			if last.Role == "user" {
+				blocks := bs.NormalizeContent(last.Content)
+				prefix := bs.ContentBlock{Type: "text", Text: "[context]\n" + cfg.InjectedContext + "[/context]\n\n"}
+				last.Content = append([]bs.ContentBlock{prefix}, blocks...)
+			}
+		}
+
+		req := bs.CompletionRequest{
+			Model:          cfg.Model,
+			MaxTokens:      cfg.MaxTokens,
+			System:         effectiveSystem,
+			Messages:       messages,
+			Tools:          tools,
+			ThinkingBudget: normalizeThinkingBudget(a.cfg.Limits.ThinkingBudget),
+			Temperature:    cfg.Temperature,
+		}
+
+		a.logger.Info("calling LLM (stream)", "model", cfg.Model, "tools", len(tools), "messages", len(messages), "turn", turn+1)
+
+		// Stream the LLM call — onText fires for each text chunk
+		resp, err := streamProvider.StreamComplete(ctx, req, onText)
+		if err != nil {
+			return "", fmt.Errorf("LLM API: %w", err)
+		}
+
+		a.logger.Info("LLM response",
+			"stop_reason", resp.StopReason,
+			"input_tokens", resp.Usage.InputTokens,
+			"output_tokens", resp.Usage.OutputTokens,
+			"turn", turn+1,
+		)
+
+		err = a.store.AppendWithTokens(ctx, cfg.SessionID, bs.Message{
+			Role:    "assistant",
+			Content: resp.Content,
+		}, resp.Usage.OutputTokens)
+		if err != nil {
+			return "", fmt.Errorf("append assistant message: %w", err)
+		}
+
+		if turnText := bs.ExtractText(resp.Content); turnText != "" {
+			if accumulated.Len() > 0 {
+				accumulated.WriteString("\n\n")
+			}
+			accumulated.WriteString(turnText)
+		}
+
+		switch resp.StopReason {
+		case "end_turn", "max_tokens":
+			return accumulated.String(), nil
+
+		case "tool_use":
+			var toolResults []bs.ContentBlock
+			for _, block := range resp.Content {
+				if block.Type != "tool_use" {
+					continue
+				}
+				a.logger.Info("executing tool", "tool", block.Name, "tool_use_id", block.ID)
+				result, isError := a.registry.Execute(ctx, block.Name, block.Input)
+				toolResults = append(toolResults, bs.ContentBlock{
+					Type:      "tool_result",
+					ToolUseID: block.ID,
+					Name:      block.Name,
+					Content:   result,
+					IsError:   isError,
+				})
+			}
+
+			err = a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: toolResults})
+			if err != nil {
+				return "", fmt.Errorf("append tool results: %w", err)
+			}
+			// Tool call turns: onText was called but chunks were tool JSON, not user text.
+			// Next turn may produce the real text response.
+			continue
+
+		default:
+			return accumulated.String(), nil
+		}
+	}
+
+	if text := accumulated.String(); text != "" {
+		return text, nil
+	}
+	return "", fmt.Errorf("agent loop exceeded %d turns with no text output", cfg.MaxTurns)
+}
+
 // calculateBudget computes the token budget for message retrieval.
 func normalizeThinkingBudget(budget int) int {
 	if budget == 0 {

@@ -10,6 +10,14 @@ type CompletionProvider interface {
 	Complete(ctx context.Context, req CompletionRequest) (*CompletionResponse, error)
 }
 
+// StreamCompletionProvider extends CompletionProvider with streaming support.
+// onText is called for each text chunk as it arrives from the LLM.
+// Returns the full response for storage/tool dispatch after streaming completes.
+type StreamCompletionProvider interface {
+	CompletionProvider
+	StreamComplete(ctx context.Context, req CompletionRequest, onText func(string)) (*CompletionResponse, error)
+}
+
 // CompletionRequest is the input for CompletionProvider.Complete.
 type CompletionRequest struct {
 	Model          string
