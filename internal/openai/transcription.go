@@ -11,12 +11,14 @@ import (
 	"time"
 )
 
-const transcriptionURL = "https://api.openai.com/v1/audio/transcriptions"
+const defaultTranscriptionURL = "https://api.openai.com/v1/audio/transcriptions"
 
-// TranscriptionProvider implements bs.TranscriptionProvider using OpenAI Whisper.
+// TranscriptionProvider implements bs.TranscriptionProvider using OpenAI Whisper
+// or any OpenAI-compatible STT endpoint (e.g. local MLX Whisper).
 type TranscriptionProvider struct {
 	apiKey     string
 	model      string
+	endpoint   string
 	httpClient *http.Client
 }
 
@@ -25,19 +27,30 @@ func NewTranscriptionProvider(apiKey, model string, timeout time.Duration) *Tran
 	return &TranscriptionProvider{
 		apiKey:     apiKey,
 		model:      model,
+		endpoint:   defaultTranscriptionURL,
 		httpClient: &http.Client{Timeout: timeout},
 	}
 }
 
-// IsConfigured returns true if the provider has an API key.
+// NewTranscriptionProviderWithEndpoint creates a provider pointing to a custom endpoint
+// (e.g. local MLX Whisper on localhost:12102).
+func NewTranscriptionProviderWithEndpoint(endpoint, model string, timeout time.Duration) *TranscriptionProvider {
+	return &TranscriptionProvider{
+		model:    model,
+		endpoint: endpoint,
+		httpClient: &http.Client{Timeout: timeout},
+	}
+}
+
+// IsConfigured returns true if the provider has an API key or a custom endpoint.
 func (p *TranscriptionProvider) IsConfigured() bool {
-	return p.apiKey != ""
+	return p.apiKey != "" || p.endpoint != defaultTranscriptionURL
 }
 
 // Transcribe sends audio data to Whisper and returns the transcribed text.
 func (p *TranscriptionProvider) Transcribe(ctx context.Context, audio []byte, filename string) (string, error) {
 	if !p.IsConfigured() {
-		return "", fmt.Errorf("openai API key not configured")
+		return "", fmt.Errorf("transcription provider not configured")
 	}
 
 	var buf bytes.Buffer
@@ -52,15 +65,16 @@ func (p *TranscriptionProvider) Transcribe(ctx context.Context, audio []byte, fi
 	}
 
 	_ = w.WriteField("model", p.model)
-	_ = w.WriteField("language", "ru")
 	_ = w.WriteField("response_format", "json")
 	w.Close()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", transcriptionURL, &buf)
+	req, err := http.NewRequestWithContext(ctx, "POST", p.endpoint, &buf)
 	if err != nil {
 		return "", fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
 	req.Header.Set("Content-Type", w.FormDataContentType())
 
 	resp, err := p.httpClient.Do(req)

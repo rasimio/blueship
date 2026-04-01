@@ -332,6 +332,12 @@ func Whisper(apiKey string) TranscriptionProvider {
 func WhisperWithModel(apiKey, model string, timeout time.Duration) TranscriptionProvider {
 	return openai.NewTranscriptionProvider(apiKey, model, timeout)
 }
+
+// WhisperLocal creates a TranscriptionProvider pointing to a local OpenAI-compatible
+// STT endpoint (e.g. MLX Whisper on localhost).
+func WhisperLocal(endpoint, model string, timeout time.Duration) TranscriptionProvider {
+	return openai.NewTranscriptionProviderWithEndpoint(endpoint, model, timeout)
+}
  // TelegramSender creates a MessageSender using the Telegram Bot API.
 func TelegramSender(botToken string, timeout time.Duration) MessageSender {
 	return &telegramSenderAdapter{client: telegram.NewClient(botToken, timeout)}
