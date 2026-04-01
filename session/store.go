@@ -94,7 +94,7 @@ func (s *Store) GetOrCreate(ctx context.Context, userID, model string) (*Session
 	var sess Session
 	err := s.db.GetContext(ctx, &sess,
 		`SELECT * FROM chat_sessions
-		 WHERE user_id = $1 AND active = true
+		 WHERE user_id = $1 AND active = true AND source = 'chat'
 		 ORDER BY updated_at DESC
 		 LIMIT 1`,
 		userID,
