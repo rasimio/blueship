@@ -70,6 +70,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("ws: accept failed", "error", err)
 		return
 	}
+	conn.SetReadLimit(16 * 1024 * 1024) // 16MB for base64 audio
 	defer conn.Close(websocket.StatusNormalClosure, "bye")
 
 	s.logger.Info("ws: client connected", "remote", r.RemoteAddr)
