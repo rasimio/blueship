@@ -386,15 +386,6 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 		userID = ownerID
 	}
 
-	// CRITICAL: reuse existing UserState for the same userID (any transport).
-	// This ensures voice and Telegram share the same mutex, session, and context.
-	for _, existing := range g.users {
-		if existing.UserID == userID {
-			g.users[chatID] = existing // alias this chatID to the same state
-			return existing, nil
-		}
-	}
-
 	var isOwner bool
 	if err := coreDB.GetContext(ctx, &isOwner,
 		`SELECT is_owner FROM user_profiles WHERE id = $1`, userID.String()); err != nil {
