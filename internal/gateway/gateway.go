@@ -676,25 +676,31 @@ func (g *Gateway) synthesizeAndSendVoice(ctx context.Context, sink bs.ResponseSi
 	}
 
 	// Sentence-level pipelining for streaming transports.
+	// Uses MP3 format (macOS/iOS compatible) instead of OGG Opus.
 	if streamSink, ok := sink.(bs.StreamingVoiceSink); ok {
+		mp3Provider, hasMP3 := cfg.TTS.(bs.TTSProviderMP3)
+		synthesize := cfg.TTS.Synthesize
+		if hasMP3 {
+			synthesize = mp3Provider.SynthesizeMP3
+		}
+
 		sentences := splitSentences(text)
 		if len(sentences) <= 1 {
-			// Single sentence — no pipelining benefit, use batch.
-			g.synthesizeBatch(ctx, sink, text, voice, instruct)
+			audio, err := synthesize(ctx, text, voice, instruct)
+			if err != nil {
+				g.logger.Warn("tts: synthesize failed", "error", err)
+				return
+			}
+			streamSink.SendVoiceChunk(ctx, audio, 1, true)
 			return
 		}
 
 		g.logger.Info("tts: streaming", "sentences", len(sentences), "text_len", len(text))
 		for i, sentence := range sentences {
-			audio, err := cfg.TTS.Synthesize(ctx, sentence, voice, instruct)
+			audio, err := synthesize(ctx, sentence, voice, instruct)
 			if err != nil {
 				g.logger.Warn("tts: chunk synthesis failed", "sentence", i, "error", err)
 				continue
-			}
-			if cfg.TTSConverter != nil {
-				if converted, err := cfg.TTSConverter(audio); err == nil {
-					audio = converted
-				}
 			}
 			if err := streamSink.SendVoiceChunk(ctx, audio, i+1, i == len(sentences)-1); err != nil {
 				g.logger.Warn("tts: send chunk failed", "error", err)

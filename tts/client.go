@@ -12,11 +12,12 @@ import (
 
 // Client is a TTS HTTP client supporting OpenAI-compatible and ElevenLabs APIs.
 type Client struct {
-	endpoint string
-	model    string
-	speed    float64
-	apiKey   string // for ElevenLabs (xi-api-key header)
-	client   *http.Client
+	endpoint    string
+	endpointMP3 string // ElevenLabs MP3 endpoint (for non-Telegram clients)
+	model       string
+	speed       float64
+	apiKey      string // for ElevenLabs (xi-api-key header)
+	client      *http.Client
 }
 
 // NewClient creates a TTS client for an OpenAI-compatible endpoint.
@@ -40,13 +41,14 @@ func NewElevenLabsClient(apiKey, voiceID, model string, speed float64, timeout t
 	if model == "" {
 		model = "eleven_multilingual_v2"
 	}
-	endpoint := fmt.Sprintf("https://api.elevenlabs.io/v1/text-to-speech/%s?output_format=opus_48000_128", voiceID)
+	base := fmt.Sprintf("https://api.elevenlabs.io/v1/text-to-speech/%s", voiceID)
 	return &Client{
-		endpoint: endpoint,
-		model:    model,
-		speed:    speed,
-		apiKey:   apiKey,
-		client:   &http.Client{Timeout: timeout},
+		endpoint:    base + "?output_format=opus_48000_128",
+		endpointMP3: base + "?output_format=mp3_44100_128",
+		model:       model,
+		speed:       speed,
+		apiKey:      apiKey,
+		client:      &http.Client{Timeout: timeout},
 	}
 }
 
@@ -60,7 +62,20 @@ func (c *Client) Synthesize(ctx context.Context, text, voice, instruct string) (
 	return c.synthesizeOpenAI(ctx, text, voice, instruct)
 }
 
+// SynthesizeMP3 returns MP3 audio (for clients that don't support OGG Opus).
+func (c *Client) SynthesizeMP3(ctx context.Context, text, voice, instruct string) ([]byte, error) {
+	if c.apiKey != "" && c.endpointMP3 != "" {
+		return c.synthesizeElevenLabsWithEndpoint(ctx, c.endpointMP3, text, instruct)
+	}
+	// Fallback to default format
+	return c.Synthesize(ctx, text, voice, instruct)
+}
+
 func (c *Client) synthesizeElevenLabs(ctx context.Context, text, instruct string) ([]byte, error) {
+	return c.synthesizeElevenLabsWithEndpoint(ctx, c.endpoint, text, instruct)
+}
+
+func (c *Client) synthesizeElevenLabsWithEndpoint(ctx context.Context, endpoint, text, instruct string) ([]byte, error) {
 	payload := map[string]any{
 		"text":          text,
 		"model_id":      c.model,
@@ -81,7 +96,7 @@ func (c *Client) synthesizeElevenLabs(ctx context.Context, text, instruct string
 		return nil, fmt.Errorf("tts: marshal: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("tts: request: %w", err)
 	}

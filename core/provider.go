@@ -80,6 +80,12 @@ type TTSProvider interface {
 	Synthesize(ctx context.Context, text, voice, instruct string) ([]byte, error)
 }
 
+// TTSProviderMP3 extends TTSProvider with MP3 output for non-Telegram clients.
+type TTSProviderMP3 interface {
+	TTSProvider
+	SynthesizeMP3(ctx context.Context, text, voice, instruct string) ([]byte, error)
+}
+
 // TransportSender sends messages to users via a messaging platform.
 type TransportSender interface {
 	SendText(ctx context.Context, chatID int64, text string) error
