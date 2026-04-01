@@ -366,6 +366,7 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
+	// Fast path: exact chatID match.
 	if us, ok := g.users[chatID]; ok {
 		return us, nil
 	}
@@ -375,9 +376,7 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 		return nil, fmt.Errorf("core DB: %w", err)
 	}
 
-	// For non-telegram transports (e.g. "voice:owner"), resolve owner and
-	// reuse the existing Telegram UserState if available. This ensures
-	// shared session context between voice and chat.
+	// Resolve userID from chatID (or fallback to owner for non-telegram transports).
 	userID, err := user.ResolveByChatID(ctx, coreDB, chatID)
 	if err != nil {
 		ownerID, ownerErr := user.ResolveOwner(ctx, coreDB)
@@ -385,13 +384,14 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 			return nil, fmt.Errorf("resolve user %s: %w", chatID, err)
 		}
 		userID = ownerID
+	}
 
-		// Reuse existing owner UserState (from Telegram) for cross-transport session sharing.
-		for _, existing := range g.users {
-			if existing.UserID == userID {
-				g.users[chatID] = existing // alias this chatID to the same state
-				return existing, nil
-			}
+	// CRITICAL: reuse existing UserState for the same userID (any transport).
+	// This ensures voice and Telegram share the same mutex, session, and context.
+	for _, existing := range g.users {
+		if existing.UserID == userID {
+			g.users[chatID] = existing // alias this chatID to the same state
+			return existing, nil
 		}
 	}
 
@@ -401,7 +401,6 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 		g.logger.Warn("is_owner lookup failed, defaulting to false", "user_id", userID, "error", err)
 	}
 
-	// Single-user mode: reject non-owner messages
 	if !isOwner {
 		g.logger.Info("rejected non-owner message", "chat_id", chatID, "user_id", userID.String())
 		return nil, fmt.Errorf("non-owner user rejected")
