@@ -43,6 +43,38 @@ func (r *LLMRouter) Complete(ctx context.Context, req CompletionRequest) (*Compl
 	return provider.Complete(ctx, req)
 }
 
+// StreamComplete implements StreamCompletionProvider by dispatching to a streaming provider.
+// Falls back to batch Complete + synthetic onText if provider doesn't support streaming.
+func (r *LLMRouter) StreamComplete(ctx context.Context, req CompletionRequest, onText func(string)) (*CompletionResponse, error) {
+	modelName, providerName := r.resolve(req.Model)
+	req.Model = modelName
+
+	provider := r.providers[providerName]
+	if provider == nil {
+		provider = r.defaultProvider
+	}
+	if provider == nil {
+		return nil, ErrProviderNotConfigured
+	}
+
+	// Use streaming if provider supports it.
+	if sp, ok := provider.(StreamCompletionProvider); ok {
+		return sp.StreamComplete(ctx, req, onText)
+	}
+
+	// Fallback: batch complete, then call onText with full text.
+	resp, err := provider.Complete(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	if onText != nil {
+		if text := ExtractText(resp.Content); text != "" {
+			onText(text)
+		}
+	}
+	return resp, nil
+}
+
 // resolve returns (modelName, providerName).
 func (r *LLMRouter) resolve(model string) (string, string) {
 	if parts := strings.SplitN(model, ":", 2); len(parts) == 2 {
