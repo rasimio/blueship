@@ -1028,7 +1028,17 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		researchBlock.WriteString("[/research]")
 	}
 
-	return rc.FormattedTraces, guidance.String(), toolOverride, reflexResult.PostActions
+	// When temporal_recall returned data, skip AME traces — they pollute
+	// temporal queries with unrelated high-scoring memories from other dates.
+	formattedTraces := rc.FormattedTraces
+	for _, pa := range preActionsToRun {
+		if pa.Tool == "temporal_recall" && researchBlock.Len() > 50 {
+			formattedTraces = ""
+			break
+		}
+	}
+
+	return formattedTraces, guidance.String(), toolOverride, reflexResult.PostActions
 }
 
 // executePostActions runs post-cortex actions (save reflection, etc.).
