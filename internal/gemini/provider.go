@@ -36,7 +36,7 @@ func NewCompletionProvider(apiKey string, timeout time.Duration) *CompletionProv
 		httpClient:  &http.Client{Timeout: timeout},
 		logger:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
 		generateURL: generateContentURL,
-		backoffs:    []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second},
+		backoffs:    []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second, 45 * time.Second, 60 * time.Second},
 	}
 }
 
