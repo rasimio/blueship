@@ -78,6 +78,10 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// across iterations so the LLM sees full context.
 	sessID := progress.SessionID
 	if sessID == "" || task.Schedule != nil {
+		// Archive previous session before creating a new one.
+		if sessID != "" {
+			deps.Store.ArchiveSession(ctx, sessID)
+		}
 		var err error
 		sessID, err = deps.Store.CreateSessionWithSource(ctx, task.UserID.String(), displayModel, "agent_task", task.ID.String())
 		if err != nil {
