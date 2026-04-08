@@ -125,8 +125,7 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 		retryable := strings.Contains(errMsg, "503") ||
 			strings.Contains(errMsg, "429") ||
 			strings.Contains(errMsg, "deadline exceeded") ||
-			strings.Contains(errMsg, "context canceled") ||
-			strings.Contains(errMsg, "gemini empty")
+			strings.Contains(errMsg, "context canceled")
 		if !retryable {
 			return nil, err
 		}
@@ -221,12 +220,22 @@ func (p *CompletionProvider) sendOnce(ctx context.Context, req bs.CompletionRequ
 
 	cand := result.Candidates[0]
 	if len(cand.Content.Parts) == 0 {
+		if cand.FinishReason == "STOP" {
+			// Model chose to say nothing — valid response (e.g. inner-thought has nothing to add).
+			return &bs.CompletionResponse{
+				Content:    []bs.ContentBlock{{Type: "text", Text: ""}},
+				StopReason: "end_turn",
+			}, nil
+		}
 		return nil, fmt.Errorf("gemini empty content: finishReason=%s", cand.FinishReason)
 	}
 
 	blocks := toContentBlocks(cand.Content)
 	if len(blocks) == 0 {
-		return nil, fmt.Errorf("gemini empty blocks: finishReason=%s", cand.FinishReason)
+		return &bs.CompletionResponse{
+			Content:    []bs.ContentBlock{{Type: "text", Text: ""}},
+			StopReason: "end_turn",
+		}, nil
 	}
 
 	stopReason := mapStopReason(cand.FinishReason)
