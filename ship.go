@@ -19,6 +19,7 @@ import (
 	"github.com/rasimio/blueship/internal/gateway"
 	"github.com/rasimio/blueship/internal/infrastructure/ws"
 	"github.com/rasimio/blueship/internal/openai"
+	"github.com/rasimio/blueship/internal/openaicodex"
 	"github.com/rasimio/blueship/internal/scheduler"
 	"github.com/rasimio/blueship/internal/telegram"
 	"github.com/rasimio/blueship/internal/user"
@@ -293,7 +294,16 @@ func GeminiWithConfig(apiKey string, timeout time.Duration) CompletionProvider {
 	return gemini.NewCompletionProvider(apiKey, timeout)
 }
 
-
+// OpenAICodex creates a CompletionProvider using ChatGPT subscription via OAuth.
+// refreshToken is the initial token from env; tokenFile persists rotated tokens.
+func OpenAICodex(refreshToken, tokenFile string, timeout time.Duration, backoffs []time.Duration, logger *slog.Logger) CompletionProvider {
+	ts := openaicodex.NewTokenStore(tokenFile, logger)
+	if err := ts.Load(); err != nil {
+		logger.Error("openai-codex: load tokens", "error", err)
+	}
+	ts.Bootstrap(refreshToken)
+	return openaicodex.NewCompletionProvider(ts, timeout, backoffs, logger)
+}
 
 // Telegram creates a TransportConfig for Telegram.
 func Telegram(botToken string) TransportConfig {
