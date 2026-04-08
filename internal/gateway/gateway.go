@@ -1123,6 +1123,8 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 		return nil, fmt.Errorf("reflex model not configured")
 	}
 
+	g.logger.Info("calling reflex", "model", model)
+
 	// Inject current datetime so reflex can compute dates for temporal_recall.
 	now := time.Now().In(g.tz)
 	reflexSystem := fmt.Sprintf("[current_datetime: %s]\n\n%s",
