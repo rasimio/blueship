@@ -137,6 +137,7 @@ type responsesRequest struct {
 	Instructions    string         `json:"instructions"`
 	Input           []any          `json:"input"`
 	Stream          bool           `json:"stream"`
+	Store           bool           `json:"store"`
 	Tools           []responseTool `json:"tools,omitempty"`
 	MaxOutputTokens *int           `json:"max_output_tokens,omitempty"`
 	Temperature     *float64       `json:"temperature,omitempty"`
