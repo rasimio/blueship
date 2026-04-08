@@ -42,14 +42,12 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 // --- Request types ---
 
 type responsesRequest struct {
-	Model           string         `json:"model"`
-	Instructions    string         `json:"instructions"`
-	Input           []any          `json:"input"`
-	Stream          bool           `json:"stream"`
-	Store           bool           `json:"store"`
-	Tools           []responseTool `json:"tools,omitempty"`
-	MaxOutputTokens *int           `json:"max_output_tokens,omitempty"`
-	Temperature     *float64       `json:"temperature,omitempty"`
+	Model        string         `json:"model"`
+	Instructions string         `json:"instructions"`
+	Input        []any          `json:"input"`
+	Stream       bool           `json:"stream"`
+	Store        bool           `json:"store"`
+	Tools        []responseTool `json:"tools,omitempty"`
 }
 
 type responseTool struct {
@@ -60,9 +58,21 @@ type responseTool struct {
 }
 
 // Input item types for the Responses API.
+
+type inputTextContent struct {
+	Type string `json:"type"` // "input_text"
+	Text string `json:"text"`
+}
+
 type inputMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string             `json:"role"`
+	Content []inputTextContent `json:"content"`
+}
+
+type outputTextContent struct {
+	Type        string `json:"type"` // "output_text"
+	Text        string `json:"text"`
+	Annotations []any  `json:"annotations"`
 }
 
 type inputAssistantMessage struct {
@@ -71,11 +81,6 @@ type inputAssistantMessage struct {
 	ID      string              `json:"id"`
 	Content []outputTextContent `json:"content"`
 	Status  string              `json:"status"` // "completed"
-}
-
-type outputTextContent struct {
-	Type string `json:"type"` // "output_text"
-	Text string `json:"text"`
 }
 
 type inputFunctionCall struct {
@@ -93,20 +98,6 @@ type inputFunctionCallOutput struct {
 }
 
 // --- Response types ---
-
-type responsesResponse struct {
-	ID     string       `json:"id"`
-	Status string       `json:"status"` // "completed", "incomplete", "failed"
-	Output []outputItem `json:"output"`
-	Usage  struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
-	Error *struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
 
 type outputItem struct {
 	Type      string              `json:"type"` // "message", "function_call", "reasoning"
@@ -136,21 +127,14 @@ func buildRequest(req bs.CompletionRequest) responsesRequest {
 		}
 	}
 
-	r := responsesRequest{
+	return responsesRequest{
 		Model:        req.Model,
 		Instructions: req.System,
 		Input:        input,
 		Stream:       true,
+		Store:        false,
 		Tools:        buildTools(req.Tools),
 	}
-	if req.MaxTokens > 0 {
-		r.MaxOutputTokens = &req.MaxTokens
-	}
-	if req.Temperature > 0 {
-		t := req.Temperature
-		r.Temperature = &t
-	}
-	return r
 }
 
 func buildUserInput(blocks []bs.ContentBlock) []any {
@@ -162,9 +146,11 @@ func buildUserInput(blocks []bs.ContentBlock) []any {
 		case "text":
 			textParts = append(textParts, b.Text)
 		case "tool_result":
-			// Flush text before tool result.
 			if len(textParts) > 0 {
-				items = append(items, inputMessage{Role: "user", Content: strings.Join(textParts, "\n")})
+				items = append(items, inputMessage{
+					Role:    "user",
+					Content: []inputTextContent{{Type: "input_text", Text: strings.Join(textParts, "\n")}},
+				})
 				textParts = nil
 			}
 			output := stringifyContent(b.Content)
@@ -177,7 +163,10 @@ func buildUserInput(blocks []bs.ContentBlock) []any {
 	}
 
 	if len(textParts) > 0 {
-		items = append(items, inputMessage{Role: "user", Content: strings.Join(textParts, "\n")})
+		items = append(items, inputMessage{
+			Role:    "user",
+			Content: []inputTextContent{{Type: "input_text", Text: strings.Join(textParts, "\n")}},
+		})
 	}
 	return items
 }
@@ -191,14 +180,17 @@ func buildAssistantInput(blocks []bs.ContentBlock) []any {
 		case "text":
 			textParts = append(textParts, b.Text)
 		case "tool_use":
-			// Flush text before tool call.
 			if len(textParts) > 0 {
 				items = append(items, inputAssistantMessage{
-					Type:    "message",
-					Role:    "assistant",
-					ID:      "msg_text",
-					Content: []outputTextContent{{Type: "output_text", Text: strings.Join(textParts, "\n")}},
-					Status:  "completed",
+					Type: "message",
+					Role: "assistant",
+					ID:   "msg_text",
+					Content: []outputTextContent{{
+						Type:        "output_text",
+						Text:        strings.Join(textParts, "\n"),
+						Annotations: []any{},
+					}},
+					Status: "completed",
 				})
 				textParts = nil
 			}
@@ -218,11 +210,15 @@ func buildAssistantInput(blocks []bs.ContentBlock) []any {
 
 	if len(textParts) > 0 {
 		items = append(items, inputAssistantMessage{
-			Type:    "message",
-			Role:    "assistant",
-			ID:      "msg_text",
-			Content: []outputTextContent{{Type: "output_text", Text: strings.Join(textParts, "\n")}},
-			Status:  "completed",
+			Type: "message",
+			Role: "assistant",
+			ID:   "msg_text",
+			Content: []outputTextContent{{
+				Type:        "output_text",
+				Text:        strings.Join(textParts, "\n"),
+				Annotations: []any{},
+			}},
+			Status: "completed",
 		})
 	}
 	return items
@@ -244,42 +240,11 @@ func buildTools(tools []bs.ToolDefinition) []responseTool {
 	return out
 }
 
-func parseOutput(output []outputItem) []bs.ContentBlock {
-	var blocks []bs.ContentBlock
-	for _, item := range output {
-		switch item.Type {
-		case "message":
-			for _, c := range item.Content {
-				if c.Type == "output_text" && c.Text != "" {
-					blocks = append(blocks, bs.ContentBlock{Type: "text", Text: c.Text})
-				}
-			}
-		case "function_call":
-			rawArgs := json.RawMessage(item.Arguments)
-			if !json.Valid(rawArgs) {
-				rawArgs, _ = json.Marshal(item.Arguments)
-			}
-			blocks = append(blocks, bs.ContentBlock{
-				Type:  "tool_use",
-				ID:    item.CallID,
-				Name:  item.Name,
-				Input: rawArgs,
-			})
-		}
-	}
-	return blocks
-}
-
 func mapStatus(status string, content []bs.ContentBlock) string {
-	hasToolUse := false
 	for _, b := range content {
 		if b.Type == "tool_use" {
-			hasToolUse = true
-			break
+			return "tool_use"
 		}
-	}
-	if hasToolUse {
-		return "tool_use"
 	}
 	switch status {
 	case "completed":
