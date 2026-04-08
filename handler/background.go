@@ -72,9 +72,12 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		}
 	}
 
-	// 4. Get or create shared session (one session for the entire task lifecycle)
+	// 4. Get or create session.
+	// Recurring tasks (schedule != "") get a fresh session each iteration
+	// to prevent unbounded history growth. Non-recurring tasks share a session
+	// across iterations so the LLM sees full context.
 	sessID := progress.SessionID
-	if sessID == "" {
+	if sessID == "" || task.Schedule != nil {
 		var err error
 		sessID, err = deps.Store.CreateSessionWithSource(ctx, task.UserID.String(), displayModel, "agent_task", task.ID.String())
 		if err != nil {
