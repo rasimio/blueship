@@ -78,16 +78,16 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// across iterations so the LLM sees full context.
 	sessID := progress.SessionID
 	if sessID == "" || task.Schedule != nil {
-		// Archive previous session before creating a new one.
-		if sessID != "" {
-			deps.Store.ArchiveSession(ctx, sessID)
-		}
 		var err error
 		sessID, err = deps.Store.CreateSessionWithSource(ctx, task.UserID.String(), displayModel, "agent_task", task.ID.String())
 		if err != nil {
 			return core.IterationResult{}, fmt.Errorf("create session: %w", err)
 		}
 		progress.SessionID = sessID
+	}
+	// Recurring tasks: archive session when done (progress is reset between runs).
+	if task.Schedule != nil {
+		defer deps.Store.ArchiveSession(ctx, sessID)
 	}
 
 	// 5. Build user message based on iteration phase
