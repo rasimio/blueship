@@ -1,11 +1,9 @@
 package openaicodex
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -35,99 +33,10 @@ func NewCompletionProvider(tokens *TokenStore, timeout time.Duration, backoffs [
 	}
 }
 
-// Complete sends a completion request using the OpenAI Responses API.
+// Complete sends a completion request. Codex requires streaming, so this
+// delegates to StreamComplete with a nil onText callback.
 func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
-	var lastErr error
-	for attempt := 0; attempt <= len(p.backoffs); attempt++ {
-		resp, err := p.sendOnce(ctx, req)
-		if err == nil {
-			return resp, nil
-		}
-
-		lastErr = err
-		errMsg := err.Error()
-		retryable := strings.Contains(errMsg, "503") ||
-			strings.Contains(errMsg, "429") ||
-			strings.Contains(errMsg, "deadline exceeded")
-		if !retryable {
-			return nil, err
-		}
-
-		if attempt < len(p.backoffs) {
-			p.logger.Warn("openai-codex retryable error",
-				"error", err,
-				"attempt", attempt+1,
-				"backoff", p.backoffs[attempt],
-			)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(p.backoffs[attempt]):
-			}
-		}
-	}
-	return nil, fmt.Errorf("openai-codex failed after %d retries: %w", len(p.backoffs), lastErr)
-}
-
-func (p *CompletionProvider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
-	token, err := p.tokens.AccessToken()
-	if err != nil {
-		return nil, fmt.Errorf("openai-codex auth: %w", err)
-	}
-
-	payload := buildRequest(req, false)
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	p.logger.Info("openai-codex API request",
-		"model", req.Model,
-		"messages", len(req.Messages),
-		"tools", len(req.Tools),
-		"system_len", len(req.System),
-		"body_bytes", len(body),
-	)
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", responsesURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("openai-codex request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("openai-codex API returned %d: %s", resp.StatusCode, truncate(string(respBody), 500))
-	}
-
-	var apiResp responsesResponse
-	if err := json.Unmarshal(respBody, &apiResp); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
-	}
-
-	content := parseOutput(apiResp.Output)
-	stopReason := mapStatus(apiResp.Status, content)
-
-	return &bs.CompletionResponse{
-		Content:    content,
-		StopReason: stopReason,
-		Usage: bs.Usage{
-			InputTokens:  apiResp.Usage.InputTokens,
-			OutputTokens: apiResp.Usage.OutputTokens,
-		},
-	}, nil
+	return p.StreamComplete(ctx, req, nil)
 }
 
 // --- Request types ---
@@ -212,7 +121,7 @@ type outputItem struct {
 
 // --- Conversion ---
 
-func buildRequest(req bs.CompletionRequest, stream bool) responsesRequest {
+func buildRequest(req bs.CompletionRequest) responsesRequest {
 	var input []any
 
 	for _, msg := range req.Messages {
@@ -231,7 +140,7 @@ func buildRequest(req bs.CompletionRequest, stream bool) responsesRequest {
 		Model:        req.Model,
 		Instructions: req.System,
 		Input:        input,
-		Stream:       stream,
+		Stream:       true,
 		Tools:        buildTools(req.Tools),
 	}
 	if req.MaxTokens > 0 {

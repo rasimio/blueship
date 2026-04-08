@@ -20,7 +20,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		return nil, fmt.Errorf("openai-codex auth: %w", err)
 	}
 
-	payload := buildRequest(req, true)
+	payload := buildRequest(req)
 
 	body, err := json.Marshal(payload)
 	if err != nil {
