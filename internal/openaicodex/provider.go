@@ -133,12 +133,13 @@ func (p *CompletionProvider) sendOnce(ctx context.Context, req bs.CompletionRequ
 // --- Request types ---
 
 type responsesRequest struct {
-	Model           string          `json:"model"`
-	Input           []any           `json:"input"`
-	Stream          bool            `json:"stream"`
-	Tools           []responseTool  `json:"tools,omitempty"`
-	MaxOutputTokens *int            `json:"max_output_tokens,omitempty"`
-	Temperature     *float64        `json:"temperature,omitempty"`
+	Model           string         `json:"model"`
+	Instructions    string         `json:"instructions"`
+	Input           []any          `json:"input"`
+	Stream          bool           `json:"stream"`
+	Tools           []responseTool `json:"tools,omitempty"`
+	MaxOutputTokens *int           `json:"max_output_tokens,omitempty"`
+	Temperature     *float64       `json:"temperature,omitempty"`
 }
 
 type responseTool struct {
@@ -213,10 +214,6 @@ type outputItem struct {
 func buildRequest(req bs.CompletionRequest, stream bool) responsesRequest {
 	var input []any
 
-	if strings.TrimSpace(req.System) != "" {
-		input = append(input, inputMessage{Role: "system", Content: req.System})
-	}
-
 	for _, msg := range req.Messages {
 		blocks := bs.NormalizeContent(msg.Content)
 		switch msg.Role {
@@ -230,10 +227,11 @@ func buildRequest(req bs.CompletionRequest, stream bool) responsesRequest {
 	}
 
 	r := responsesRequest{
-		Model:  req.Model,
-		Input:  input,
-		Stream: stream,
-		Tools:  buildTools(req.Tools),
+		Model:        req.Model,
+		Instructions: req.System,
+		Input:        input,
+		Stream:       stream,
+		Tools:        buildTools(req.Tools),
 	}
 	if req.MaxTokens > 0 {
 		r.MaxOutputTokens = &req.MaxTokens
