@@ -114,12 +114,22 @@ type outputItem struct {
 
 func buildRequest(req bs.CompletionRequest) responsesRequest {
 	var input []any
+	var contextBlocks []string
 
 	for _, msg := range req.Messages {
 		blocks := bs.NormalizeContent(msg.Content)
 		switch msg.Role {
 		case "user":
-			items := buildUserInput(blocks)
+			// Extract [context]...[/context] blocks into instructions.
+			var filtered []bs.ContentBlock
+			for _, b := range blocks {
+				if b.Type == "text" && strings.HasPrefix(b.Text, "[context]\n") {
+					contextBlocks = append(contextBlocks, b.Text)
+				} else {
+					filtered = append(filtered, b)
+				}
+			}
+			items := buildUserInput(filtered)
 			input = append(input, items...)
 		case "assistant":
 			items := buildAssistantInput(blocks)
@@ -127,9 +137,16 @@ func buildRequest(req bs.CompletionRequest) responsesRequest {
 		}
 	}
 
+	// Append extracted context to instructions so the model treats it
+	// as authoritative system-level information, not user text.
+	instructions := req.System
+	if len(contextBlocks) > 0 {
+		instructions += "\n\n" + strings.Join(contextBlocks, "\n\n")
+	}
+
 	return responsesRequest{
 		Model:        req.Model,
-		Instructions: req.System,
+		Instructions: instructions,
 		Input:        input,
 		Stream:       true,
 		Store:        false,
