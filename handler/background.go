@@ -86,8 +86,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		progress.SessionID = sessID
 	}
 	// Recurring tasks: archive session when done (progress is reset between runs).
+	// Use background context — parent ctx may be cancelled on shutdown.
 	if task.Schedule != nil {
-		defer deps.Store.ArchiveSession(ctx, sessID)
+		defer deps.Store.ArchiveSession(context.Background(), sessID)
 	}
 
 	// 5. Build user message based on iteration phase
