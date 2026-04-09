@@ -149,6 +149,7 @@ func (s *Ship) Run(ctx context.Context) error {
 	}
 
 	// 4b. Start agent task scheduler (if handlers registered).
+	var agentSched *agenttask.Scheduler
 	if len(s.handlers) > 0 {
 		// Build a global tool registry for agent tasks.
 		globalRegistry := core.NewToolRegistry()
@@ -191,7 +192,7 @@ func (s *Ship) Run(ctx context.Context) error {
 			}
 		}
 
-		agentSched := agenttask.NewScheduler(taskStore, s.handlers, globalRegistry, msgStore, deps, notifyFn, s.logger)
+		agentSched = agenttask.NewScheduler(taskStore, s.handlers, globalRegistry, msgStore, deps, notifyFn, s.logger)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -231,6 +232,9 @@ func (s *Ship) Run(ctx context.Context) error {
 	<-ctx.Done()
 	s.logger.Info("shutting down, waiting for jobs...")
 	wg.Wait()
+	if agentSched != nil {
+		agentSched.Wait()
+	}
 	s.logger.Info("blueship stopped")
 	return nil
 }

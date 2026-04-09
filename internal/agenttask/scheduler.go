@@ -11,6 +11,9 @@ import (
 	"github.com/rasimio/blueship/core"
 )
 
+// DefaultTaskTimeout is applied to tasks without an explicit deadline.
+const DefaultTaskTimeout = 5 * time.Minute
+
 // Scheduler polls agent_tasks and dispatches handlers.
 type Scheduler struct {
 	store    *core.AgentTaskStore
@@ -21,8 +24,9 @@ type Scheduler struct {
 	notify   func(ctx context.Context, userID uuid.UUID, text string)
 	logger   *slog.Logger
 
-	mu   sync.Mutex
-	busy map[string]bool // task ID → currently executing
+	mu     sync.Mutex
+	busy   map[string]bool // task ID → currently executing
+	taskWg sync.WaitGroup  // tracks in-flight executeTask goroutines
 }
 
 // NewScheduler creates an agent task scheduler.
@@ -89,13 +93,21 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			continue
 		}
 
+		s.taskWg.Add(1)
 		go s.executeTask(ctx, task, handler)
 	}
 
 	return nil
 }
 
+// Wait blocks until all in-flight task goroutines complete.
+// Called during graceful shutdown to ensure DB ops finish before connections close.
+func (s *Scheduler) Wait() {
+	s.taskWg.Wait()
+}
+
 func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handler core.AgentHandler) {
+	defer s.taskWg.Done()
 	s.setBusy(task.ID.String(), true)
 	defer s.setBusy(task.ID.String(), false)
 
@@ -138,15 +150,16 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		ContextInjector: s.deps.ContextInjector,
 	}
 
-	// Apply deadline as context timeout.
-	execCtx := ctx
+	// Apply deadline or default timeout.
+	var cancel context.CancelFunc
 	if task.Deadline != nil && task.Deadline.After(time.Now()) {
-		var cancel context.CancelFunc
-		execCtx, cancel = context.WithDeadline(ctx, *task.Deadline)
-		defer cancel()
+		ctx, cancel = context.WithDeadline(ctx, *task.Deadline)
+	} else {
+		ctx, cancel = context.WithTimeout(ctx, DefaultTaskTimeout)
 	}
+	defer cancel()
 
-	result, err := handler.Run(execCtx, task, agentDeps)
+	result, err := handler.Run(ctx, task, agentDeps)
 
 	// Use background context for all post-handler DB ops — parent ctx may be cancelled on shutdown.
 	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
