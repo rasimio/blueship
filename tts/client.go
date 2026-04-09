@@ -16,7 +16,7 @@ type Client struct {
 	endpointMP3 string // ElevenLabs MP3 endpoint (for non-Telegram clients)
 	model       string
 	speed       float64
-	apiKey      string // for ElevenLabs (xi-api-key header)
+	apiKey      string
 	client      *http.Client
 }
 
@@ -57,7 +57,7 @@ func NewElevenLabsClient(apiKey, voiceID, model string, speed float64, timeout t
 // For ElevenLabs: returns OGG Opus directly (no conversion needed).
 // For OpenAI-compatible: returns WAV.
 func (c *Client) Synthesize(ctx context.Context, text, voice, instruct string) ([]byte, error) {
-	if c.apiKey != "" {
+	if c.endpointMP3 != "" {
 		return c.synthesizeElevenLabs(ctx, text, instruct)
 	}
 	return c.synthesizeOpenAI(ctx, text, voice, instruct)
@@ -65,7 +65,7 @@ func (c *Client) Synthesize(ctx context.Context, text, voice, instruct string) (
 
 // SynthesizeMP3 returns MP3 audio (for clients that don't support OGG Opus).
 func (c *Client) SynthesizeMP3(ctx context.Context, text, voice, instruct string) ([]byte, error) {
-	if c.apiKey != "" && c.endpointMP3 != "" {
+	if c.endpointMP3 != "" {
 		return c.synthesizeElevenLabsWithEndpoint(ctx, c.endpointMP3, text, instruct)
 	}
 	// Fallback to default format
