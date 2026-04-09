@@ -21,13 +21,14 @@ type Client struct {
 }
 
 // NewClient creates a TTS client for an OpenAI-compatible endpoint.
-func NewClient(endpoint, model string, speed float64, timeout time.Duration) *Client {
+func NewClient(endpoint, model, apiKey string, speed float64, timeout time.Duration) *Client {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
 	return &Client{
 		endpoint: endpoint,
 		model:    model,
+		apiKey:   apiKey,
 		speed:    speed,
 		client:   &http.Client{Timeout: timeout},
 	}
@@ -143,6 +144,9 @@ func (c *Client) synthesizeOpenAI(ctx context.Context, text, voice, instruct str
 		return nil, fmt.Errorf("tts: request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
