@@ -155,8 +155,8 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		// Archive session (one-shot, no reuse after task completion).
 		deps.Store.ArchiveSession(ctx, sessID)
 
-		// Filter no-op — nothing to report.
-		if clean == "" || strings.Contains(clean, "[no-op]") {
+		// Filter no-op and garbage output (e.g. raw UUIDs from tool results).
+		if clean == "" || strings.Contains(clean, "[no-op]") || isGarbageOutput(clean) {
 			deps.Store.ArchiveSession(ctx, sessID)
 			return core.IterationResult{Done: true}, nil
 		}
@@ -184,6 +184,28 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 type bgProgress struct {
 	core.TaskProgress
 	SessionID string `json:"session_id"` // shared session across iterations
+}
+
+// isGarbageOutput detects raw tool output that shouldn't be sent to users
+// (e.g. bare UUID lists, JSON fragments from tool results).
+func isGarbageOutput(s string) bool {
+	s = strings.TrimSpace(s)
+	// Strip commas, spaces, brackets, newlines — if only UUIDs remain, it's garbage.
+	cleaned := strings.NewReplacer(",", "", " ", "", "\n", "", "[", "", "]", "").Replace(s)
+	// Check if it's just concatenated UUIDs (36 chars each: 8-4-4-4-12)
+	if len(cleaned) > 0 && len(cleaned)%36 == 0 {
+		allHex := true
+		for _, c := range cleaned {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || c == '-') {
+				allHex = false
+				break
+			}
+		}
+		if allHex {
+			return true
+		}
+	}
+	return false
 }
 
 func truncate(s string, n int) string {
