@@ -1058,9 +1058,10 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		fmt.Fprintf(&researchBlock, "[%s result]\n%s\n\n", pa.Tool, truncateStr(result, 2000))
 	}
 
-	// Expand matched rules into directive block.
+	// Expand matched rules into directive block (dedup by ID).
 	var guidance strings.Builder
 	var hasRules bool
+	seenRuleIDs := make(map[string]bool)
 
 	// 1. Rules from reflex classification (semantic match).
 	if len(reflexResult.MatchedRules) > 0 {
@@ -1069,7 +1070,8 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 			matchedSet[id] = true
 		}
 		for _, r := range rc.CandidateRules {
-			if matchedSet[r.ID] {
+			if matchedSet[r.ID] && !seenRuleIDs[r.ID] {
+				seenRuleIDs[r.ID] = true
 				if !hasRules {
 					guidance.WriteString("[active rules]\n")
 					hasRules = true
@@ -1091,6 +1093,10 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 			Message:  msgText,
 		})
 		for _, r := range engineRules {
+			if seenRuleIDs[r.ID] {
+				continue // already added by reflex
+			}
+			seenRuleIDs[r.ID] = true
 			if !hasRules {
 				guidance.WriteString("[active rules]\n")
 				hasRules = true
