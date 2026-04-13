@@ -40,6 +40,24 @@ type CandidateRule struct {
 	SuccessRate float64 `json:"success_rate"`
 }
 
+// RuleContext carries the current situation for rule engine evaluation.
+type RuleContext struct {
+	UserID   string  // user identifier
+	Intent   string  // from reflex: casual_chat, emotional_support, etc.
+	Strategy string  // from AME: warm, neutral, empathetic, etc.
+	Energy   float64 // user energy level (0-1)
+	Stress   float64 // user stress level (0-1)
+	Hour     int     // current hour (0-23)
+	Message  string  // user message text
+}
+
+// ActiveRule is a rule matched by the rule engine.
+type ActiveRule struct {
+	ID      string `json:"id"`
+	Trigger string `json:"trigger"`
+	Action  string `json:"action"`
+}
+
 // ReflexContext is the structured output of the context preparation phase.
 // It separates AME traces from candidate rules so the reflex can classify rules
 // independently, then the gateway reassembles the final context.

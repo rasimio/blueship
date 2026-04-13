@@ -965,17 +965,47 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 
 	// Expand matched rules into directive block.
 	var guidance strings.Builder
+	var hasRules bool
+
+	// 1. Rules from reflex classification (semantic match).
 	if len(reflexResult.MatchedRules) > 0 {
 		matchedSet := make(map[string]bool, len(reflexResult.MatchedRules))
 		for _, id := range reflexResult.MatchedRules {
 			matchedSet[id] = true
 		}
-		guidance.WriteString("[active rules]\n")
 		for _, r := range rc.CandidateRules {
 			if matchedSet[r.ID] {
+				if !hasRules {
+					guidance.WriteString("[active rules]\n")
+					hasRules = true
+				}
 				fmt.Fprintf(&guidance, "WHEN: %s\nDO: %s\n\n", r.Trigger, r.Action)
 			}
 		}
+	}
+
+	// 2. Rules from structured rule engine (condition-based match).
+	if us.Deps.RuleEngine != nil {
+		engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
+			UserID:   us.Deps.UserID.String(),
+			Intent:   reflexResult.Intent,
+			Strategy: rc.Strategy,
+			Hour:     time.Now().Hour(),
+			Message:  msgText,
+		})
+		for _, r := range engineRules {
+			if !hasRules {
+				guidance.WriteString("[active rules]\n")
+				hasRules = true
+			}
+			fmt.Fprintf(&guidance, "WHEN: %s\nDO: %s\n\n", r.Trigger, r.Action)
+		}
+		if len(engineRules) > 0 {
+			g.logger.Info("rule engine matched", "count", len(engineRules))
+		}
+	}
+
+	if hasRules {
 		guidance.WriteString("[/active rules]")
 	}
 

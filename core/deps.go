@@ -51,6 +51,11 @@ type Deps struct {
 	// Falls back to ContextInjector if not set.
 	ReflexPreparer func(ctx context.Context, userID, message string) *ReflexContext
 
+	// RuleEngine evaluates structured rule conditions (scope, intent, state, time, user)
+	// and returns rules that should be active for the current context.
+	// Called after reflex determines intent/strategy. Results injected into cortex guidance.
+	RuleEngine func(ctx context.Context, rc RuleContext) []ActiveRule
+
 	// MessageEncoder is called after each user message to extract and save facts.
 	// Runs non-blocking in background. Implementations handle their own DB, embeddings, emotions.
 	MessageEncoder func(ctx context.Context, userID, message string)
@@ -84,6 +89,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		Sessions:        d.Sessions,
 		ContextInjector: d.ContextInjector,
 		ReflexPreparer:  d.ReflexPreparer,
+		RuleEngine:      d.RuleEngine,
 		pool:            d.pool,
 	}
 }
