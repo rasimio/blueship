@@ -43,7 +43,7 @@ type CandidateRule struct {
 // RuleContext carries the current situation for rule engine evaluation.
 type RuleContext struct {
 	UserID   string  // user identifier
-	Intent   string  // from reflex: casual_chat, emotional_support, etc.
+	Intent   string  // from reflex (optional, for intent-scoped rules)
 	Strategy string  // from AME: warm, neutral, empathetic, etc.
 	Energy   float64 // user energy level (0-1)
 	Stress   float64 // user stress level (0-1)
@@ -53,9 +53,11 @@ type RuleContext struct {
 
 // ActiveRule is a rule matched by the rule engine.
 type ActiveRule struct {
-	ID      string `json:"id"`
-	Trigger string `json:"trigger"`
-	Action  string `json:"action"`
+	ID         string       `json:"id"`
+	Trigger    string       `json:"trigger"`
+	Action     string       `json:"action"`
+	PreActions []ToolAction `json:"pre_actions,omitempty"` // tools to run BEFORE cortex
+	Tools      []string     `json:"tools,omitempty"`       // tools cortex can use
 }
 
 // ReflexContext is the structured output of the context preparation phase.

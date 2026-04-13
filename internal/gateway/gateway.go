@@ -1069,6 +1069,8 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 	}
 
 	// 2. Rules from structured rule engine (condition-based match).
+	// Rules can carry pre_actions and tools — these are merged into the pipeline.
+	var ruleTools []string
 	if us.Deps.RuleEngine != nil {
 		engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
 			UserID:   us.Deps.UserID.String(),
@@ -1083,6 +1085,27 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 				hasRules = true
 			}
 			fmt.Fprintf(&guidance, "WHEN: %s\nDO: %s\n\n", r.Trigger, r.Action)
+
+			// Collect tools prescribed by rules.
+			ruleTools = append(ruleTools, r.Tools...)
+
+			// Execute rule-prescribed pre_actions.
+			for _, pa := range r.PreActions {
+				paCtx, cancel := context.WithTimeout(ctx, preActionTimeout)
+				result, isError := us.Registry.Execute(paCtx, pa.Tool, pa.Input)
+				cancel()
+				inputStr := string(pa.Input)
+				if len(inputStr) > 200 {
+					inputStr = inputStr[:200] + "..."
+				}
+				preTraces = append(preTraces, agent.ToolTrace{Name: pa.Tool + " [rule]", Input: inputStr, Error: isError})
+				if !isError {
+					if researchBlock.Len() == 0 {
+						researchBlock.WriteString("[research]\n")
+					}
+					fmt.Fprintf(&researchBlock, "[%s result]\n%s\n\n", pa.Tool, truncateStr(result, 2000))
+				}
+			}
 		}
 		if len(engineRules) > 0 {
 			g.logger.Info("rule engine matched", "count", len(engineRules))
@@ -1099,11 +1122,21 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		guidance.WriteString(researchBlock.String())
 	}
 
-	// Tool override: only apply if reflex explicitly selected tools.
-	// Empty slice from JSON ("tools":[]") means "unspecified", not "no tools".
+	// Tool override: merge reflex tools + rule engine tools.
 	var toolOverride []string
 	if len(reflexResult.Tools) > 0 {
 		toolOverride = reflexResult.Tools
+	}
+	// Merge rule-prescribed tools (dedup).
+	toolSet := make(map[string]bool)
+	for _, t := range toolOverride {
+		toolSet[t] = true
+	}
+	for _, t := range ruleTools {
+		if !toolSet[t] {
+			toolOverride = append(toolOverride, t)
+			toolSet[t] = true
+		}
 	}
 
 	// memory_save ALWAYS available — cortex decides what to remember, not reflex.
