@@ -124,3 +124,12 @@ CREATE INDEX IF NOT EXISTS idx_agent_tasks_pending ON agent_tasks(created_at) WH
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_running ON agent_tasks(last_run_at) WHERE status = 'running';
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_user ON agent_tasks(user_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tasks_recurring ON agent_tasks(user_id, handler) WHERE schedule IS NOT NULL AND status != 'failed';
+
+-- ============================================================
+-- Tool descriptions (loaded at startup, override hardcoded descriptions)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS tool_descriptions (
+    name        TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
+);

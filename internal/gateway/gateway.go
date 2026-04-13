@@ -419,6 +419,13 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 	tool.RegisterBuiltinTools(registry, userDeps)
 	g.modules.RegisterAllTools(registry, userDeps)
 
+	// Load tool descriptions from DB (overrides hardcoded descriptions).
+	if shipDB, dbErr := g.deps.DB("ship"); dbErr == nil {
+		if err := registry.LoadDescriptions(shipDB); err != nil {
+			g.logger.Warn("tool descriptions not loaded", "error", err)
+		}
+	}
+
 	us := &UserState{
 		ChatID:   chatID,
 		UserID:   userID,

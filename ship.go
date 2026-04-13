@@ -156,6 +156,11 @@ func (s *Ship) Run(ctx context.Context) error {
 		tool.RegisterBuiltinTools(globalRegistry, deps)
 		reg.RegisterAllTools(globalRegistry, deps)
 
+		// Load tool descriptions from DB.
+		if err := globalRegistry.LoadDescriptions(shipDB); err != nil {
+			s.logger.Warn("tool descriptions not loaded for agent tasks", "error", err)
+		}
+
 		taskStore := core.NewAgentTaskStore(shipDB)
 		msgStore := session.NewStore(shipDB) // MessageStore for agent loops
 

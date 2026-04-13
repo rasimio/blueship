@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // ToolRegistry manages tool definitions and dispatches tool calls.
@@ -93,4 +95,38 @@ func (r *ToolRegistry) SubsetForNames(names []string) *ToolRegistry {
 // Count returns the number of registered tools.
 func (r *ToolRegistry) Count() int {
 	return len(r.tools)
+}
+
+// LoadDescriptions loads tool descriptions from the tool_descriptions DB table.
+// Every registered tool MUST have a row in the table. Missing = error at startup.
+func (r *ToolRegistry) LoadDescriptions(db *sqlx.DB) error {
+	var rows []struct {
+		Name string `db:"name"`
+		Desc string `db:"description"`
+	}
+	if err := db.Select(&rows, `SELECT name, description FROM tool_descriptions`); err != nil {
+		return fmt.Errorf("load tool_descriptions: %w", err)
+	}
+
+	descs := make(map[string]string, len(rows))
+	for _, row := range rows {
+		descs[row.Name] = row.Desc
+	}
+
+	var missing []string
+	for name, tool := range r.tools {
+		if desc, ok := descs[name]; ok {
+			tool.Definition.Description = desc
+			r.tools[name] = tool
+		} else {
+			missing = append(missing, name)
+		}
+	}
+
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("tool_descriptions missing for: %v", missing)
+	}
+
+	return nil
 }
