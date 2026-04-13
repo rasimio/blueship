@@ -461,6 +461,59 @@ func (g *Gateway) GetOwnerUser() *UserState {
 	return nil
 }
 
+// sendDebugDump builds a full debug dump and sends as txt file via Telegram.
+func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx, reflexGuidance string, preTraces, cortexTraces []agent.ToolTrace) {
+	var b strings.Builder
+	b.WriteString("=== ARLENE DEBUG DUMP ===\n")
+	b.WriteString(fmt.Sprintf("Time: %s\n", time.Now().In(g.tz).Format("2006-01-02 15:04:05")))
+	b.WriteString(fmt.Sprintf("User: %s\n\n", us.ChatID))
+
+	// AME Traces (injected context)
+	b.WriteString("=== AME TRACES (injected context) ===\n")
+	if injectedCtx != "" {
+		b.WriteString(injectedCtx)
+	} else {
+		b.WriteString("(empty)")
+	}
+	b.WriteString("\n\n")
+
+	// Reflex Guidance (matched rules)
+	b.WriteString("=== REFLEX GUIDANCE (active rules) ===\n")
+	if reflexGuidance != "" {
+		b.WriteString(reflexGuidance)
+	} else {
+		b.WriteString("(no rules matched)")
+	}
+	b.WriteString("\n\n")
+
+	// Tool traces
+	b.WriteString("=== TOOL CALLS ===\n")
+	allTraces := append(preTraces, cortexTraces...)
+	if len(allTraces) == 0 {
+		b.WriteString("(no tools called)\n")
+	}
+	for i, t := range allTraces {
+		src := "cortex"
+		if i < len(preTraces) {
+			src = "reflex"
+		}
+		errMark := ""
+		if t.Error {
+			errMark = " [ERROR]"
+		}
+		b.WriteString(fmt.Sprintf("[%s] %s(%s)%s\n", src, t.Name, t.Input, errMark))
+	}
+
+	// Send as file
+	chatID := us.ChatID
+	if idx := strings.Index(chatID, ":"); idx >= 0 {
+		chatID = chatID[idx+1:]
+	}
+	if err := g.tg.SendDocument(ctx, chatID, "debug.txt", []byte(b.String())); err != nil {
+		g.logger.Warn("debug dump send failed", "error", err)
+	}
+}
+
 // sendDebugError sends the actual error via sink when debug mode is on.
 func (g *Gateway) sendDebugError(ctx context.Context, sink bs.ResponseSink, source string, err error) {
 	if g.deps.Config.Gateway.Debug {
@@ -724,24 +777,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	if reply != "" {
-		// Debug mode: append tool traces to message.
-		if us.DebugMode {
-			allTraces := append(preTraces, result.ToolTraces...)
-			reply += "\n\n---\n🔧 debug:"
-			if len(allTraces) == 0 {
-				reply += " no tools called"
-			}
-			for _, t := range allTraces {
-				errMark := ""
-				if t.Error {
-					errMark = " ❌"
-				}
-				reply += fmt.Sprintf("\n• %s(%s)%s", t.Name, t.Input, errMark)
-			}
-		}
-
 		if err := sink.SendText(ctx, reply); err != nil {
 			g.logger.Error("send reply error", "chat_id", us.ChatID, "error", err)
+		}
+
+		// Debug mode: send full dump as txt file.
+		if us.DebugMode {
+			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, result.ToolTraces)
 		}
 		if g.deps.Config.TTS != nil && g.shouldSendVoice(ctx, us, sink) {
 			go g.synthesizeAndSendVoice(ctx, sink, us, reply)

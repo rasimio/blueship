@@ -294,6 +294,44 @@ func (c *Client) SendVoice(ctx context.Context, chatID string, audio []byte) err
 	return nil
 }
 
+// SendDocument sends a file (bytes) as a Telegram document.
+func (c *Client) SendDocument(ctx context.Context, chatID string, filename string, data []byte) error {
+	if !c.IsConfigured() {
+		return fmt.Errorf("telegram bot not configured")
+	}
+
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	_ = w.WriteField("chat_id", chatID)
+	part, err := w.CreateFormFile("document", filename)
+	if err != nil {
+		return fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return fmt.Errorf("write document: %w", err)
+	}
+	w.Close()
+
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", c.token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, &body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("sendDocument: status %d: %s", resp.StatusCode, string(errBody))
+	}
+	return nil
+}
+
 const maxTelegramMessageLength = 4096
 
 // SendLong sends a long text message, splitting into chunks if needed.
