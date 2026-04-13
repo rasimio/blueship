@@ -596,9 +596,10 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	var toolOverride []string       // nil = use role default
 	var postActions []bs.PostAction // executed after cortex response
 
+	var preTraces []agent.ToolTrace
 	if msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil && g.reflexModel() != "" {
 		// Reflex/Cortex pipeline: structured context → reflex plan → pre-actions → filtered cortex input.
-		injectedCtx, reflexGuidance, toolOverride, postActions = g.runReflexPipeline(ctx, us, msgText)
+		injectedCtx, reflexGuidance, toolOverride, postActions, preTraces = g.runReflexPipeline(ctx, us, msgText)
 	} else if msgText != "" && us.Deps != nil && us.Deps.ContextInjector != nil {
 		// Fallback: legacy ContextInjector (no reflex).
 		injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText)
@@ -724,9 +725,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 
 	if reply != "" {
 		// Debug mode: append tool traces to message.
-		if us.DebugMode && len(result.ToolTraces) > 0 {
-			reply += "\n\n---\n🔧 Tools:"
-			for _, t := range result.ToolTraces {
+		if us.DebugMode {
+			allTraces := append(preTraces, result.ToolTraces...)
+			reply += "\n\n---\n🔧 debug:"
+			if len(allTraces) == 0 {
+				reply += " no tools called"
+			}
+			for _, t := range allTraces {
 				errMark := ""
 				if t.Error {
 					errMark = " ❌"
@@ -917,10 +922,10 @@ const maxPreActions = 2
 // 3. Execute pre-actions (web_search etc.) → inject results into context
 // 4. Build cortex context: matched rules + research + AME traces
 // Returns (injectedContext, reflexGuidance, toolOverride, postActions).
-func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText string) (string, string, []string, []bs.PostAction) {
+func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText string) (string, string, []string, []bs.PostAction, []agent.ToolTrace) {
 	rc := us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText)
 	if rc == nil {
-		return "", "", nil, nil
+		return "", "", nil, nil, nil
 	}
 
 	// Store emotional strategy for TTS instruct mapping.
@@ -942,7 +947,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 
 	if g.reflexPlanTemplate == "" {
 		g.logger.Warn("reflex-plan prompt not in DB, skipping reflex")
-		return rc.FullContext, "", nil, nil
+		return rc.FullContext, "", nil, nil, nil
 	}
 	notesBlock := rc.ActiveNotes
 	if notesBlock == "" {
@@ -953,7 +958,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 	reflexResult, err := g.callReflex(ctx, reflexPrompt)
 	if err != nil {
 		g.logger.Warn("reflex failed, using full context", "error", err)
-		return rc.FullContext, "", nil, nil
+		return rc.FullContext, "", nil, nil, nil
 	}
 
 	g.logger.Info("reflex plan",
@@ -970,11 +975,12 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		g.logger.Info("reflex low confidence, full fallback",
 			"confidence", reflexResult.Confidence,
 		)
-		return rc.FullContext, "", nil, nil
+		return rc.FullContext, "", nil, nil, nil
 	}
 
 	// Execute pre-actions (web_search etc.) with timeout.
 	var researchBlock strings.Builder
+	var preTraces []agent.ToolTrace
 	preActionsToRun := reflexResult.PreActions
 	if len(preActionsToRun) > maxPreActions {
 		preActionsToRun = preActionsToRun[:maxPreActions]
@@ -983,6 +989,11 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		paCtx, cancel := context.WithTimeout(ctx, preActionTimeout)
 		result, isError := us.Registry.Execute(paCtx, pa.Tool, pa.Input)
 		cancel()
+		inputStr := string(pa.Input)
+		if len(inputStr) > 200 {
+			inputStr = inputStr[:200] + "..."
+		}
+		preTraces = append(preTraces, agent.ToolTrace{Name: pa.Tool, Input: inputStr, Error: isError})
 		if isError {
 			g.logger.Warn("reflex pre-action failed", "tool", pa.Tool, "error", result)
 			continue
@@ -1099,7 +1110,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		}
 	}
 
-	return formattedTraces, guidance.String(), toolOverride, reflexResult.PostActions
+	return formattedTraces, guidance.String(), toolOverride, reflexResult.PostActions, preTraces
 }
 
 // executePostActions runs post-cortex actions (save reflection, etc.).
