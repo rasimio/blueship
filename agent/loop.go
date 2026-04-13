@@ -63,10 +63,30 @@ func (a *Loop) SetCompactor(c *Compactor) {
 	a.compactor = c
 }
 
-// Run executes the agent loop: sends messages to the LLM, dispatches tool calls, and loops
-// until the LLM returns end_turn or max_tokens, or maxTurns is exceeded.
-// Returns the final text response.
+// ToolTrace records a single tool invocation during the agent loop.
+type ToolTrace struct {
+	Name   string `json:"name"`
+	Input  string `json:"input"`
+	Error  bool   `json:"error,omitempty"`
+}
+
+// RunResult extends the text response with tool execution trace.
+type RunResult struct {
+	Text       string
+	ToolTraces []ToolTrace
+}
+
+// Run executes the agent loop and returns the final text response.
 func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string, error) {
+	result, err := a.RunTracked(ctx, cfg, userMessage)
+	if err != nil {
+		return "", err
+	}
+	return result.Text, nil
+}
+
+// RunTracked executes the agent loop and returns text + tool traces.
+func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (*RunResult, error) {
 	if cfg.MaxTurns <= 0 {
 		cfg.MaxTurns = a.cfg.Gateway.MaxTurns
 	}
@@ -80,7 +100,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 	// 1. Append user message
 	err := a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: userMessage})
 	if err != nil {
-		return "", fmt.Errorf("append user message: %w", err)
+		return nil, fmt.Errorf("append user message: %w", err)
 	}
 
 	// Select tools: ToolOverride > Role-based > all.
@@ -129,8 +149,9 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 		}
 	}
 
-	// Accumulate text across all turns.
+	// Accumulate text and tool traces across all turns.
 	var accumulated strings.Builder
+	var traces []ToolTrace
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		// 2. Build effective system prompt with compaction summary
@@ -142,7 +163,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 		// 3. Load messages (always from DB — compaction already persisted)
 		messages, err := a.store.MessagesForAPI(ctx, cfg.SessionID, tokenBudget)
 		if err != nil {
-			return "", fmt.Errorf("load messages: %w", err)
+			return nil, fmt.Errorf("load messages: %w", err)
 		}
 
 		// On the first turn, prepend reflex guidance + injected context to the last user message.
@@ -173,7 +194,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 			Temperature:    cfg.Temperature,
 		})
 		if err != nil {
-			return "", fmt.Errorf("LLM API: %w", err)
+			return nil, fmt.Errorf("LLM API: %w", err)
 		}
 
 		a.logger.Info("LLM response",
@@ -189,7 +210,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 			Content: resp.Content,
 		}, resp.Usage.OutputTokens)
 		if err != nil {
-			return "", fmt.Errorf("append assistant message: %w", err)
+			return nil, fmt.Errorf("append assistant message: %w", err)
 		}
 
 		// Collect text from this turn
@@ -203,7 +224,7 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 		// 6. Check stop reason
 		switch resp.StopReason {
 		case "end_turn", "max_tokens":
-			return accumulated.String(), nil
+			return &RunResult{Text: accumulated.String(), ToolTraces: traces}, nil
 
 		case "tool_use":
 			var toolResults []bs.ContentBlock
@@ -225,6 +246,11 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 					Content:   result,
 					IsError:   isError,
 				})
+				inputStr := string(block.Input)
+				if len(inputStr) > 200 {
+					inputStr = inputStr[:200] + "..."
+				}
+				traces = append(traces, ToolTrace{Name: block.Name, Input: inputStr, Error: isError})
 			}
 
 			err = a.store.Append(ctx, cfg.SessionID, bs.Message{
@@ -232,22 +258,22 @@ func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string,
 				Content: toolResults,
 			})
 			if err != nil {
-				return "", fmt.Errorf("append tool results: %w", err)
+				return nil, fmt.Errorf("append tool results: %w", err)
 			}
 
 			continue
 
 		default:
-			return accumulated.String(), nil
+			return &RunResult{Text: accumulated.String(), ToolTraces: traces}, nil
 		}
 	}
 
 	// Return whatever text was accumulated before hitting the turn limit.
 	if text := accumulated.String(); text != "" {
 		a.logger.Warn("agent loop hit turn limit, returning partial response", "turns", cfg.MaxTurns)
-		return text, nil
+		return &RunResult{Text: text, ToolTraces: traces}, nil
 	}
-	return "", fmt.Errorf("agent loop exceeded %d turns with no text output", cfg.MaxTurns)
+	return nil, fmt.Errorf("agent loop exceeded %d turns with no text output", cfg.MaxTurns)
 }
 
 // RunStream is like Run but streams text chunks via onText callback.

@@ -62,6 +62,9 @@ type UserState struct {
 
 	// Emotion state from last reflex prep — used for TTS instruct.
 	LastStrategy string
+
+	// DebugMode appends tool traces to each response.
+	DebugMode bool
 }
 
 // ModuleRegistry is an adapter interface for the module system.
@@ -319,6 +322,20 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 	}
 	if text == "/voice" {
 		go g.handleVoiceCommand(ctx, rawChatID)
+		return
+	}
+	if text == "/debug" {
+		us, err := g.getOrInitUser(ctx, chatID)
+		if err == nil {
+			us.Mu.Lock()
+			us.DebugMode = !us.DebugMode
+			mode := "OFF"
+			if us.DebugMode {
+				mode = "ON"
+			}
+			us.Mu.Unlock()
+			g.tg.SendMessage(ctx, fmt.Sprintf("%d", rawChatID), fmt.Sprintf("Debug mode: %s", mode))
+		}
 		return
 	}
 
@@ -689,7 +706,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	// Non-streaming path (Telegram)
-	reply, err := loop.Run(ctx, runCfg, content)
+	result, err := loop.RunTracked(ctx, runCfg, content)
 	if err != nil {
 		g.logger.Error("agent loop error",
 			"chat_id", us.ChatID,
@@ -699,11 +716,25 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		return
 	}
 
+	reply := sanitizeLeakedToolCalls(result.Text)
+
 	if reply != "" && len(postActions) > 0 {
 		g.executePostActions(ctx, us, postActions, reply)
 	}
 
 	if reply != "" {
+		// Debug mode: append tool traces to message.
+		if us.DebugMode && len(result.ToolTraces) > 0 {
+			reply += "\n\n---\n🔧 Tools:"
+			for _, t := range result.ToolTraces {
+				errMark := ""
+				if t.Error {
+					errMark = " ❌"
+				}
+				reply += fmt.Sprintf("\n• %s(%s)%s", t.Name, t.Input, errMark)
+			}
+		}
+
 		if err := sink.SendText(ctx, reply); err != nil {
 			g.logger.Error("send reply error", "chat_id", us.ChatID, "error", err)
 		}
@@ -1514,4 +1545,53 @@ func (d *debouncer) fireNow() {
 		d.timer = nil
 	}
 	d.fire(msgs)
+}
+
+// sanitizeLeakedToolCalls removes tool call text that Gemma sometimes
+// generates as plain text instead of structured tool_calls.
+// Also removes HTML artifacts (<br>, </html>, etc.).
+func sanitizeLeakedToolCalls(text string) string {
+	// Remove patterns like: call:tool_name{...}
+	for {
+		idx := strings.Index(text, "call:")
+		if idx == -1 {
+			break
+		}
+		// Find the end of the tool call (closing brace)
+		end := strings.Index(text[idx:], "}")
+		if end == -1 {
+			break
+		}
+		// Also consume any trailing |> or similar tokens
+		endAbs := idx + end + 1
+		for endAbs < len(text) && (text[endAbs] == '|' || text[endAbs] == '>' || text[endAbs] == '<' || text[endAbs] == ' ' || text[endAbs] == '\n') {
+			endAbs++
+		}
+		text = text[:idx] + text[endAbs:]
+	}
+
+	// Remove <tool_call>...</tool_call> blocks
+	for {
+		start := strings.Index(text, "<tool_call")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(text[start:], "</tool_call>")
+		if end == -1 {
+			end = strings.Index(text[start:], ">")
+			if end == -1 {
+				break
+			}
+			text = text[:start] + text[start+end+1:]
+		} else {
+			text = text[:start] + text[start+end+len("</tool_call>"):]
+		}
+	}
+
+	// Remove HTML artifacts
+	for _, tag := range []string{"<br>", "<br/>", "<br />", "</html>", "<html>", "</body>", "<body>"} {
+		text = strings.ReplaceAll(text, tag, "")
+	}
+
+	return strings.TrimSpace(text)
 }
