@@ -469,7 +469,7 @@ func (g *Gateway) GetOwnerUser() *UserState {
 }
 
 // sendDebugDump builds a full debug dump and sends as txt file via Telegram.
-func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx, reflexGuidance string, preTraces, cortexTraces []agent.ToolTrace) {
+func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx, reflexGuidance string, preTraces, cortexTraces []agent.ToolTrace, engineRuleCount int) {
 	var b strings.Builder
 	b.WriteString("=== ARLENE DEBUG DUMP ===\n")
 	b.WriteString(fmt.Sprintf("Time: %s\n", time.Now().In(g.tz).Format("2006-01-02 15:04:05")))
@@ -492,6 +492,9 @@ func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx,
 		b.WriteString("(no rules matched)")
 	}
 	b.WriteString("\n\n")
+
+	// Rule Engine
+	b.WriteString(fmt.Sprintf("=== RULE ENGINE ===\n%d rules matched by structured conditions\n\n", engineRuleCount))
 
 	// Tool traces
 	b.WriteString("=== TOOL CALLS ===\n")
@@ -790,7 +793,8 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 
 		// Debug mode: send full dump as txt file.
 		if us.DebugMode {
-			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, result.ToolTraces)
+			engineCount := strings.Count(reflexGuidance, "WHEN:")
+			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, result.ToolTraces, engineCount)
 		}
 		if g.deps.Config.TTS != nil && g.shouldSendVoice(ctx, us, sink) {
 			go g.synthesizeAndSendVoice(ctx, sink, us, reply)
