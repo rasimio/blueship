@@ -45,6 +45,24 @@ type apiError struct {
 	Message string `json:"message"`
 }
 
+// UnmarshalJSON accepts both shapes the upstream returns:
+//   - {"error": {"message": "..."}}     — OpenAI canonical
+//   - {"error": "..."}                  — bare string (some MLX builds)
+func (e *apiError) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		e.Message = s
+		return nil
+	}
+	type alias apiError
+	var a alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	*e = apiError(a)
+	return nil
+}
+
 // Embed generates an embedding vector for the given text.
 func (p *EmbeddingProvider) Embed(ctx context.Context, text string) ([]float32, error) {
 	if p.apiKey == "" {
