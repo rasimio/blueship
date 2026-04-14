@@ -662,7 +662,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	var preTraces []agent.ToolTrace
 	if msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil && g.reflexModel() != "" {
 		// Reflex/Cortex pipeline: structured context → reflex plan → pre-actions → filtered cortex input.
-		injectedCtx, reflexGuidance, toolOverride, postActions, preTraces = g.runReflexPipeline(ctx, us, msgText)
+		var silent bool
+		injectedCtx, reflexGuidance, toolOverride, postActions, preTraces, silent = g.runReflexPipeline(ctx, us, msgText)
+		if silent {
+			// Hard rule said "do not respond". Abort the whole turn — no
+			// cortex call, no message sent, no post-actions, no debug dump.
+			return
+		}
 	} else if msgText != "" && us.Deps != nil && us.Deps.ContextInjector != nil {
 		// Fallback: legacy ContextInjector (no reflex).
 		injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText)
@@ -974,11 +980,15 @@ const maxPreActions = 2
 // 2. Reflex LLM (Gemini Flash) → plan (matched rules, pre/post actions, tools)
 // 3. Execute pre-actions (web_search etc.) → inject results into context
 // 4. Build cortex context: matched rules + research + AME traces
-// Returns (injectedContext, reflexGuidance, toolOverride, postActions).
-func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText string) (string, string, []string, []bs.PostAction, []agent.ToolTrace) {
+//
+// Returns (injectedContext, reflexGuidance, toolOverride, postActions,
+// preTraces, silent). When silent=true the caller MUST abort the turn
+// without calling cortex or sending any output — a structured rule with
+// Silent=true matched and the rest of the return values are zero/nil.
+func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText string) (string, string, []string, []bs.PostAction, []agent.ToolTrace, bool) {
 	rc := us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText)
 	if rc == nil {
-		return "", "", nil, nil, nil
+		return "", "", nil, nil, nil, false
 	}
 
 	// Store emotional strategy for TTS instruct mapping.
@@ -1000,7 +1010,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 
 	if g.reflexPlanTemplate == "" {
 		g.logger.Warn("reflex-plan prompt not in DB, skipping reflex")
-		return rc.FullContext, "", nil, nil, nil
+		return rc.FullContext, "", nil, nil, nil, false
 	}
 	notesBlock := rc.ActiveNotes
 	if notesBlock == "" {
@@ -1011,7 +1021,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 	reflexResult, err := g.callReflex(ctx, reflexPrompt)
 	if err != nil {
 		g.logger.Warn("reflex failed, using full context", "error", err)
-		return rc.FullContext, "", nil, nil, nil
+		return rc.FullContext, "", nil, nil, nil, false
 	}
 
 	g.logger.Info("reflex plan",
@@ -1028,7 +1038,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		g.logger.Info("reflex low confidence, full fallback",
 			"confidence", reflexResult.Confidence,
 		)
-		return rc.FullContext, "", nil, nil, nil
+		return rc.FullContext, "", nil, nil, nil, false
 	}
 
 	// Execute pre-actions (web_search etc.) with timeout.
@@ -1092,6 +1102,22 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 			Hour:     time.Now().Hour(),
 			Message:  msgText,
 		})
+
+		// Hard-silence gate: if any matched rule is marked Silent, abort the
+		// turn entirely — no cortex call, no message sent. This is the only
+		// way to enforce "do not respond" reliably; soft prompt instructions
+		// in the rule's Action text are routinely ignored by the cortex LLM.
+		for _, r := range engineRules {
+			if r.Silent {
+				g.logger.Info("rule engine: silent rule matched, aborting turn",
+					"rule_id", r.ID,
+					"trigger", r.Trigger,
+					"chat_id", us.ChatID,
+				)
+				return "", "", nil, nil, nil, true
+			}
+		}
+
 		for _, r := range engineRules {
 			if seenRuleIDs[r.ID] {
 				continue // already added by reflex
@@ -1202,7 +1228,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		}
 	}
 
-	return formattedTraces, guidance.String(), toolOverride, reflexResult.PostActions, preTraces
+	return formattedTraces, guidance.String(), toolOverride, reflexResult.PostActions, preTraces, false
 }
 
 // executePostActions runs post-cortex actions (save reflection, etc.).

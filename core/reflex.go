@@ -58,6 +58,12 @@ type ActiveRule struct {
 	Action     string       `json:"action"`
 	PreActions []ToolAction `json:"pre_actions,omitempty"` // tools to run BEFORE cortex
 	Tools      []string     `json:"tools,omitempty"`       // tools cortex can use
+	// Silent, when true, instructs the gateway to abort the current turn:
+	// no cortex call, no message sent to the transport. Used for hard
+	// "do not respond" rules that cannot be enforced via prompt injection
+	// (cortex routinely ignores soft instructions). The rule is still
+	// recorded in audit logs so the silence is observable.
+	Silent bool `json:"silent,omitempty"`
 }
 
 // ReflexContext is the structured output of the context preparation phase.
