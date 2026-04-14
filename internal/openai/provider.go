@@ -21,6 +21,7 @@ type CompletionProvider struct {
 	baseURL     string
 	httpClient  *http.Client
 	extraParams map[string]any // additional JSON fields merged into every request
+	dropImages  bool           // strip image content blocks before sending (text-only endpoints like MLX)
 }
 
 // NewCompletionProvider creates a new OpenAI completion provider.
@@ -34,13 +35,29 @@ func NewCompletionProvider(apiKey string, timeout time.Duration) *CompletionProv
 
 // NewCompatibleProvider creates a provider for any OpenAI-compatible API (MLX, vLLM, Ollama, etc.).
 // extraParams are merged into every request JSON (e.g. {"chat_template_kwargs": {"enable_thinking": false}}).
+//
+// Two extraParams keys are interpreted at construction time and stripped from the
+// merged request payload:
+//   - "drop_images": true  → image content blocks are replaced by a text marker
+//                            (for endpoints that only accept text content)
 func NewCompatibleProvider(baseURL string, apiKey string, timeout time.Duration, extraParams map[string]any) *CompletionProvider {
-	return &CompletionProvider{
-		apiKey:      apiKey,
-		baseURL:     baseURL,
-		httpClient:  &http.Client{Timeout: timeout},
-		extraParams: extraParams,
+	p := &CompletionProvider{
+		apiKey:     apiKey,
+		baseURL:    baseURL,
+		httpClient: &http.Client{Timeout: timeout},
 	}
+	if extraParams != nil {
+		if v, ok := extraParams["drop_images"]; ok {
+			if b, ok := v.(bool); ok {
+				p.dropImages = b
+			}
+			delete(extraParams, "drop_images")
+		}
+		if len(extraParams) > 0 {
+			p.extraParams = extraParams
+		}
+	}
+	return p
 }
 
 type chatCompletionRequest struct {
@@ -99,7 +116,7 @@ type chatCompletionResponse struct {
 
 // Complete sends a completion request to an OpenAI-compatible endpoint.
 func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
-	messages := buildMessages(req.System, req.Messages)
+	messages := buildMessages(req.System, req.Messages, p.dropImages)
 	tools := buildTools(req.Tools)
 
 	payload := chatCompletionRequest{
@@ -196,7 +213,7 @@ type streamChunk struct {
 
 // StreamComplete sends a streaming completion request. Calls onText for each text chunk.
 func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.CompletionRequest, onText func(string)) (*bs.CompletionResponse, error) {
-	messages := buildMessages(req.System, req.Messages)
+	messages := buildMessages(req.System, req.Messages, p.dropImages)
 	tools := buildTools(req.Tools)
 
 	payload := streamChatCompletionRequest{
@@ -345,7 +362,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 	}, nil
 }
 
-func buildMessages(system string, messages []bs.Message) []chatMessage {
+func buildMessages(system string, messages []bs.Message, dropImages bool) []chatMessage {
 	var out []chatMessage
 	if strings.TrimSpace(system) != "" {
 		out = append(out, chatMessage{Role: "system", Content: system})
@@ -355,7 +372,7 @@ func buildMessages(system string, messages []bs.Message) []chatMessage {
 		blocks := bs.NormalizeContent(msg.Content)
 		switch msg.Role {
 		case "user":
-			userMsg, toolMsgs := buildUserMessages(blocks)
+			userMsg, toolMsgs := buildUserMessages(blocks, dropImages)
 			if userMsg != nil {
 				out = append(out, *userMsg)
 			}
@@ -371,7 +388,7 @@ func buildMessages(system string, messages []bs.Message) []chatMessage {
 	return out
 }
 
-func buildUserMessages(blocks []bs.ContentBlock) (*chatMessage, []chatMessage) {
+func buildUserMessages(blocks []bs.ContentBlock, dropImages bool) (*chatMessage, []chatMessage) {
 	var toolMsgs []chatMessage
 	var parts []map[string]any
 	var text strings.Builder
@@ -385,6 +402,13 @@ func buildUserMessages(blocks []bs.ContentBlock) (*chatMessage, []chatMessage) {
 				Content:    stringifyContent(b.Content),
 			})
 		case "image":
+			if dropImages {
+				if text.Len() > 0 {
+					text.WriteString("\n")
+				}
+				text.WriteString("[image attached]")
+				continue
+			}
 			if b.Source != nil && b.Source.Type == "base64" && b.Source.MediaType != "" {
 				parts = append(parts, map[string]any{
 					"type": "image_url",
