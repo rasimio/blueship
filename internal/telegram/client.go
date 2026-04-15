@@ -33,6 +33,38 @@ func (c *Client) IsConfigured() bool {
 	return c.token != ""
 }
 
+// GetMe returns the bot's own username (from Telegram /getMe). Used by the
+// gateway to recognise commands addressed to this bot in group chats, e.g.
+// "/reset@LiyaDeusBot" vs "/reset@arlene_bot".
+func (c *Client) GetMe(ctx context.Context) (string, error) {
+	if !c.IsConfigured() {
+		return "", fmt.Errorf("telegram bot not configured")
+	}
+	u := fmt.Sprintf("https://api.telegram.org/bot%s/getMe", c.token)
+	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var body struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Username string `json:"username"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", err
+	}
+	if !body.OK {
+		return "", fmt.Errorf("getMe not ok")
+	}
+	return body.Result.Username, nil
+}
+
 // SendMessageResult is the Telegram API response for sendMessage.
 type SendMessageResult struct {
 	OK          bool   `json:"ok"`

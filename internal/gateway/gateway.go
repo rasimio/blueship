@@ -38,6 +38,11 @@ type Gateway struct {
 	tz        *time.Location
 	logger    *slog.Logger
 
+	// botUsername is populated at startup via telegram getMe so command
+	// handlers can recognise `/reset@<bot>` targeted commands in group chats.
+	// Empty when getMe failed (group-command targeting degrades gracefully).
+	botUsername string
+
 	systemPrompt string
 
 	// Reflex pipeline prompts (loaded from system_prompts table).
@@ -47,6 +52,38 @@ type Gateway struct {
 
 	mu sync.Mutex
 	users map[string]*UserState // keyed by canonical chatID ("telegram:123", "voice:owner")
+}
+
+// parseCommand extracts the bare command from a Telegram slash command,
+// stripping an optional `@<botname>` suffix, and reports whether the command
+// is addressed to this bot. Rules:
+//   - "/reset" → (cmd="/reset", forUs=true)  — no target, everyone matches
+//   - "/reset@LiyaDeusBot" with botUsername="LiyaDeusBot" → (cmd="/reset", forUs=true)
+//   - "/reset@arlene_bot" with botUsername="LiyaDeusBot" → (cmd="/reset", forUs=false)
+//   - "/reset foo" (args) → (cmd="/reset", forUs=true) — we strip args too
+//
+// If the gateway never learned its own username (getMe failed), every command
+// with a non-empty suffix is treated as addressed (forUs=true) so users still
+// have a working fallback.
+func (g *Gateway) parseCommand(text string) (cmd string, forUs bool) {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "/") {
+		return "", false
+	}
+	// strip optional args after first space
+	head := text
+	if i := strings.IndexByte(text, ' '); i >= 0 {
+		head = text[:i]
+	}
+	if i := strings.IndexByte(head, '@'); i >= 0 {
+		target := strings.ToLower(head[i+1:])
+		cmd = head[:i]
+		if g.botUsername == "" || strings.EqualFold(target, g.botUsername) {
+			return cmd, true
+		}
+		return cmd, false
+	}
+	return head, true
 }
 
 // UserState holds per-user runtime state.
@@ -108,6 +145,18 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 		tz:        tz,
 		logger:    logger,
 		users:     make(map[string]*UserState),
+	}
+
+	// Fetch bot username so targeted commands like "/reset@LiyaDeusBot" work
+	// in group chats where both Arlene and Liya see every message. Failure to
+	// resolve is non-fatal — parseCommand degrades to "everything is for me".
+	meCtx, meCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer meCancel()
+	if username, err := gw.tg.GetMe(meCtx); err != nil {
+		logger.Warn("telegram getMe failed; group command targeting disabled", "error", err)
+	} else {
+		gw.botUsername = username
+		logger.Info("telegram bot self", "username", username)
 	}
 
 	// Load system prompts: DB first, filesystem second, error if neither
@@ -308,21 +357,24 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 	rawChatID := msg.Chat.ID
 	chatID := tgCanonical(rawChatID)
 
-	if text == "/session" {
-		go g.handleSessionCommand(ctx, rawChatID)
-		return
-	}
-	if text == "/reset" {
-		go g.handleResetCommand(ctx, rawChatID)
-		return
-	}
-	if text == "/model" {
-		go g.handleModelCommand(ctx, rawChatID)
-		return
-	}
-	if text == "/voice" {
-		go g.handleVoiceCommand(ctx, rawChatID)
-		return
+	if cmd, forUs := g.parseCommand(text); cmd != "" {
+		if !forUs {
+			return
+		}
+		switch cmd {
+		case "/session":
+			go g.handleSessionCommand(ctx, rawChatID)
+			return
+		case "/reset":
+			go g.handleResetCommand(ctx, rawChatID)
+			return
+		case "/model":
+			go g.handleModelCommand(ctx, rawChatID)
+			return
+		case "/voice":
+			go g.handleVoiceCommand(ctx, rawChatID)
+			return
+		}
 	}
 	if text == "/debug" {
 		us, err := g.getOrInitUser(ctx, chatID)
