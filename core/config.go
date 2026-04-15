@@ -122,7 +122,14 @@ type GatewayConfig struct {
 	DebounceCap      int           // default: 10
 	SessionResetHour int           // default: 4 (4am)
 	MaxTurns         int           // default: 15
-	Debug bool // send errors to owner via Telegram instead of "Sorry..."
+
+	// Debug, when true, both:
+	//   - sends errors to the owner via Telegram instead of a "Sorry..." reply;
+	//   - forces every turn to be followed by a debug.txt dump with AME
+	//     traces, reflex guidance, rule matches, and tool calls.
+	// Per-user /debug toggles still work on top of this (they only matter
+	// when the config flag is off).
+	Debug bool
 }
 
 // applyDefaults fills in zero values with sensible defaults.

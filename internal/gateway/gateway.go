@@ -927,8 +927,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			g.logger.Error("send reply error", "chat_id", us.ChatID, "error", err)
 		}
 
-		// Debug mode: send full dump as txt file.
-		if us.DebugMode {
+		// Debug mode: send full dump as txt file. Triggered by either the
+		// per-user /debug toggle or the always-on Gateway.Debug config flag.
+		if us.DebugMode || g.deps.Config.Gateway.Debug {
 			engineCount := strings.Count(reflexGuidance, "WHEN:")
 			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, result.ToolTraces, engineCount)
 		}
