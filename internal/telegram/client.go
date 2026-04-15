@@ -33,36 +33,45 @@ func (c *Client) IsConfigured() bool {
 	return c.token != ""
 }
 
-// GetMe returns the bot's own username (from Telegram /getMe). Used by the
-// gateway to recognise commands addressed to this bot in group chats, e.g.
-// "/reset@LiyaDeusBot" vs "/reset@arlene_bot".
-func (c *Client) GetMe(ctx context.Context) (string, error) {
+// BotIdentity is the Telegram self-identity used by the gateway for routing
+// in group chats: resolving "@<botname>" mentions, detecting replies to us
+// vs replies to other chat members, and targeted slash commands.
+type BotIdentity struct {
+	ID       int64
+	Username string
+}
+
+// GetMe returns the bot's ID and username (from Telegram /getMe). The gateway
+// caches the result at startup to route incoming group-chat messages without
+// hitting the Bot API on every update.
+func (c *Client) GetMe(ctx context.Context) (BotIdentity, error) {
 	if !c.IsConfigured() {
-		return "", fmt.Errorf("telegram bot not configured")
+		return BotIdentity{}, fmt.Errorf("telegram bot not configured")
 	}
 	u := fmt.Sprintf("https://api.telegram.org/bot%s/getMe", c.token)
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
-		return "", err
+		return BotIdentity{}, err
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return BotIdentity{}, err
 	}
 	defer resp.Body.Close()
 	var body struct {
 		OK     bool `json:"ok"`
 		Result struct {
+			ID       int64  `json:"id"`
 			Username string `json:"username"`
 		} `json:"result"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return "", err
+		return BotIdentity{}, err
 	}
 	if !body.OK {
-		return "", fmt.Errorf("getMe not ok")
+		return BotIdentity{}, fmt.Errorf("getMe not ok")
 	}
-	return body.Result.Username, nil
+	return BotIdentity{ID: body.Result.ID, Username: body.Result.Username}, nil
 }
 
 // SendMessageResult is the Telegram API response for sendMessage.

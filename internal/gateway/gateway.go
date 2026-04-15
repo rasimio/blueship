@@ -38,9 +38,13 @@ type Gateway struct {
 	tz        *time.Location
 	logger    *slog.Logger
 
-	// botUsername is populated at startup via telegram getMe so command
-	// handlers can recognise `/reset@<bot>` targeted commands in group chats.
-	// Empty when getMe failed (group-command targeting degrades gracefully).
+	// botID and botUsername are populated at startup via telegram getMe so
+	// command handlers can recognise `/reset@<bot>` targeted commands AND
+	// the addressing logic can tell a reply-to-us from a reply-to-someone-else
+	// in group chats with multiple participants. Zero/empty values mean
+	// getMe failed and the group-chat routing degrades gracefully
+	// (address check becomes nickname-only, reply-to-us check always false).
+	botID       int64
 	botUsername string
 
 	systemPrompt string
@@ -84,6 +88,37 @@ func (g *Gateway) parseCommand(text string) (cmd string, forUs bool) {
 		return cmd, false
 	}
 	return head, true
+}
+
+// shouldProcessGroupMessage decides whether a group-chat message is
+// addressed to this bot. Private (1:1) chats always process and never
+// call this function.
+//
+// Only two forms of addressing count:
+//
+//  1. Explicit "@<botUsername>" mention anywhere in the text.
+//  2. Reply to one of our own previous messages.
+//
+// Anything else — including a reply to another user or bot, ambient chat,
+// or a vocative "Лия, ..." without the @-mention — is skipped. This keeps
+// the bot quiet in shared rooms unless the user actually invokes it via
+// Telegram's built-in mention or reply UI.
+func (g *Gateway) shouldProcessGroupMessage(msg *telegram.Message, text string) bool {
+	if g.botUsername != "" && text != "" {
+		if strings.Contains(strings.ToLower(text), "@"+strings.ToLower(g.botUsername)) {
+			return true
+		}
+	}
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
+		rep := msg.ReplyToMessage.From
+		if g.botID != 0 && rep.ID == g.botID {
+			return true
+		}
+		if g.botUsername != "" && strings.EqualFold(rep.Username, g.botUsername) {
+			return true
+		}
+	}
+	return false
 }
 
 // UserState holds per-user runtime state.
@@ -147,16 +182,19 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 		users:     make(map[string]*UserState),
 	}
 
-	// Fetch bot username so targeted commands like "/reset@LiyaDeusBot" work
-	// in group chats where both Arlene and Liya see every message. Failure to
-	// resolve is non-fatal — parseCommand degrades to "everything is for me".
+	// Fetch bot identity (id + username) so targeted commands like
+	// "/reset@LiyaDeusBot" and reply-based addressing work in group chats
+	// where multiple bots share the same Telegram group. Failure to resolve
+	// is non-fatal — group routing just degrades to legacy "respond to
+	// everything" behaviour.
 	meCtx, meCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer meCancel()
-	if username, err := gw.tg.GetMe(meCtx); err != nil {
+	if me, err := gw.tg.GetMe(meCtx); err != nil {
 		logger.Warn("telegram getMe failed; group command targeting disabled", "error", err)
 	} else {
-		gw.botUsername = username
-		logger.Info("telegram bot self", "username", username)
+		gw.botID = me.ID
+		gw.botUsername = me.Username
+		logger.Info("telegram bot self", "id", me.ID, "username", me.Username)
 	}
 
 	// Load system prompts: DB first, filesystem second, error if neither
@@ -356,6 +394,21 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 
 	rawChatID := msg.Chat.ID
 	chatID := tgCanonical(rawChatID)
+
+	// Group-chat routing: in a chat with more than one participant the bot
+	// only reacts to messages that are explicitly addressed to it. Private
+	// (1:1) chats bypass this filter because the human has nobody else to
+	// talk to. Slash commands are handled below via parseCommand regardless
+	// of this filter — commands are their own addressing mechanism.
+	if msg.Chat.Type != "private" && !strings.HasPrefix(text, "/") {
+		if !g.shouldProcessGroupMessage(msg, text) {
+			g.logger.Debug("gateway: group message not addressed, skipping",
+				"chat_id", chatID,
+				"chat_type", msg.Chat.Type,
+			)
+			return
+		}
+	}
 
 	if cmd, forUs := g.parseCommand(text); cmd != "" {
 		if !forUs {
