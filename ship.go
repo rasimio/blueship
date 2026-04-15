@@ -344,22 +344,14 @@ func (s *Ship) startA2A(ctx context.Context, deps *Deps, reg *moduleRegistry) er
 			tp.RegisterTools(a2aReg, deps)
 		}
 	}
-	if err := a2aReg.LoadDescriptions(shipDB); err != nil {
-		s.logger.Warn("a2a: tool descriptions not loaded", "error", err)
+	if err := a2aReg.LoadToolsConfig(shipDB); err != nil {
+		s.logger.Warn("a2a: tools table not loaded — agent card may be empty", "error", err)
 	}
 
 	store := a2astore.New(shipDB)
-
-	// Mirror the exposed-tools set into a2a_exposed_tools so the agent
-	// card endpoint can serve it directly from the DB.
-	for _, t := range a2aReg.ExposedTools() {
-		_ = store.UpsertExposedTool(ctx, a2a.ExposedTool{
-			Name:        t.Name,
-			Description: t.Description,
-			Mode:        a2a.ToolMode(t.Mode),
-			Schema:      t.Schema,
-		})
-	}
+	// The a2a server reads its list of exposed tools directly from the
+	// unified `tools` table (via store.ListExposedTools), so there is no
+	// per-startup mirroring step anymore — the DB row is authoritative.
 
 	dispatcher := a2a.NewRegistryDispatcher(&registryShim{inner: a2aReg})
 	srv := a2aserver.New(a2aserver.Config{

@@ -1,7 +1,8 @@
 // Package store is the sqlx data-access layer for blueship's a2a_peers,
-// a2a_exposed_tools, a2a_remote_tools, a2a_calls, and a2a_events tables.
-// The package is deliberately thin — it contains SQL only, no business
-// logic. Server, client, and tracer layers compose its primitives.
+// a2a_remote_tools, a2a_calls, and a2a_events tables, plus a read-through
+// helper for the unified `tools` table that supplies exposed-tool metadata
+// for the agent card. The package is deliberately thin — it contains SQL
+// only, no business logic. Server, client, and tracer layers compose it.
 package store
 
 import (
@@ -109,35 +110,20 @@ func (s *Store) SaveAgentCard(ctx context.Context, peerID string, card json.RawM
 }
 
 // ---------------------------------------------------------------------------
-// Exposed tools (local tools visible to peers)
+// Exposed tools (served from the unified `tools` table)
 // ---------------------------------------------------------------------------
 
-// UpsertExposedTool is called during module registration to announce a
-// locally-implemented tool that should be visible on /.well-known/agent.
-func (s *Store) UpsertExposedTool(ctx context.Context, t a2a.ExposedTool) error {
-	const q = `
-		INSERT INTO a2a_exposed_tools (name, mode, description, schema, enabled)
-		VALUES ($1, $2, $3, $4, true)
-		ON CONFLICT (name) DO UPDATE
-		SET mode        = EXCLUDED.mode,
-		    description = EXCLUDED.description,
-		    schema      = EXCLUDED.schema,
-		    enabled     = true
-	`
-	_, err := s.db.ExecContext(ctx, q, t.Name, string(t.Mode), t.Description, []byte(t.Schema))
-	if err != nil {
-		return fmt.Errorf("UpsertExposedTool: %w", err)
-	}
-	return nil
-}
-
-// ListExposedTools returns all enabled exposed-tool metadata for the
-// /.well-known/agent response.
+// ListExposedTools returns every row in the tools table whose exposed
+// flag is true. These are served from /.well-known/agent so peers can
+// discover what this ship offers. The schema column may be null for
+// tools where code is the only authoritative source of the JSON schema;
+// the agent card handler falls back to the in-memory registry schema
+// when that happens.
 func (s *Store) ListExposedTools(ctx context.Context) ([]a2a.ExposedTool, error) {
 	const q = `
-		SELECT name, mode, description, schema
-		FROM a2a_exposed_tools
-		WHERE enabled = true
+		SELECT name, mode, description, COALESCE(schema, '{}'::jsonb) AS schema
+		FROM tools
+		WHERE exposed = true
 		ORDER BY name
 	`
 	type row struct {

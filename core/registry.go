@@ -191,36 +191,62 @@ func (r *ToolRegistry) Count() int {
 	return len(r.tools)
 }
 
-// LoadDescriptions loads tool descriptions from the tool_descriptions DB table.
-// Every registered tool MUST have a row in the table. Missing = error at startup.
-func (r *ToolRegistry) LoadDescriptions(db *sqlx.DB) error {
-	var rows []struct {
-		Name string `db:"name"`
-		Desc string `db:"description"`
+// LoadToolsConfig reads the tools table (single source of truth for tool
+// metadata) and applies it to every registered tool:
+//
+//   - description is overwritten with the DB value
+//   - mode (sync|async) is adopted
+//   - exposed flag calls Expose() automatically if true
+//
+// Every registered local tool MUST have a corresponding row; any missing
+// tool aborts startup with an error. Rows for tools that are not in the
+// registry are ignored (they could belong to another domain or be stale).
+func (r *ToolRegistry) LoadToolsConfig(db *sqlx.DB) error {
+	type row struct {
+		Name        string `db:"name"`
+		Description string `db:"description"`
+		Mode        string `db:"mode"`
+		Exposed     bool   `db:"exposed"`
 	}
-	if err := db.Select(&rows, `SELECT name, description FROM tool_descriptions`); err != nil {
-		return fmt.Errorf("load tool_descriptions: %w", err)
+	var rows []row
+	if err := db.Select(&rows, `SELECT name, description, mode, exposed FROM tools`); err != nil {
+		return fmt.Errorf("load tools: %w", err)
 	}
 
-	descs := make(map[string]string, len(rows))
-	for _, row := range rows {
-		descs[row.Name] = row.Desc
+	index := make(map[string]row, len(rows))
+	for _, rr := range rows {
+		index[rr.Name] = rr
 	}
 
 	var missing []string
 	for name, tool := range r.tools {
-		if desc, ok := descs[name]; ok {
-			tool.Definition.Description = desc
-			r.tools[name] = tool
-		} else {
-			missing = append(missing, name)
+		// Skip RemoteTool entries — they are imported from peers and have
+		// no row in the local tools table by design.
+		if tool.Remote {
+			continue
 		}
+		cfg, ok := index[name]
+		if !ok {
+			missing = append(missing, name)
+			continue
+		}
+		tool.Definition.Description = cfg.Description
+		if cfg.Mode != "" {
+			tool.Mode = cfg.Mode
+		}
+		tool.Exposed = cfg.Exposed
+		r.tools[name] = tool
 	}
 
 	if len(missing) > 0 {
 		sort.Strings(missing)
-		return fmt.Errorf("tool_descriptions missing for: %v", missing)
+		return fmt.Errorf("tools missing for: %v (populate the tools table)", missing)
 	}
-
 	return nil
+}
+
+// LoadDescriptions is kept as a thin alias for backwards compatibility
+// during the tools-table rollout. Prefer LoadToolsConfig going forward.
+func (r *ToolRegistry) LoadDescriptions(db *sqlx.DB) error {
+	return r.LoadToolsConfig(db)
 }

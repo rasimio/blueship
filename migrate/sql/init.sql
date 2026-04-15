@@ -126,13 +126,24 @@ CREATE INDEX IF NOT EXISTS idx_agent_tasks_user ON agent_tasks(user_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tasks_recurring ON agent_tasks(user_id, handler) WHERE schedule IS NOT NULL AND status != 'failed';
 
 -- ============================================================
--- Tool descriptions (loaded at startup, override hardcoded descriptions)
+-- Tools registry — single source of truth for tool metadata.
+-- Code supplies name + schema + handler at registration time; the
+-- description, execution mode, and A2A exposure flag are loaded from
+-- this table at startup. Every registered tool MUST have a row here;
+-- missing rows cause a startup error.
 -- ============================================================
-CREATE TABLE IF NOT EXISTS tool_descriptions (
-    name        TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS tools (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT NOT NULL UNIQUE,
     description TEXT NOT NULL,
-    updated_at  TIMESTAMPTZ DEFAULT NOW()
+    mode        TEXT NOT NULL DEFAULT 'sync',      -- 'sync' | 'async'
+    exposed     BOOLEAN NOT NULL DEFAULT false,    -- visible on /a2a/*
+    schema      JSONB,                              -- optional canonical input schema
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_tools_exposed ON tools(name) WHERE exposed = true;
 
 -- ============================================================
 -- A2A (Agent-to-Agent) protocol — universal tool bus
@@ -156,17 +167,6 @@ CREATE TABLE IF NOT EXISTS a2a_peers (
 );
 
 CREATE INDEX IF NOT EXISTS idx_a2a_peers_enabled ON a2a_peers(name) WHERE enabled = true;
-
--- Local tools that this ship has marked Exposed=true; the server-side
--- handler looks up by name.
-CREATE TABLE IF NOT EXISTS a2a_exposed_tools (
-    name          TEXT PRIMARY KEY,
-    mode          TEXT NOT NULL,             -- 'sync' | 'async'
-    description   TEXT NOT NULL,
-    schema        JSONB NOT NULL,
-    enabled       BOOLEAN NOT NULL DEFAULT true,
-    registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 
 -- Remote tools imported from peers; registered into the local ToolRegistry
 -- as RemoteTool handlers at startup.
