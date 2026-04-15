@@ -142,6 +142,12 @@ func (s *Ship) Run(ctx context.Context) error {
 
 	// 3b. A2A server + peer bootstrap — optional subsystem that lets this
 	// ship expose its marked tools to peers and call theirs as if local.
+	s.logger.Info("a2a: config",
+		"enabled", s.cfg.A2A.Enabled,
+		"name", s.cfg.A2A.Name,
+		"port", s.cfg.A2A.Port,
+		"base_url", s.cfg.A2A.BaseURL,
+		"peers", len(s.cfg.A2A.Peers))
 	if s.cfg.A2A.Enabled {
 		if err := s.startA2A(ctx, deps, reg); err != nil {
 			s.logger.Error("a2a: startup failed, continuing without A2A", "error", err)
