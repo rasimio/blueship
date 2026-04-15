@@ -2,8 +2,10 @@ package blueship
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -12,6 +14,10 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/rasimio/blueship/a2a"
+	a2aclient "github.com/rasimio/blueship/a2a/client"
+	a2aserver "github.com/rasimio/blueship/a2a/server"
+	a2astore "github.com/rasimio/blueship/a2a/store"
 	"github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/agenttask"
 	"github.com/rasimio/blueship/internal/anthropic"
@@ -134,6 +140,14 @@ func (s *Ship) Run(ctx context.Context) error {
 		modules: s.modules,
 	}
 
+	// 3b. A2A server + peer bootstrap — optional subsystem that lets this
+	// ship expose its marked tools to peers and call theirs as if local.
+	if s.cfg.A2A.Enabled {
+		if err := s.startA2A(ctx, deps, reg); err != nil {
+			s.logger.Error("a2a: startup failed, continuing without A2A", "error", err)
+		}
+	}
+
 	// 4. Start background jobs from modules
 	var wg sync.WaitGroup
 	for _, m := range s.modules {
@@ -246,8 +260,22 @@ func (s *Ship) Run(ctx context.Context) error {
 
 // --- Module registry adapter ---
 
+// remoteToolReg is a cached RemoteTool registration that the ship applies
+// to every fresh user-scoped registry built by the gateway. Populated at
+// startup during A2A peer discovery so remote tools appear alongside
+// local ones in the cortex.
+type remoteToolReg struct {
+	Name        string
+	Description string
+	Schema      json.RawMessage
+	Mode        string
+	PeerName    string
+	Handler     core.ToolHandler
+}
+
 type moduleRegistry struct {
-	modules []Module
+	modules     []Module
+	remoteTools []remoteToolReg
 }
 
 func (r *moduleRegistry) RegisterAllTools(registry *ToolRegistry, d *Deps) {
@@ -255,6 +283,235 @@ func (r *moduleRegistry) RegisterAllTools(registry *ToolRegistry, d *Deps) {
 		if tp, ok := m.(ToolProvider); ok {
 			tp.RegisterTools(registry, d)
 		}
+	}
+	for _, rt := range r.remoteTools {
+		registry.RegisterRemote(rt.Name, rt.Description, rt.Schema, rt.Mode, rt.PeerName, rt.Handler)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A2A startup
+// ---------------------------------------------------------------------------
+
+// registryShim adapts core.ToolRegistry to the a2a.RegistryLike interface
+// without the a2a package having to import core (which would cycle).
+type registryShim struct {
+	inner *core.ToolRegistry
+}
+
+func (r *registryShim) ExposedTools() []a2a.ExposedToolInfoLike {
+	src := r.inner.ExposedTools()
+	out := make([]a2a.ExposedToolInfoLike, 0, len(src))
+	for _, t := range src {
+		out = append(out, a2a.ExposedToolInfoLike{
+			Name:        t.Name,
+			Description: t.Description,
+			Mode:        t.Mode,
+			Schema:      t.Schema,
+		})
+	}
+	return out
+}
+
+func (r *registryShim) ToolMetadata(name string) (string, bool, bool, bool) {
+	return r.inner.ToolMetadata(name)
+}
+
+func (r *registryShim) HandlerByName(name string) (func(ctx context.Context, input json.RawMessage) (any, error), bool) {
+	h, ok := r.inner.HandlerByName(name)
+	if !ok {
+		return nil, false
+	}
+	return core.ToolHandler(h), true
+}
+
+// startA2A boots the A2A subsystem: builds a ship-wide tool registry with
+// every module's tools (so we can dispatch them from the HTTP server),
+// starts the HTTP server, and walks configured peers to import RemoteTools.
+func (s *Ship) startA2A(ctx context.Context, deps *Deps, reg *moduleRegistry) error {
+	shipDB, err := deps.DB("ship")
+	if err != nil {
+		return fmt.Errorf("a2a: ship db: %w", err)
+	}
+
+	// Build a persistent tool registry for A2A-server-side dispatch. Modules
+	// register into this registry once; per-user gateway registries are
+	// rebuilt separately on each request, but the A2A path never sees those.
+	a2aReg := core.NewToolRegistry()
+	tool.RegisterBuiltinTools(a2aReg, deps)
+	for _, m := range s.modules {
+		if tp, ok := m.(ToolProvider); ok {
+			tp.RegisterTools(a2aReg, deps)
+		}
+	}
+	if err := a2aReg.LoadDescriptions(shipDB); err != nil {
+		s.logger.Warn("a2a: tool descriptions not loaded", "error", err)
+	}
+
+	store := a2astore.New(shipDB)
+
+	// Mirror the exposed-tools set into a2a_exposed_tools so the agent
+	// card endpoint can serve it directly from the DB.
+	for _, t := range a2aReg.ExposedTools() {
+		_ = store.UpsertExposedTool(ctx, a2a.ExposedTool{
+			Name:        t.Name,
+			Description: t.Description,
+			Mode:        a2a.ToolMode(t.Mode),
+			Schema:      t.Schema,
+		})
+	}
+
+	dispatcher := a2a.NewRegistryDispatcher(&registryShim{inner: a2aReg})
+	srv := a2aserver.New(a2aserver.Config{
+		Name:        s.cfg.A2A.Name,
+		Description: "BlueShip A2A agent",
+		Version:     s.cfg.A2A.Version,
+		BaseURL:     s.cfg.A2A.BaseURL,
+		AuthToken:   s.cfg.A2A.AuthToken,
+	}, store, dispatcher, s.logger)
+
+	// Start HTTP listener in the background; shutdown on ctx.Done.
+	if s.cfg.A2A.Port > 0 {
+		httpSrv := &http.Server{
+			Addr:    fmt.Sprintf(":%d", s.cfg.A2A.Port),
+			Handler: srv.Handler(),
+		}
+		go func() {
+			s.logger.Info("a2a: http server starting", "addr", httpSrv.Addr)
+			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				s.logger.Error("a2a: http server error", "error", err)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = httpSrv.Shutdown(shutdownCtx)
+		}()
+	}
+
+	// Discover peers and import selected remote tools. Each peer discovery
+	// failure is logged but does not prevent the ship from starting — we
+	// want local operation to survive transient remote outages.
+	var tracer *a2a.TelegramGroupTracer
+	if s.cfg.A2A.TraceChatID != "" && deps.Sender != nil {
+		level := a2a.TraceLevelFull
+		if s.cfg.A2A.TraceLevel != "" {
+			level = a2a.TraceLevel(s.cfg.A2A.TraceLevel)
+		}
+		tracer = &a2a.TelegramGroupTracer{
+			Sender:   senderAdapter{inner: deps.Sender},
+			ChatID:   s.cfg.A2A.TraceChatID,
+			SelfName: s.cfg.A2A.Name,
+			Level:    level,
+			Logger:   s.logger,
+		}
+	}
+
+	for _, pcfg := range s.cfg.A2A.Peers {
+		peer, err := store.UpsertPeer(ctx, pcfg.Name, pcfg.BaseURL, pcfg.AuthToken)
+		if err != nil {
+			s.logger.Warn("a2a: upsert peer failed", "peer", pcfg.Name, "error", err)
+			continue
+		}
+		var ct a2aclient.Tracer
+		if tracer != nil {
+			ct = &tgTracerAdapter{inner: tracer}
+		}
+		cl := a2aclient.New(*peer, store, ct, s.logger)
+		card, err := cl.Discover(ctx)
+		if err != nil {
+			s.logger.Warn("a2a: discover peer failed", "peer", pcfg.Name, "error", err)
+			continue
+		}
+		imports := 0
+		for _, rt := range card.Tools {
+			if !shouldImport(pcfg.UseTools, rt.Name) {
+				continue
+			}
+			_ = store.UpsertRemoteTool(ctx, peer.ID, rt)
+			reg.remoteTools = append(reg.remoteTools, remoteToolReg{
+				Name:        rt.Name,
+				Description: rt.Description,
+				Schema:      rt.Schema,
+				Mode:        string(rt.Mode),
+				PeerName:    pcfg.Name,
+				Handler:     makeRemoteHandler(cl, rt.Name),
+			})
+			imports++
+		}
+		s.logger.Info("a2a: peer ready", "peer", pcfg.Name, "imported_tools", imports)
+	}
+
+	return nil
+}
+
+// senderAdapter bridges core.MessageSender (returns int, error) to the
+// a2a.MessageSender interface. They have the same shape so the wrapper is
+// a direct passthrough.
+type senderAdapter struct {
+	inner core.MessageSender
+}
+
+func (a senderAdapter) SendMessage(ctx context.Context, chatID string, text string) (int, error) {
+	return a.inner.SendMessage(ctx, chatID, text)
+}
+
+// tgTracerAdapter bridges a2a.TelegramGroupTracer to the client package's
+// Tracer interface. Both have identical method sets so it's a direct passthrough.
+type tgTracerAdapter struct {
+	inner *a2a.TelegramGroupTracer
+}
+
+func (a *tgTracerAdapter) TraceInvoke(ctx context.Context, call a2a.Call) {
+	a.inner.TraceInvoke(ctx, call)
+}
+func (a *tgTracerAdapter) TraceResult(ctx context.Context, call a2a.Call) {
+	a.inner.TraceResult(ctx, call)
+}
+func (a *tgTracerAdapter) TraceEvent(ctx context.Context, call a2a.Call, ev a2a.Event) {
+	a.inner.TraceEvent(ctx, call, ev)
+}
+
+// shouldImport returns true if useTools is empty (import all) or the tool
+// name is in the whitelist.
+func shouldImport(useTools []string, name string) bool {
+	if len(useTools) == 0 {
+		return true
+	}
+	for _, t := range useTools {
+		if t == name {
+			return true
+		}
+	}
+	return false
+}
+
+// makeRemoteHandler wraps an a2a client Invoke call into the core.ToolHandler
+// signature so it plugs into any ToolRegistry as if it were local.
+func makeRemoteHandler(cl *a2aclient.Client, toolName string) core.ToolHandler {
+	return func(ctx context.Context, input json.RawMessage) (any, error) {
+		resp, err := cl.Invoke(ctx, toolName, input, "")
+		if err != nil {
+			return nil, err
+		}
+		if resp.Mode == a2a.ToolModeSync {
+			if len(resp.Output) == 0 {
+				return map[string]any{"ok": true}, nil
+			}
+			var result any
+			if err := json.Unmarshal(resp.Output, &result); err != nil {
+				return string(resp.Output), nil
+			}
+			return result, nil
+		}
+		// Async — return the handle so the caller can poll / subscribe.
+		return map[string]any{
+			"call_id":    resp.CallID,
+			"handle":     resp.Handle,
+			"state":      string(resp.State),
+			"events_url": resp.EventsURL,
+		}, nil
 	}
 }
 

@@ -429,6 +429,17 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 			return
 		}
 	}
+	// A2A trace messages are informational broadcasts posted by bots into
+	// a shared visibility chat (e.g. rasim lab). They are never addressed
+	// to anyone — the [a2a-trace] sentinel is the cue. Gateways MUST drop
+	// them before any cortex turn is triggered, otherwise bots would react
+	// to each other's status lines and spin a feedback loop.
+	if strings.HasPrefix(strings.TrimLeft(text, " \n\t\r"), "[a2a-trace]") {
+		g.logger.Debug("gateway: a2a trace message, visibility only — skipping cortex turn",
+			"chat_id", chatID)
+		return
+	}
+
 	if text == "/debug" {
 		us, err := g.getOrInitUser(ctx, chatID)
 		if err == nil {

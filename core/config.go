@@ -43,6 +43,7 @@ type Config struct {
 	Timeouts TimeoutsConfig
 	Retry    RetryConfig
 	Gateway  GatewayConfig
+	A2A      A2AConfig
 }
 
 // OwnerConfig identifies the single owner of this instance.
@@ -114,6 +115,40 @@ type TimeoutsConfig struct {
 type RetryConfig struct {
 	MaxAttempts int             // default: 3
 	Backoff     []time.Duration // default: [5s, 15s, 30s]
+}
+
+// A2AConfig controls the Agent-to-Agent protocol subsystem.
+//
+// When Enabled, the ship starts an HTTP server on Port that exposes
+// /.well-known/agent (capability discovery), /a2a/invoke (tool dispatch),
+// and /a2a/events (SSE stream for async results). Tools are only reachable
+// through A2A if they were explicitly marked Exposed in the ToolRegistry.
+type A2AConfig struct {
+	Enabled   bool
+	Name      string // ship identifier published in the agent card (e.g. "liya")
+	Version   string // semver or build tag
+	Port      int    // 0 = disabled
+	BaseURL   string // externally reachable URL for agent card self-reference
+	AuthToken string // shared secret accepted on inbound requests
+
+	// TraceChatID is the Telegram chat used for [a2a-trace] visibility
+	// messages. Empty disables tracing; typical value is the group chat
+	// where the owner watches inter-agent conversations.
+	TraceChatID string
+	TraceLevel  string // "off" | "errors" | "full" (default: "full" in dev, "errors" in prod)
+
+	// Peers lists remote ships this ship knows about. At startup each one
+	// is discovered, its agent card cached, and any tool in UseTools gets
+	// registered as a RemoteTool in the local ToolRegistry.
+	Peers []A2APeerConfig
+}
+
+// A2APeerConfig describes a known remote ship.
+type A2APeerConfig struct {
+	Name      string   // stable identifier ("liya")
+	BaseURL   string   // e.g. "http://localhost:8090"
+	AuthToken string   // bearer token to send on outgoing calls
+	UseTools  []string // tool names to import as RemoteTools (empty = import all exposed)
 }
 
 // GatewayConfig defines gateway behavior.

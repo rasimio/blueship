@@ -133,3 +133,90 @@ CREATE TABLE IF NOT EXISTS tool_descriptions (
     description TEXT NOT NULL,
     updated_at  TIMESTAMPTZ DEFAULT NOW()
 );
+
+-- ============================================================
+-- A2A (Agent-to-Agent) protocol — universal tool bus
+-- Each ship exposes selected local tools to other ships and imports
+-- interesting tools from its peers. RemoteTool handlers dispatch via
+-- HTTP; the cortex sees them as ordinary tools.
+-- History of every inter-ship call (both in and out) is append-only
+-- persisted in a2a_calls + a2a_events for audit, debug, and replay.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS a2a_peers (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name          TEXT NOT NULL UNIQUE,     -- stable identifier e.g. "liya"
+    base_url      TEXT NOT NULL,            -- e.g. "http://localhost:8090"
+    auth_token    TEXT,                     -- shared secret
+    agent_card    JSONB,                    -- cached /.well-known/agent response
+    card_fetched_at TIMESTAMPTZ,
+    last_seen_at  TIMESTAMPTZ,
+    enabled       BOOLEAN NOT NULL DEFAULT true,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_a2a_peers_enabled ON a2a_peers(name) WHERE enabled = true;
+
+-- Local tools that this ship has marked Exposed=true; the server-side
+-- handler looks up by name.
+CREATE TABLE IF NOT EXISTS a2a_exposed_tools (
+    name          TEXT PRIMARY KEY,
+    mode          TEXT NOT NULL,             -- 'sync' | 'async'
+    description   TEXT NOT NULL,
+    schema        JSONB NOT NULL,
+    enabled       BOOLEAN NOT NULL DEFAULT true,
+    registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Remote tools imported from peers; registered into the local ToolRegistry
+-- as RemoteTool handlers at startup.
+CREATE TABLE IF NOT EXISTS a2a_remote_tools (
+    peer_id       UUID NOT NULL REFERENCES a2a_peers(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    mode          TEXT NOT NULL,
+    description   TEXT NOT NULL,
+    schema        JSONB NOT NULL,
+    last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (peer_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_a2a_remote_tools_name ON a2a_remote_tools(name);
+
+-- Every inter-ship tool invocation, one row per call (both directions).
+-- 'direction' is relative to THIS ship:
+--   out = this ship called a peer's tool
+--   in  = a peer called a local exposed tool
+CREATE TABLE IF NOT EXISTS a2a_calls (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    peer_id        UUID REFERENCES a2a_peers(id) ON DELETE SET NULL,
+    peer_name      TEXT NOT NULL,            -- denormalised for logs
+    direction      TEXT NOT NULL,            -- 'out' | 'in'
+    tool_name      TEXT NOT NULL,
+    mode           TEXT NOT NULL,            -- 'sync' | 'async'
+    correlation_id TEXT,
+    input          JSONB,
+    output         JSONB,
+    error          TEXT,
+    state          TEXT NOT NULL,            -- 'pending' | 'running' | 'done' | 'failed' | 'canceled'
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at   TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_a2a_calls_peer ON a2a_calls(peer_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_a2a_calls_active ON a2a_calls(state, created_at) WHERE state IN ('pending','running');
+CREATE INDEX IF NOT EXISTS idx_a2a_calls_corr ON a2a_calls(correlation_id) WHERE correlation_id IS NOT NULL;
+
+-- Streamed events per async call. Long-poll / SSE on the server reads by
+-- (call_id, seq > since); terminal events carry is_final = true.
+CREATE TABLE IF NOT EXISTS a2a_events (
+    id          BIGSERIAL PRIMARY KEY,
+    call_id     UUID NOT NULL REFERENCES a2a_calls(id) ON DELETE CASCADE,
+    seq         INT NOT NULL,                -- monotonic per call
+    type        TEXT NOT NULL,               -- 'state_change' | 'output' | 'log' | 'terminal'
+    payload     JSONB,
+    is_final    BOOLEAN NOT NULL DEFAULT false,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (call_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_a2a_events_call ON a2a_events(call_id, seq);
