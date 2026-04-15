@@ -1175,10 +1175,24 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 			r.ID, r.Trigger, r.Action, r.SuccessRate*100)
 	}
 
+	// Tool list for the reflex prompt: one tool per line with its full
+	// description. Reflex needs descriptions to disambiguate semantically
+	// close tools (code_task_status vs memory_search on a UUID, etc.) —
+	// name-only lists force it to guess from the name alone, which is
+	// where most mis-selection bugs come from. The descriptions are the
+	// same DB-driven strings the cortex sees, via the per-user registry
+	// built during getOrInitUser.
 	toolsList := "none configured"
-	if g.deps.RoleTools != nil {
-		if names := g.deps.RoleTools.Get("cortex"); len(names) > 0 {
-			toolsList = strings.Join(names, ", ")
+	if us.Registry != nil && g.deps.RoleTools != nil {
+		names := g.deps.RoleTools.Get("cortex")
+		if len(names) > 0 {
+			var sb strings.Builder
+			for _, def := range us.Registry.DefinitionsForNames(names) {
+				fmt.Fprintf(&sb, "- %s: %s\n", def.Name, strings.TrimSpace(def.Description))
+			}
+			if sb.Len() > 0 {
+				toolsList = strings.TrimRight(sb.String(), "\n")
+			}
 		}
 	}
 
