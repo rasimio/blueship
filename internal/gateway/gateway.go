@@ -1247,6 +1247,18 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 	var hasRules bool
 	seenRuleIDs := make(map[string]bool)
 
+	// 0. Free-form guidance from the reflex model itself. Populated by
+	// Flash when it wants to instruct the cortex directly — for instance
+	// when the request is ambiguous and the cortex should ask the user
+	// to choose between tools instead of picking one itself. The exact
+	// text lives in the reflex-plan system prompt (DB-driven); the
+	// gateway only pipes it through.
+	if g := strings.TrimSpace(reflexResult.Guidance); g != "" {
+		guidance.WriteString("[reflex guidance]\n")
+		guidance.WriteString(g)
+		guidance.WriteString("\n\n")
+	}
+
 	// 1. Rules from reflex classification (semantic match).
 	if len(reflexResult.MatchedRules) > 0 {
 		matchedSet := make(map[string]bool, len(reflexResult.MatchedRules))
@@ -1518,12 +1530,13 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 
 	// Parse with flexible tools field: Flash sometimes returns objects instead of strings.
 	var raw struct {
-		MatchedRules []string          `json:"matched_rules"`
-		Intent       string            `json:"intent"`
-		Confidence   float64           `json:"confidence"`
-		PreActions   []bs.ToolAction   `json:"pre_actions"`
-		PostActions  []bs.PostAction   `json:"post_actions"`
-		Tools        json.RawMessage   `json:"tools"`
+		MatchedRules []string        `json:"matched_rules"`
+		Intent       string          `json:"intent"`
+		Confidence   float64         `json:"confidence"`
+		PreActions   []bs.ToolAction `json:"pre_actions"`
+		PostActions  []bs.PostAction `json:"post_actions"`
+		Tools        json.RawMessage `json:"tools"`
+		Guidance     string          `json:"guidance"`
 	}
 	if err := json.Unmarshal([]byte(text), &raw); err != nil {
 		return nil, fmt.Errorf("parse reflex JSON %q: %w", text, err)
@@ -1535,6 +1548,7 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 		Confidence:   raw.Confidence,
 		PreActions:   raw.PreActions,
 		PostActions:  raw.PostActions,
+		Guidance:     raw.Guidance,
 	}
 
 	// Try parsing tools as []string first, then as []{"tool":"name",...} objects.
