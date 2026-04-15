@@ -220,14 +220,16 @@ func (r *ToolRegistry) LoadToolsConfig(db *sqlx.DB) error {
 
 	var missing []string
 	for name, tool := range r.tools {
-		// Skip RemoteTool entries — they are imported from peers and have
-		// no row in the local tools table by design.
-		if tool.Remote {
-			continue
-		}
 		cfg, ok := index[name]
 		if !ok {
-			missing = append(missing, name)
+			// Local tools MUST have a row; remote tools inherit their
+			// description from the peer's agent card when the row is
+			// missing. This lets local ships customise remote tool
+			// descriptions (to steer their own cortex) without touching
+			// the remote's metadata.
+			if !tool.Remote {
+				missing = append(missing, name)
+			}
 			continue
 		}
 		tool.Definition.Description = cfg.Description
