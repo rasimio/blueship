@@ -659,6 +659,31 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	var toolOverride []string       // nil = use role default
 	var postActions []bs.PostAction // executed after cortex response
 
+	// Hard-silence gate BEFORE the reflex/cortex pipeline. Agents that run
+	// without a ReflexPreparer (e.g. liya in Phase 3b) still need the rule
+	// engine to abort turns when a silent rule matches — otherwise cortex
+	// runs unconditionally and the silent rule is never honoured. This check
+	// is a no-op when a ReflexPreparer is wired, because the same rule
+	// engine pass happens inside runReflexPipeline; the early exit is
+	// specifically for no-reflex agents.
+	if msgText != "" && us.Deps != nil && us.Deps.RuleEngine != nil && us.Deps.ReflexPreparer == nil {
+		engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
+			UserID:  us.UserID.String(),
+			Hour:    time.Now().Hour(),
+			Message: msgText,
+		})
+		for _, r := range engineRules {
+			if r.Silent {
+				g.logger.Info("rule engine: silent rule matched (no-reflex path), aborting turn",
+					"rule_id", r.ID,
+					"trigger", r.Trigger,
+					"chat_id", us.ChatID,
+				)
+				return
+			}
+		}
+	}
+
 	var preTraces []agent.ToolTrace
 	if msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil && g.reflexModel() != "" {
 		// Reflex/Cortex pipeline: structured context → reflex plan → pre-actions → filtered cortex input.
