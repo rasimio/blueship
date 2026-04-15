@@ -573,6 +573,31 @@ func (g *Gateway) GetOwnerUser() *UserState {
 	return nil
 }
 
+// formatRulesAsGuidance renders a slice of ActiveRule entries into the
+// "WHEN: ... DO: ... TOOLS: ..." shape the cortex prompt already understands.
+// Used by the no-reflex rule engine path so liya (and other agents without a
+// reflex pipeline) get the same guidance injection as reflex-driven agents.
+func formatRulesAsGuidance(rules []bs.ActiveRule) string {
+	if len(rules) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("### Active rules\n")
+	for _, r := range rules {
+		if r.Trigger != "" {
+			fmt.Fprintf(&b, "WHEN: %s\n", r.Trigger)
+		}
+		if r.Action != "" {
+			fmt.Fprintf(&b, "DO: %s\n", r.Action)
+		}
+		if len(r.Tools) > 0 {
+			fmt.Fprintf(&b, "TOOLS: %s\n", strings.Join(r.Tools, ", "))
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 // sendDebugDump builds a full debug dump and sends as txt file via Telegram.
 func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx, reflexGuidance string, preTraces, cortexTraces []agent.ToolTrace, engineRuleCount int) {
 	var b strings.Builder
@@ -764,13 +789,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	var toolOverride []string       // nil = use role default
 	var postActions []bs.PostAction // executed after cortex response
 
-	// Hard-silence gate BEFORE the reflex/cortex pipeline. Agents that run
-	// without a ReflexPreparer (e.g. liya in Phase 3b) still need the rule
-	// engine to abort turns when a silent rule matches — otherwise cortex
-	// runs unconditionally and the silent rule is never honoured. This check
-	// is a no-op when a ReflexPreparer is wired, because the same rule
-	// engine pass happens inside runReflexPipeline; the early exit is
-	// specifically for no-reflex agents.
+	// Rule engine pass for agents that run WITHOUT a ReflexPreparer (e.g.
+	// liya). Two responsibilities:
+	//   1. Abort the turn immediately if any silent rule matched.
+	//   2. Format non-silent rules as guidance and surface them into the
+	//      cortex prompt via reflexGuidance + debug dump.
+	// No-op when a ReflexPreparer is wired: runReflexPipeline does the same
+	// rule engine pass inline and owns both variables.
 	if msgText != "" && us.Deps != nil && us.Deps.RuleEngine != nil && us.Deps.ReflexPreparer == nil {
 		engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
 			UserID:  us.UserID.String(),
@@ -786,6 +811,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 				)
 				return
 			}
+		}
+		if len(engineRules) > 0 {
+			reflexGuidance = formatRulesAsGuidance(engineRules)
+			g.logger.Info("rule engine: non-silent rules matched (no-reflex path)",
+				"count", len(engineRules),
+				"chat_id", us.ChatID,
+			)
 		}
 	}
 
