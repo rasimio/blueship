@@ -677,7 +677,7 @@ func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx,
 	if idx := strings.Index(chatID, ":"); idx >= 0 {
 		chatID = chatID[idx+1:]
 	}
-	if err := g.tg.SendDocument(ctx, chatID, "debug.txt", []byte(b.String())); err != nil {
+	if err := g.tg.SendDocument(ctx, chatID, "debug.md", []byte(b.String())); err != nil {
 		g.logger.Warn("debug dump send failed", "error", err)
 	}
 }
