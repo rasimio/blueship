@@ -20,11 +20,18 @@ type ReflexResult struct {
 	Tools []string `json:"tools"`
 	// Guidance is a free-form instruction the reflex model wants the cortex
 	// to follow for this turn. It is prepended to the rule-engine guidance
-	// the gateway injects into the cortex prompt. Used for dynamic cases
-	// that do not map to any persisted rule — most notably ambiguity
-	// resolution where reflex sees several plausible tools and wants the
-	// cortex to ask the user to pick instead of choosing itself.
+	// the gateway injects into the cortex prompt.
 	Guidance string `json:"guidance,omitempty"`
+	// ClarificationOptions is populated when intent=clarification_needed.
+	// Each option describes a plausible tool + human-readable label.
+	// Gateway formats these into a numbered list for cortex to present.
+	ClarificationOptions []ClarificationOption `json:"clarification_options,omitempty"`
+}
+
+// ClarificationOption is one candidate tool when reflex detects ambiguity.
+type ClarificationOption struct {
+	Tool  string `json:"tool"`
+	Label string `json:"label"`
 }
 
 // ToolAction is a tool call planned by reflex, executed by gateway.
