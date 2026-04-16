@@ -847,6 +847,24 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText)
 	}
 
+	// Trace cortex tool set for debugging.
+	if toolOverride != nil {
+		defs := us.Registry.DefinitionsForNames(toolOverride)
+		var traceLines []string
+		for _, d := range defs {
+			desc := d.Description
+			if len(desc) > 80 {
+				desc = desc[:80] + "..."
+			}
+			traceLines = append(traceLines, fmt.Sprintf("  %s: %s", d.Name, desc))
+		}
+		g.logger.Info("cortex tool set",
+			"override_names", toolOverride,
+			"resolved_count", len(defs),
+			"tools", strings.Join(traceLines, "\n"),
+		)
+	}
+
 	loop := agent.NewLoop(g.provider, g.store, us.Registry, g.deps.RoleTools, g.deps.Config, g.logger)
 	loop.SetCompactor(g.compactor)
 
