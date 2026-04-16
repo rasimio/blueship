@@ -637,6 +637,22 @@ func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx,
 	// Rule Engine
 	b.WriteString(fmt.Sprintf("=== RULE ENGINE ===\n%d rules matched by structured conditions\n\n", engineRuleCount))
 
+	// Cortex tool definitions
+	b.WriteString("=== CORTEX TOOLS ===\n")
+	if us.Registry != nil && g.deps.RoleTools != nil {
+		names := g.deps.RoleTools.Get("cortex")
+		defs := us.Registry.DefinitionsForNames(names)
+		for _, d := range defs {
+			desc := strings.TrimSpace(d.Description)
+			if len(desc) > 120 {
+				desc = desc[:120] + "..."
+			}
+			fmt.Fprintf(&b, "- %s: %s\n", d.Name, desc)
+		}
+		fmt.Fprintf(&b, "(%d tools)\n", len(defs))
+	}
+	b.WriteString("\n")
+
 	// Tool traces
 	b.WriteString("=== TOOL CALLS ===\n")
 	allTraces := append(preTraces, cortexTraces...)
@@ -797,7 +813,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 
 	// Build context and run reflex/cortex pipeline.
 	var injectedCtx, reflexGuidance string
-	var toolOverride []string       // nil = use role default
 	var postActions []bs.PostAction // executed after cortex response
 
 	// Rule engine pass for agents that run WITHOUT a ReflexPreparer (e.g.
@@ -836,7 +851,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	if msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil && g.reflexModel() != "" {
 		// Reflex/Cortex pipeline: structured context → reflex plan → pre-actions → filtered cortex input.
 		var silent bool
-		injectedCtx, reflexGuidance, toolOverride, postActions, preTraces, silent = g.runReflexPipeline(ctx, us, msgText)
+		injectedCtx, reflexGuidance, postActions, preTraces, silent = g.runReflexPipeline(ctx, us, msgText)
 		if silent {
 			// Hard rule said "do not respond". Abort the whole turn — no
 			// cortex call, no message sent, no post-actions, no debug dump.
@@ -845,24 +860,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	} else if msgText != "" && us.Deps != nil && us.Deps.ContextInjector != nil {
 		// Fallback: legacy ContextInjector (no reflex).
 		injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText)
-	}
-
-	// Trace cortex tool set for debugging.
-	if toolOverride != nil {
-		defs := us.Registry.DefinitionsForNames(toolOverride)
-		var traceLines []string
-		for _, d := range defs {
-			desc := d.Description
-			if len(desc) > 80 {
-				desc = desc[:80] + "..."
-			}
-			traceLines = append(traceLines, fmt.Sprintf("  %s: %s", d.Name, desc))
-		}
-		g.logger.Info("cortex tool set",
-			"override_names", toolOverride,
-			"resolved_count", len(defs),
-			"tools", strings.Join(traceLines, "\n"),
-		)
 	}
 
 	loop := agent.NewLoop(g.provider, g.store, us.Registry, g.deps.RoleTools, g.deps.Config, g.logger)
@@ -888,7 +885,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		InjectedContext: injectedCtx,
 		ReflexGuidance:  reflexGuidance,
 		Role:            "cortex",
-		ToolOverride:    toolOverride,
 		Temperature:     cortexTemp,
 	}
 
@@ -1173,14 +1169,13 @@ const maxPreActions = 2
 // 3. Execute pre-actions (web_search etc.) → inject results into context
 // 4. Build cortex context: matched rules + research + AME traces
 //
-// Returns (injectedContext, reflexGuidance, toolOverride, postActions,
-// preTraces, silent). When silent=true the caller MUST abort the turn
-// without calling cortex or sending any output — a structured rule with
-// Silent=true matched and the rest of the return values are zero/nil.
-func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText string) (string, string, []string, []bs.PostAction, []agent.ToolTrace, bool) {
+// Returns (injectedContext, reflexGuidance, postActions, preTraces, silent).
+// When silent=true the caller MUST abort the turn without calling cortex or
+// sending any output — a structured rule with Silent=true matched.
+func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText string) (string, string, []bs.PostAction, []agent.ToolTrace, bool) {
 	rc := us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText)
 	if rc == nil {
-		return "", "", nil, nil, nil, false
+		return "", "", nil, nil, false
 	}
 
 	// Store emotional strategy for TTS instruct mapping.
@@ -1216,7 +1211,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 
 	if g.reflexPlanTemplate == "" {
 		g.logger.Warn("reflex-plan prompt not in DB, skipping reflex")
-		return rc.FullContext, "", nil, nil, nil, false
+		return rc.FullContext, "", nil, nil, false
 	}
 	notesBlock := rc.ActiveNotes
 	if notesBlock == "" {
@@ -1227,7 +1222,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 	reflexResult, err := g.callReflex(ctx, reflexPrompt)
 	if err != nil {
 		g.logger.Warn("reflex failed, using full context", "error", err)
-		return rc.FullContext, "", nil, nil, nil, false
+		return rc.FullContext, "", nil, nil, false
 	}
 
 	g.logger.Info("reflex plan",
@@ -1244,7 +1239,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		g.logger.Info("reflex low confidence, full fallback",
 			"confidence", reflexResult.Confidence,
 		)
-		return rc.FullContext, "", nil, nil, nil, false
+		return rc.FullContext, "", nil, nil, false
 	}
 
 	// Execute pre-actions (web_search etc.) with timeout.
@@ -1311,7 +1306,6 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 
 	// 2. Rules from structured rule engine (condition-based match).
 	// Rules can carry pre_actions and tools — these are merged into the pipeline.
-	var ruleTools []string
 	if us.Deps.RuleEngine != nil {
 		engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
 			UserID:   us.Deps.UserID.String(),
@@ -1332,7 +1326,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 					"trigger", r.Trigger,
 					"chat_id", us.ChatID,
 				)
-				return "", "", nil, nil, nil, true
+				return "", "", nil, nil, true
 			}
 		}
 
@@ -1346,9 +1340,6 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 				hasRules = true
 			}
 			fmt.Fprintf(&guidance, "WHEN: %s\nDO: %s\n\n", r.Trigger, r.Action)
-
-			// Collect tools prescribed by rules.
-			ruleTools = append(ruleTools, r.Tools...)
 
 			// Execute rule-prescribed pre_actions.
 			for _, pa := range r.PreActions {
@@ -1383,52 +1374,12 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		guidance.WriteString(researchBlock.String())
 	}
 
-	// Tool override: merge reflex tools + rule engine tools.
-	var toolOverride []string
-	if len(reflexResult.Tools) > 0 {
-		toolOverride = reflexResult.Tools
-	}
-	// Merge rule-prescribed tools (dedup).
-	toolSet := make(map[string]bool)
-	for _, t := range toolOverride {
-		toolSet[t] = true
-	}
-	for _, t := range ruleTools {
-		if !toolSet[t] {
-			toolOverride = append(toolOverride, t)
-			toolSet[t] = true
-		}
-	}
-
-	// memory_save ALWAYS available — cortex decides what to remember, not reflex.
-	if !containsTool(toolOverride, "memory_save") {
-		toolOverride = append(toolOverride, "memory_save")
-	}
-
-	// Intent-based tool enforcement.
-	switch reflexResult.Intent {
-	case "background_research":
-		if !containsTool(toolOverride, "agent_task_create") {
-			toolOverride = append(toolOverride, "agent_task_create")
-		}
-	case "memory_operation":
-		for _, t := range []string{"memory_search", "memory_update"} {
-			if !containsTool(toolOverride, t) {
-				toolOverride = append(toolOverride, t)
-			}
-		}
-		if rc.ActiveNotes != "" && guidance.Len() == 0 {
-			guidance.WriteString("[active_notes]\n")
-			guidance.WriteString(rc.ActiveNotes)
-			guidance.WriteString("[/active_notes]\n")
-			guidance.WriteString("Если пользователь сообщает о выполнении — вызови memory_update(id, status=done).\n")
-		}
-	case "task_management":
-		for _, t := range []string{"memory_search", "memory_update", "agent_task_list", "agent_task_status"} {
-			if !containsTool(toolOverride, t) {
-				toolOverride = append(toolOverride, t)
-			}
-		}
+	// Intent-based guidance injection.
+	if reflexResult.Intent == "memory_operation" && rc.ActiveNotes != "" && guidance.Len() == 0 {
+		guidance.WriteString("[active_notes]\n")
+		guidance.WriteString(rc.ActiveNotes)
+		guidance.WriteString("[/active_notes]\n")
+		guidance.WriteString("Если пользователь сообщает о выполнении — вызови memory_update(id, status=done).\n")
 	}
 
 	// Close research block if any pre-actions produced results.
@@ -1446,7 +1397,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		}
 	}
 
-	return formattedTraces, guidance.String(), toolOverride, reflexResult.PostActions, preTraces, false
+	return formattedTraces, guidance.String(), reflexResult.PostActions, preTraces, false
 }
 
 // executePostActions runs post-cortex actions (save reflection, etc.).
@@ -1648,15 +1599,6 @@ func (g *Gateway) todayResetTime() time.Time {
 
 // Timezone returns the configured timezone.
 func (g *Gateway) Timezone() *time.Location { return g.tz }
-
-func containsTool(tools []string, name string) bool {
-	for _, t := range tools {
-		if t == name {
-			return true
-		}
-	}
-	return false
-}
 
 func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 	us, err := g.getOrInitUser(ctx, tgCanonical(chatID))
