@@ -51,6 +51,21 @@ func NewRegistryDispatcher(reg RegistryLike) *RegistryDispatcher {
 	return &RegistryDispatcher{reg: reg}
 }
 
+// ExposedTools returns all exposed tools with schemas from the registry.
+func (d *RegistryDispatcher) ExposedTools() []ExposedTool {
+	src := d.reg.ExposedTools()
+	out := make([]ExposedTool, 0, len(src))
+	for _, t := range src {
+		out = append(out, ExposedTool{
+			Name:        t.Name,
+			Description: t.Description,
+			Mode:        ToolMode(t.Mode),
+			Schema:      t.Schema,
+		})
+	}
+	return out
+}
+
 // Tool returns metadata for the named exposed tool.
 func (d *RegistryDispatcher) Tool(name string) (ExposedTool, bool) {
 	mode, exposed, _, ok := d.reg.ToolMetadata(name)

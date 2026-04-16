@@ -612,6 +612,7 @@ func formatRulesAsGuidance(rules []bs.ActiveRule) string {
 // sendDebugDump builds a full debug dump and sends as txt file via Telegram.
 func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx, reflexGuidance string, preTraces, cortexTraces []agent.ToolTrace, engineRuleCount int) {
 	var b strings.Builder
+	b.WriteString("\xEF\xBB\xBF") // UTF-8 BOM
 	b.WriteString("=== DEBUG DUMP ===\n")
 	b.WriteString(fmt.Sprintf("Time: %s\n", time.Now().In(g.tz).Format("2006-01-02 15:04:05")))
 	b.WriteString(fmt.Sprintf("User: %s\n\n", us.ChatID))

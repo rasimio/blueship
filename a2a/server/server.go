@@ -32,6 +32,7 @@ import (
 // events via the EventEmitter argument (async mode).
 type Dispatcher interface {
 	Tool(name string) (a2a.ExposedTool, bool)
+	ExposedTools() []a2a.ExposedTool
 	InvokeSync(ctx context.Context, name string, input json.RawMessage) (json.RawMessage, error)
 	InvokeAsync(ctx context.Context, name string, input json.RawMessage, emit a2a.EventEmitter) (initial json.RawMessage, err error)
 }
@@ -114,11 +115,7 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET", "")
 		return
 	}
-	tools, err := s.store.ListExposedTools(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store_error", err.Error(), "")
-		return
-	}
+	tools := s.disp.ExposedTools()
 	card := a2a.AgentCard{
 		Name:        s.cfg.Name,
 		Description: s.cfg.Description,
