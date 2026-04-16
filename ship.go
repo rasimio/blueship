@@ -424,9 +424,6 @@ func (s *Ship) startA2A(ctx context.Context, deps *Deps, reg *moduleRegistry) er
 		}
 		imports := 0
 		for _, rt := range card.Tools {
-			if !shouldImport(pcfg.UseTools, rt.Name) {
-				continue
-			}
 			_ = store.UpsertRemoteTool(ctx, peer.ID, rt)
 			reg.remoteTools = append(reg.remoteTools, remoteToolReg{
 				Name:        rt.Name,
@@ -469,20 +466,6 @@ func (a *tgTracerAdapter) TraceResult(ctx context.Context, call a2a.Call) {
 }
 func (a *tgTracerAdapter) TraceEvent(ctx context.Context, call a2a.Call, ev a2a.Event) {
 	a.inner.TraceEvent(ctx, call, ev)
-}
-
-// shouldImport returns true if useTools is empty (import all) or the tool
-// name is in the whitelist.
-func shouldImport(useTools []string, name string) bool {
-	if len(useTools) == 0 {
-		return true
-	}
-	for _, t := range useTools {
-		if t == name {
-			return true
-		}
-	}
-	return false
 }
 
 // makeRemoteHandler wraps an a2a client Invoke call into the core.ToolHandler

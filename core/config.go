@@ -145,10 +145,9 @@ type A2AConfig struct {
 
 // A2APeerConfig describes a known remote ship.
 type A2APeerConfig struct {
-	Name      string   // stable identifier ("liya")
-	BaseURL   string   // e.g. "http://localhost:8090"
-	AuthToken string   // bearer token to send on outgoing calls
-	UseTools  []string // tool names to import as RemoteTools (empty = import all exposed)
+	Name      string // stable identifier ("liya")
+	BaseURL   string // e.g. "http://localhost:8090"
+	AuthToken string // bearer token to send on outgoing calls
 }
 
 // GatewayConfig defines gateway behavior.
