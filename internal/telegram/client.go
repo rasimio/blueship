@@ -6,8 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"mime/multipart"
+	"net/http"
+	"net/textproto"
 	"net/url"
 	"regexp"
 	"strings"
@@ -344,7 +345,10 @@ func (c *Client) SendDocument(ctx context.Context, chatID string, filename strin
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 	_ = w.WriteField("chat_id", chatID)
-	part, err := w.CreateFormFile("document", filename)
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="document"; filename="%s"`, filename))
+	h.Set("Content-Type", "text/plain; charset=utf-8")
+	part, err := w.CreatePart(h)
 	if err != nil {
 		return fmt.Errorf("create form file: %w", err)
 	}
