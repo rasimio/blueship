@@ -638,17 +638,40 @@ func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx,
 	// Rule Engine
 	b.WriteString(fmt.Sprintf("=== RULE ENGINE ===\n%d rules matched by structured conditions\n\n", engineRuleCount))
 
-	// Cortex tool definitions
+	// Cortex tool definitions (grouped by source)
 	b.WriteString("=== CORTEX TOOLS ===\n")
 	if us.Registry != nil && g.deps.RoleTools != nil {
 		names := g.deps.RoleTools.Get("cortex")
 		defs := us.Registry.DefinitionsForNames(names)
+		local := make([]bs.ToolDefinition, 0)
+		peerDefs := make(map[string][]bs.ToolDefinition)
 		for _, d := range defs {
-			desc := strings.TrimSpace(d.Description)
-			if len(desc) > 120 {
-				desc = desc[:120] + "..."
+			peer := us.Registry.PeerForTool(d.Name)
+			if peer == "" {
+				local = append(local, d)
+			} else {
+				peerDefs[peer] = append(peerDefs[peer], d)
 			}
-			fmt.Fprintf(&b, "- %s: %s\n", d.Name, desc)
+		}
+		if len(local) > 0 {
+			b.WriteString("[local]\n")
+			for _, d := range local {
+				desc := strings.TrimSpace(d.Description)
+				if len(desc) > 120 {
+					desc = desc[:120] + "..."
+				}
+				fmt.Fprintf(&b, "  %s: %s\n", d.Name, desc)
+			}
+		}
+		for peer, pd := range peerDefs {
+			fmt.Fprintf(&b, "[%s]\n", peer)
+			for _, d := range pd {
+				desc := strings.TrimSpace(d.Description)
+				if len(desc) > 120 {
+					desc = desc[:120] + "..."
+				}
+				fmt.Fprintf(&b, "  %s: %s\n", d.Name, desc)
+			}
 		}
 		fmt.Fprintf(&b, "(%d tools)\n", len(defs))
 	}
@@ -1203,9 +1226,31 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 	if us.Registry != nil && g.deps.RoleTools != nil {
 		names := g.deps.RoleTools.Get("cortex")
 		if len(names) > 0 {
-			var sb strings.Builder
+			// Group tools by source: local vs each peer.
+			local := &strings.Builder{}
+			peerTools := make(map[string]*strings.Builder)
+
 			for _, def := range us.Registry.DefinitionsForNames(names) {
-				fmt.Fprintf(&sb, "- %s: %s\n", def.Name, strings.TrimSpace(def.Description))
+				peer := us.Registry.PeerForTool(def.Name)
+				line := fmt.Sprintf("- %s: %s\n", def.Name, strings.TrimSpace(def.Description))
+				if peer == "" {
+					local.WriteString(line)
+				} else {
+					if peerTools[peer] == nil {
+						peerTools[peer] = &strings.Builder{}
+					}
+					peerTools[peer].WriteString(line)
+				}
+			}
+
+			var sb strings.Builder
+			if local.Len() > 0 {
+				sb.WriteString("## Мои инструменты\n")
+				sb.WriteString(local.String())
+			}
+			for peer, buf := range peerTools {
+				fmt.Fprintf(&sb, "\n## Инструменты агента %s\n", peer)
+				sb.WriteString(buf.String())
 			}
 			if sb.Len() > 0 {
 				toolsList = strings.TrimRight(sb.String(), "\n")

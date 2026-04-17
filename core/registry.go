@@ -142,6 +142,14 @@ func (r *ToolRegistry) Definitions() []ToolDefinition {
 	return defs
 }
 
+// PeerForTool returns the peer name for a remote tool, or "" for local tools.
+func (r *ToolRegistry) PeerForTool(name string) string {
+	if t, ok := r.tools[name]; ok {
+		return t.PeerTag
+	}
+	return ""
+}
+
 // DefinitionsForNames returns tool definitions for the given names, preserving order.
 // Unknown names are silently skipped.
 func (r *ToolRegistry) DefinitionsForNames(names []string) []ToolDefinition {
