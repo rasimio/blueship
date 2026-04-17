@@ -61,13 +61,24 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	}
 
 	// 3. Resolve model: router format for LLM, display name for session.
+	// Task config may override the model role (default: "background").
+	modelRole := "background"
+	if task.Config != nil {
+		var roleCfg struct {
+			ModelRole string `json:"model_role"`
+		}
+		if json.Unmarshal(task.Config, &roleCfg) == nil && roleCfg.ModelRole != "" {
+			modelRole = roleCfg.ModelRole
+		}
+	}
+
 	routerModel := deps.Config.Models.Primary.ForRouter()
 	displayModel := deps.Config.Models.Primary.Name
 	if deps.ModelStore != nil {
-		if m := deps.ModelStore.ForRouter("background"); m != "" {
+		if m := deps.ModelStore.ForRouter(modelRole); m != "" {
 			routerModel = m
 		}
-		if ref := deps.ModelStore.Get("background"); ref.Name != "" {
+		if ref := deps.ModelStore.Get(modelRole); ref.Name != "" {
 			displayModel = ref.Name
 		}
 	}
