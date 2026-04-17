@@ -841,6 +841,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// Build context and run reflex/cortex pipeline.
 	var injectedCtx, reflexGuidance string
 	var postActions []bs.PostAction // executed after cortex response
+	var engineRuleCount int
 
 	// Rule engine pass for agents that run WITHOUT a ReflexPreparer (e.g.
 	// liya). Two responsibilities:
@@ -865,7 +866,8 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 				return
 			}
 		}
-		if len(engineRules) > 0 {
+		engineRuleCount = len(engineRules)
+		if engineRuleCount > 0 {
 			reflexGuidance = formatRulesAsGuidance(engineRules)
 			g.logger.Info("rule engine: non-silent rules matched (no-reflex path)",
 				"count", len(engineRules),
@@ -878,7 +880,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	if msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil && g.reflexModel() != "" {
 		// Reflex/Cortex pipeline: structured context → reflex plan → pre-actions → filtered cortex input.
 		var silent bool
-		injectedCtx, reflexGuidance, postActions, preTraces, silent = g.runReflexPipeline(ctx, us, msgText)
+		injectedCtx, reflexGuidance, postActions, preTraces, engineRuleCount, silent = g.runReflexPipeline(ctx, us, msgText)
 		if silent {
 			// Hard rule said "do not respond". Abort the whole turn — no
 			// cortex call, no message sent, no post-actions, no debug dump.
@@ -1014,8 +1016,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		// Debug mode: send full dump as txt file. Triggered by either the
 		// per-user /debug toggle or the always-on Gateway.Debug config flag.
 		if us.DebugMode || g.deps.Config.Gateway.Debug {
-			engineCount := strings.Count(reflexGuidance, "WHEN:")
-			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, result.ToolTraces, engineCount)
+			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, result.ToolTraces, engineRuleCount)
 		}
 		if g.deps.Config.TTS != nil && g.shouldSendVoice(ctx, us, sink) {
 			go g.synthesizeAndSendVoice(ctx, sink, us, reply)
@@ -1196,13 +1197,13 @@ const maxPreActions = 2
 // 3. Execute pre-actions (web_search etc.) → inject results into context
 // 4. Build cortex context: matched rules + research + AME traces
 //
-// Returns (injectedContext, reflexGuidance, postActions, preTraces, silent).
+// Returns (injectedContext, reflexGuidance, postActions, preTraces, engineRuleCount, silent).
 // When silent=true the caller MUST abort the turn without calling cortex or
 // sending any output — a structured rule with Silent=true matched.
-func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText string) (string, string, []bs.PostAction, []agent.ToolTrace, bool) {
+func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText string) (string, string, []bs.PostAction, []agent.ToolTrace, int, bool) {
 	rc := us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText)
 	if rc == nil {
-		return "", "", nil, nil, false
+		return "", "", nil, nil, 0, false
 	}
 
 	// Store emotional strategy for TTS instruct mapping.
@@ -1260,7 +1261,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 
 	if g.reflexPlanTemplate == "" {
 		g.logger.Warn("reflex-plan prompt not in DB, skipping reflex")
-		return rc.FullContext, "", nil, nil, false
+		return rc.FullContext, "", nil, nil, 0, false
 	}
 	notesBlock := rc.ActiveNotes
 	if notesBlock == "" {
@@ -1271,7 +1272,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 	reflexResult, err := g.callReflex(ctx, reflexPrompt)
 	if err != nil {
 		g.logger.Warn("reflex failed, using full context", "error", err)
-		return rc.FullContext, "", nil, nil, false
+		return rc.FullContext, "", nil, nil, 0, false
 	}
 
 	g.logger.Info("reflex plan",
@@ -1283,12 +1284,23 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		"tools", reflexResult.Tools,
 	)
 
-	// Low confidence → full fallback (all context, all role tools, no pre/post actions).
-	if reflexResult.Confidence < reflexConfidenceThreshold {
-		g.logger.Info("reflex low confidence, full fallback",
+	// Low confidence → use full context but still run the Rule Engine below.
+	// Previously this was a hard return that skipped Rule Engine entirely,
+	// causing scope:always rules (like "ВЫЗВАТЬ tool call НЕМЕДЛЕННО") to
+	// be silently dropped. Now we only skip reflex-specific outputs
+	// (matched_rules, pre_actions) but let the rule engine inject guidance.
+	lowConfidence := reflexResult.Confidence < reflexConfidenceThreshold
+	if lowConfidence {
+		g.logger.Info("reflex low confidence, using full context but keeping rule engine",
 			"confidence", reflexResult.Confidence,
 		)
-		return rc.FullContext, "", nil, nil, false
+		reflexResult.MatchedRules = nil
+		reflexResult.PreActions = nil
+		reflexResult.PostActions = nil
+	}
+	formattedTraces := rc.FormattedTraces
+	if lowConfidence {
+		formattedTraces = rc.FullContext
 	}
 
 	// Execute pre-actions (web_search etc.) with timeout.
@@ -1364,7 +1376,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 	}
 
 	// 2. Rules from structured rule engine (condition-based match).
-	// Rules can carry pre_actions and tools — these are merged into the pipeline.
+	var engineRuleCount int
 	if us.Deps.RuleEngine != nil {
 		engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
 			UserID:   us.Deps.UserID.String(),
@@ -1385,7 +1397,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 					"trigger", r.Trigger,
 					"chat_id", us.ChatID,
 				)
-				return "", "", nil, nil, true
+				return "", "", nil, nil, 0, true
 			}
 		}
 
@@ -1422,8 +1434,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 				}
 			}
 		}
-		if len(engineRules) > 0 {
-			g.logger.Info("rule engine matched", "count", len(engineRules))
+		engineRuleCount = len(engineRules)
+		if engineRuleCount > 0 {
+			g.logger.Info("rule engine matched", "count", engineRuleCount)
 		}
 	}
 
@@ -1452,7 +1465,6 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 
 	// When temporal_recall returned data, skip AME traces — they pollute
 	// temporal queries with unrelated high-scoring memories from other dates.
-	formattedTraces := rc.FormattedTraces
 	for _, pa := range preActionsToRun {
 		if pa.Tool == "temporal_recall" && researchBlock.Len() > 50 {
 			formattedTraces = ""
@@ -1460,7 +1472,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		}
 	}
 
-	return formattedTraces, guidance.String(), reflexResult.PostActions, preTraces, false
+	return formattedTraces, guidance.String(), reflexResult.PostActions, preTraces, engineRuleCount, false
 }
 
 // executePostActions runs post-cortex actions (save reflection, etc.).
