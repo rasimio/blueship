@@ -360,13 +360,23 @@ func (s *Ship) startA2A(ctx context.Context, deps *Deps, reg *moduleRegistry) er
 	// per-startup mirroring step anymore — the DB row is authoritative.
 
 	dispatcher := a2a.NewRegistryDispatcher(&registryShim{inner: a2aReg})
+
+	// Adapt core.A2AConfig.CallbackHandler to a2a.CallbackHandler.
+	var cbHandler a2a.CallbackHandler
+	if s.cfg.A2A.CallbackHandler != nil {
+		h := s.cfg.A2A.CallbackHandler
+		cbHandler = func(ctx context.Context, cb a2a.Callback) {
+			h(ctx, cb.Peer, cb.Event, cb.Payload)
+		}
+	}
+
 	srv := a2aserver.New(a2aserver.Config{
 		Name:        s.cfg.A2A.Name,
 		Description: "BlueShip A2A agent",
 		Version:     s.cfg.A2A.Version,
 		BaseURL:     s.cfg.A2A.BaseURL,
 		AuthToken:   s.cfg.A2A.AuthToken,
-	}, store, dispatcher, s.logger)
+	}, store, dispatcher, cbHandler, s.logger)
 
 	// Start HTTP listener in the background; shutdown on ctx.Done.
 	if s.cfg.A2A.Port > 0 {

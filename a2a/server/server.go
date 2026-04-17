@@ -48,11 +48,12 @@ type Config struct {
 
 // Server is the A2A HTTP server.
 type Server struct {
-	cfg    Config
-	store  *store.Store
-	disp   Dispatcher
-	logger *slog.Logger
-	mux    *http.ServeMux
+	cfg             Config
+	store           *store.Store
+	disp            Dispatcher
+	callbackHandler a2a.CallbackHandler
+	logger          *slog.Logger
+	mux             *http.ServeMux
 
 	// live SSE subscribers: map[callID] -> list of channels. Each running
 	// async call gets one channel per connected SSE client; Emit writes
@@ -63,14 +64,15 @@ type Server struct {
 
 // New constructs a Server. Call Routes() (or RegisterOn) to install its
 // handlers on an http.ServeMux owned by the caller.
-func New(cfg Config, st *store.Store, disp Dispatcher, logger *slog.Logger) *Server {
+func New(cfg Config, st *store.Store, disp Dispatcher, cbHandler a2a.CallbackHandler, logger *slog.Logger) *Server {
 	s := &Server{
-		cfg:    cfg,
-		store:  st,
-		disp:   disp,
-		logger: logger,
-		mux:    http.NewServeMux(),
-		subs:   make(map[string][]chan a2a.Event),
+		cfg:             cfg,
+		store:           st,
+		disp:            disp,
+		callbackHandler: cbHandler,
+		logger:          logger,
+		mux:             http.NewServeMux(),
+		subs:            make(map[string][]chan a2a.Event),
 	}
 	s.routes()
 	return s
@@ -87,6 +89,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/.well-known/agent", s.handleAgentCard)
 	s.mux.HandleFunc("/a2a/invoke", s.auth(s.handleInvoke))
 	s.mux.HandleFunc("/a2a/events", s.auth(s.handleEvents))
+	s.mux.HandleFunc("/a2a/callback", s.auth(s.handleCallback))
 	s.mux.HandleFunc("/a2a/health", s.handleHealth)
 }
 
@@ -135,6 +138,29 @@ func (s *Server) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 // handleHealth is a cheap liveness endpoint.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleCallback is POST /a2a/callback — fire-and-forget push notification.
+func (s *Server) handleCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST", "")
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10)) // 64KB
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_body", err.Error(), "")
+		return
+	}
+	var cb a2a.Callback
+	if err := json.Unmarshal(body, &cb); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_json", err.Error(), "")
+		return
+	}
+	s.logger.Info("a2a: callback received", "peer", cb.Peer, "event", cb.Event)
+	if s.callbackHandler != nil {
+		go s.callbackHandler(r.Context(), cb)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleInvoke is POST /a2a/invoke.

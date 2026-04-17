@@ -1,6 +1,10 @@
 package core
 
-import "time"
+import (
+	"context"
+	"encoding/json"
+	"time"
+)
 
 // Config controls BlueShip runtime behavior.
 // All fields have sensible defaults; only LLM, Transport, and DB are required.
@@ -138,9 +142,13 @@ type A2AConfig struct {
 	TraceLevel  string // "off" | "errors" | "full" (default: "full" in dev, "errors" in prod)
 
 	// Peers lists remote ships this ship knows about. At startup each one
-	// is discovered, its agent card cached, and any tool in UseTools gets
-	// registered as a RemoteTool in the local ToolRegistry.
+	// is discovered, its agent card cached, and tools registered as
+	// RemoteTools in the local ToolRegistry.
 	Peers []A2APeerConfig
+
+	// CallbackHandler is called when a peer sends a push notification via
+	// POST /a2a/callback. Nil = callbacks silently dropped.
+	CallbackHandler func(ctx context.Context, peer, event string, payload json.RawMessage) `yaml:"-" json:"-"`
 }
 
 // A2APeerConfig describes a known remote ship.

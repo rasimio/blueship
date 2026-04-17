@@ -266,6 +266,38 @@ func (c *Client) SubscribeEvents(ctx context.Context, remoteHandle string, since
 	}
 }
 
+// SendCallback posts a fire-and-forget notification to the peer.
+func (c *Client) SendCallback(ctx context.Context, event string, payload any) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal callback payload: %w", err)
+	}
+	cb := a2a.Callback{
+		Peer:    "self", // overridden by the server from auth header / config
+		Event:   event,
+		Payload: data,
+	}
+	body, _ := json.Marshal(cb)
+	url := strings.TrimRight(c.peer.BaseURL, "/") + "/a2a/callback"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.addAuth(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("callback POST: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("callback: status %d: %s", resp.StatusCode, string(b))
+	}
+	c.logger.Info("a2a: callback sent", "peer", c.peer.Name, "event", event)
+	return nil
+}
+
 // addAuth stamps the peer's bearer token on a request.
 func (c *Client) addAuth(req *http.Request) {
 	if c.peer.AuthToken != "" {

@@ -113,6 +113,20 @@ type AuthInfo struct {
 	Type string `json:"type"` // "bearer" for shared secret
 }
 
+// Callback is a push notification from one ship to another. Unlike tool
+// invocations (pull), callbacks are fire-and-forget: the sender does not
+// wait for a result. Used for status change notifications, completion
+// events, and other async updates between peers.
+type Callback struct {
+	Peer    string          `json:"peer"`    // sender name
+	Event   string          `json:"event"`   // e.g. "task_status_changed"
+	Payload json.RawMessage `json:"payload"` // event-specific data
+}
+
+// CallbackHandler is called by the A2A server when a peer sends a callback.
+// Implementations should return quickly — heavy work goes into goroutines.
+type CallbackHandler func(ctx context.Context, cb Callback)
+
 // Peer is a remote ship this one knows about.
 type Peer struct {
 	ID            string    `db:"id"`
