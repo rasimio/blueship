@@ -669,7 +669,10 @@ func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx,
 		if t.Error {
 			errMark = " [ERROR]"
 		}
-		b.WriteString(fmt.Sprintf("[%s] %s(%s)%s\n", src, t.Name, t.Input, errMark))
+		fmt.Fprintf(&b, "[%s] %s(%s)%s\n", src, t.Name, t.Input, errMark)
+		if t.Output != "" {
+			fmt.Fprintf(&b, "  → %s\n", t.Output)
+		}
 	}
 
 	// Send as file
@@ -1258,7 +1261,11 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 		if len(inputStr) > 200 {
 			inputStr = inputStr[:200] + "..."
 		}
-		preTraces = append(preTraces, agent.ToolTrace{Name: pa.Tool, Input: inputStr, Error: isError})
+		outputStr := result
+		if len(outputStr) > 500 {
+			outputStr = outputStr[:500] + "..."
+		}
+		preTraces = append(preTraces, agent.ToolTrace{Name: pa.Tool, Input: inputStr, Output: outputStr, Error: isError})
 		if isError {
 			g.logger.Warn("reflex pre-action failed", "tool", pa.Tool, "error", result)
 			continue
@@ -1357,7 +1364,11 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 				if len(inputStr) > 200 {
 					inputStr = inputStr[:200] + "..."
 				}
-				preTraces = append(preTraces, agent.ToolTrace{Name: pa.Tool + " [rule]", Input: inputStr, Error: isError})
+				ruleOutputStr := result
+				if len(ruleOutputStr) > 500 {
+					ruleOutputStr = ruleOutputStr[:500] + "..."
+				}
+				preTraces = append(preTraces, agent.ToolTrace{Name: pa.Tool + " [rule]", Input: inputStr, Output: ruleOutputStr, Error: isError})
 				if !isError {
 					if researchBlock.Len() == 0 {
 						researchBlock.WriteString("[research]\n")

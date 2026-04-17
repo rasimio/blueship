@@ -67,6 +67,7 @@ func (a *Loop) SetCompactor(c *Compactor) {
 type ToolTrace struct {
 	Name   string `json:"name"`
 	Input  string `json:"input"`
+	Output string `json:"output,omitempty"`
 	Error  bool   `json:"error,omitempty"`
 }
 
@@ -250,7 +251,11 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 				if len(inputStr) > 200 {
 					inputStr = inputStr[:200] + "..."
 				}
-				traces = append(traces, ToolTrace{Name: block.Name, Input: inputStr, Error: isError})
+				outputStr := result
+				if len(outputStr) > 500 {
+					outputStr = outputStr[:500] + "..."
+				}
+				traces = append(traces, ToolTrace{Name: block.Name, Input: inputStr, Output: outputStr, Error: isError})
 			}
 
 			err = a.store.Append(ctx, cfg.SessionID, bs.Message{
