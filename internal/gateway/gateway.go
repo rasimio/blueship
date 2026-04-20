@@ -384,7 +384,16 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 			quoted = msg.ReplyToMessage.Caption
 		}
 		if quoted != "" {
+			// Truncate very long quoted messages to keep context manageable
+			if len(quoted) > 500 {
+				quoted = quoted[:500] + "..."
+			}
 			text = fmt.Sprintf("[reply to: %s]\n\n%s", quoted, text)
+		} else {
+			g.logger.Warn("reply-to message has no text/caption",
+				"reply_msg_id", msg.ReplyToMessage.MessageID,
+				"has_document", msg.ReplyToMessage.Document != nil,
+			)
 		}
 	}
 
