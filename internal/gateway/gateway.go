@@ -52,7 +52,8 @@ type Gateway struct {
 	// Reflex pipeline prompts (loaded from system_prompts table).
 	reflexSystemPrompt   string // system prompt for reflex LLM call
 	reflexPlanTemplate   string // user prompt template (has %s placeholders for rules, tools, message)
-	extractInsightPrompt string // system prompt for insight extraction
+	extractInsightPrompt    string   // system prompt for insight extraction
+	selfReflectionMarkers  []string // loaded from system_prompts, used by looksLikeSelfReflection
 
 	mu sync.Mutex
 	users map[string]*UserState // keyed by canonical chatID ("telegram:123", "voice:owner")
@@ -265,6 +266,12 @@ func (g *Gateway) loadSystemPromptsFromDB(db *sqlx.DB) error {
 	}
 	if prompts["extract-insight"] != "" {
 		g.extractInsightPrompt = prompts["extract-insight"]
+	}
+	if raw := prompts["self_reflection_markers"]; raw != "" {
+		var markers []string
+		if json.Unmarshal([]byte(raw), &markers) == nil && len(markers) > 0 {
+			g.selfReflectionMarkers = markers
+		}
 	}
 
 	// Log all loaded prompts dynamically.
@@ -1112,7 +1119,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// when reflex didn't prescribe a post_action. Long responses with
 	// self-reference markers ("я поняла", "мой вывод", "я осознаю") likely
 	// contain insights worth persisting.
-	if len(postActions) == 0 && len(reply) > 300 && looksLikeSelfReflection(reply) {
+	if len(postActions) == 0 && len(reply) > 300 && g.looksLikeSelfReflection(reply) {
 		postActions = append(postActions, bs.PostAction{Type: "save_reflection"})
 		g.logger.Info("auto-detected self-reflection in cortex response", "reply_len", len(reply))
 	}
@@ -1648,19 +1655,16 @@ func (g *Gateway) extractInsight(ctx context.Context, response, extractType stri
 }
 
 // looksLikeSelfReflection detects cortex responses that contain self-referential
-// insights or reflections worth auto-saving. Checks for Russian self-reference
-// markers that indicate the bot is formulating conclusions about itself.
-func looksLikeSelfReflection(text string) bool {
-	lower := strings.ToLower(text)
-	markers := []string{
-		"я поняла", "я понял", "мой вывод", "мои выводы",
-		"я осознаю", "я осознала", "для меня это",
-		"я теперь понимаю", "я вижу, что", "я вижу, как",
-		"я не просто", "я — это", "моя уязвимость",
-		"моя память", "мои границы", "я запомнила",
+// insights or reflections worth auto-saving. Markers are loaded from
+// system_prompts.self_reflection_markers (JSON array); falls back to hardcoded
+// defaults if not configured.
+func (g *Gateway) looksLikeSelfReflection(text string) bool {
+	if len(g.selfReflectionMarkers) == 0 {
+		return false
 	}
+	lower := strings.ToLower(text)
 	hits := 0
-	for _, m := range markers {
+	for _, m := range g.selfReflectionMarkers {
 		if strings.Contains(lower, m) {
 			hits++
 		}
