@@ -282,9 +282,11 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 }
 
 // RunStream is like Run but streams text chunks via onText callback.
-// Used by voice transport for sentence-level TTS pipelining.
+// Used by voice transport for sentence-level TTS pipelining, and by Telegram
+// for progressive message editing. onText fires for each text chunk from the
+// LLM. onToolUse fires before each tool is executed (nil = ignore).
 // Tool call turns use batch mode; only the final text response is streamed.
-func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, onText func(string)) (string, error) {
+func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, onText func(string), onToolUse func(name string)) (string, error) {
 	streamProvider, ok := a.provider.(bs.StreamCompletionProvider)
 	if !ok {
 		// Fallback to batch if provider doesn't support streaming
@@ -399,6 +401,9 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 					continue
 				}
 				a.logger.Info("executing tool", "tool", block.Name, "tool_use_id", block.ID)
+				if onToolUse != nil {
+					onToolUse(block.Name)
+				}
 				result, isError := a.registry.Execute(ctx, block.Name, block.Input)
 				toolResults = append(toolResults, bs.ContentBlock{
 					Type:      "tool_result",

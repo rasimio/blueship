@@ -970,7 +970,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			}
 		}
 
-		reply, err := loop.RunStream(ctx, runCfg, content, onText)
+		reply, err := loop.RunStream(ctx, runCfg, content, onText, nil)
 		if err != nil {
 			g.logger.Error("agent loop error", "chat_id", us.ChatID, "error", err)
 			g.sendDebugError(ctx, sink, "agent", err)
@@ -998,36 +998,120 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		return
 	}
 
-	// Non-streaming path (Telegram)
-	result, err := loop.RunTracked(ctx, runCfg, content)
+	// Streaming path for Telegram: send placeholder, edit as chunks arrive.
+	tgSink, isTelegram := sink.(*telegramSink)
+	if !isTelegram {
+		// Non-Telegram transports: batch mode (unchanged).
+		result, err := loop.RunTracked(ctx, runCfg, content)
+		if err != nil {
+			g.logger.Error("agent loop error", "chat_id", us.ChatID, "error", err)
+			g.sendDebugError(ctx, sink, "agent", err)
+			return
+		}
+		reply := sanitizeLeakedToolCalls(result.Text)
+		if reply != "" {
+			if len(postActions) > 0 {
+				g.executePostActions(ctx, us, postActions, reply)
+			}
+			sink.SendText(ctx, reply)
+		}
+		return
+	}
+
+	// Telegram streaming: progressive message editing.
+	var (
+		streamMsgID int         // Telegram message ID for edits
+		streamBuf   strings.Builder
+		lastEdit    time.Time
+		toolStatus  string      // current tool being executed
+		mu          sync.Mutex
+	)
+
+	const editInterval = 600 * time.Millisecond
+
+	flushEdit := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if streamMsgID == 0 {
+			return
+		}
+		text := strings.TrimSpace(streamBuf.String())
+		if toolStatus != "" {
+			text += "\n\n`" + toolStatus + "`"
+		}
+		if text == "" {
+			return
+		}
+		if time.Since(lastEdit) < editInterval {
+			return
+		}
+		g.tg.EditMessageText(ctx, tgSink.chatID, streamMsgID, text, nil)
+		lastEdit = time.Now()
+	}
+
+	onText := func(chunk string) {
+		mu.Lock()
+		streamBuf.WriteString(chunk)
+		mu.Unlock()
+		flushEdit()
+	}
+
+	onToolUse := func(name string) {
+		mu.Lock()
+		toolStatus = ">> " + name + "..."
+		mu.Unlock()
+		// Send initial message on first tool call if not sent yet
+		if streamMsgID == 0 {
+			mu.Lock()
+			text := strings.TrimSpace(streamBuf.String())
+			if text == "" {
+				text = "`>> " + name + "...`"
+			}
+			mu.Unlock()
+			res, err := g.tg.SendMessage(ctx, fmt.Sprintf("%d", tgSink.chatID), text)
+			if err == nil && res != nil && res.Result.MessageID != 0 {
+				streamMsgID = res.Result.MessageID
+				lastEdit = time.Now()
+			}
+		} else {
+			flushEdit()
+		}
+	}
+
+	reply, err := loop.RunStream(ctx, runCfg, content, onText, onToolUse)
 	if err != nil {
-		g.logger.Error("agent loop error",
-			"chat_id", us.ChatID,
-			"error", err,
-		)
+		g.logger.Error("agent loop error", "chat_id", us.ChatID, "error", err)
 		g.sendDebugError(ctx, sink, "agent", err)
 		return
 	}
 
-	reply := sanitizeLeakedToolCalls(result.Text)
+	reply = sanitizeLeakedToolCalls(reply)
+	if reply == "" {
+		return
+	}
 
-	if reply != "" && len(postActions) > 0 {
+	// Clear tool status for final message
+	mu.Lock()
+	toolStatus = ""
+	mu.Unlock()
+
+	if streamMsgID != 0 {
+		// Final edit with complete text
+		g.tg.EditMessageText(ctx, tgSink.chatID, streamMsgID, reply, nil)
+	} else {
+		// No edits happened (no tools called, fast response) — just send
+		sink.SendText(ctx, reply)
+	}
+
+	if len(postActions) > 0 {
 		g.executePostActions(ctx, us, postActions, reply)
 	}
 
-	if reply != "" {
-		if err := sink.SendText(ctx, reply); err != nil {
-			g.logger.Error("send reply error", "chat_id", us.ChatID, "error", err)
-		}
-
-		// Debug mode: send full dump as txt file. Triggered by either the
-		// per-user /debug toggle or the always-on Gateway.Debug config flag.
-		if us.DebugMode || g.deps.Config.Gateway.Debug {
-			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, result.ToolTraces, engineRuleCount)
-		}
-		if g.deps.Config.TTS != nil && g.shouldSendVoice(ctx, us, sink) {
-			go g.synthesizeAndSendVoice(ctx, sink, us, reply)
-		}
+	if us.DebugMode || g.deps.Config.Gateway.Debug {
+		go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, nil, engineRuleCount)
+	}
+	if g.deps.Config.TTS != nil && g.shouldSendVoice(ctx, us, sink) {
+		go g.synthesizeAndSendVoice(ctx, sink, us, reply)
 	}
 }
 
