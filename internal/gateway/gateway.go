@@ -518,14 +518,12 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 		return nil, fmt.Errorf("core DB: %w", err)
 	}
 
-	// Resolve userID from chatID (or fallback to owner for non-telegram transports).
+	// Resolve userID from chatID. Unknown users are rejected — no fallback to
+	// owner, which would let any stranger chat as the owner.
 	userID, err := user.ResolveByChatID(ctx, coreDB, chatID)
 	if err != nil {
-		ownerID, ownerErr := user.ResolveOwner(ctx, coreDB)
-		if ownerErr != nil {
-			return nil, fmt.Errorf("resolve user %s: %w", chatID, err)
-		}
-		userID = ownerID
+		g.logger.Info("rejected unknown chat_id", "chat_id", chatID, "error", err)
+		return nil, fmt.Errorf("unknown chat_id %s: not in user_profiles", chatID)
 	}
 
 	var isOwner bool
