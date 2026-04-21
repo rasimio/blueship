@@ -1049,33 +1049,38 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		lastEdit = time.Now()
 	}
 
+	// ensureMsg creates the Telegram message on first content (text or tool).
+	ensureMsg := func(text string) {
+		if streamMsgID != 0 {
+			return
+		}
+		res, err := g.tg.SendMessage(ctx, fmt.Sprintf("%d", tgSink.chatID), text)
+		if err == nil && res != nil && res.Result.MessageID != 0 {
+			streamMsgID = res.Result.MessageID
+			lastEdit = time.Now()
+		}
+	}
+
 	onText := func(chunk string) {
 		mu.Lock()
 		streamBuf.WriteString(chunk)
+		text := strings.TrimSpace(streamBuf.String())
 		mu.Unlock()
-		flushEdit()
+
+		if streamMsgID == 0 && len(text) > 10 {
+			// First meaningful chunk — create message
+			ensureMsg(text)
+		} else {
+			flushEdit()
+		}
 	}
 
 	onToolUse := func(name string) {
 		mu.Lock()
 		toolStatus = ">> " + name + "..."
 		mu.Unlock()
-		// Send initial message on first tool call if not sent yet
-		if streamMsgID == 0 {
-			mu.Lock()
-			text := strings.TrimSpace(streamBuf.String())
-			if text == "" {
-				text = "`>> " + name + "...`"
-			}
-			mu.Unlock()
-			res, err := g.tg.SendMessage(ctx, fmt.Sprintf("%d", tgSink.chatID), text)
-			if err == nil && res != nil && res.Result.MessageID != 0 {
-				streamMsgID = res.Result.MessageID
-				lastEdit = time.Now()
-			}
-		} else {
-			flushEdit()
-		}
+		ensureMsg("`>> " + name + "...`")
+		flushEdit()
 	}
 
 	reply, err := loop.RunStream(ctx, runCfg, content, onText, onToolUse)
