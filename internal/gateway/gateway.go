@@ -1968,5 +1968,13 @@ func sanitizeLeakedToolCalls(text string) string {
 		text = strings.ReplaceAll(text, tag, "")
 	}
 
+	// Remove Gemma thinking/channel control tokens
+	for _, tok := range []string{"<channel|>", "</channel>", "\nthought\n", "\n\nthought\n\n"} {
+		text = strings.ReplaceAll(text, tok, "")
+	}
+	// Standalone "thought" at start of response
+	text = strings.TrimPrefix(text, "thought\n")
+	text = strings.TrimPrefix(text, "thought")
+
 	return strings.TrimSpace(text)
 }
