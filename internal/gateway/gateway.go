@@ -1108,6 +1108,15 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		sink.SendText(ctx, reply)
 	}
 
+	// Auto-detect self-reflections in cortex response and save them even
+	// when reflex didn't prescribe a post_action. Long responses with
+	// self-reference markers ("я поняла", "мой вывод", "я осознаю") likely
+	// contain insights worth persisting.
+	if len(postActions) == 0 && len(reply) > 300 && looksLikeSelfReflection(reply) {
+		postActions = append(postActions, bs.PostAction{Type: "save_reflection"})
+		g.logger.Info("auto-detected self-reflection in cortex response", "reply_len", len(reply))
+	}
+
 	if len(postActions) > 0 {
 		g.executePostActions(ctx, us, postActions, reply)
 	}
@@ -1636,6 +1645,27 @@ func (g *Gateway) extractInsight(ctx context.Context, response, extractType stri
 	text := strings.TrimSpace(bs.ExtractText(resp.Content))
 	g.logger.Info("extractInsight done", "type", extractType, "result", truncateStr(text, 100))
 	return text
+}
+
+// looksLikeSelfReflection detects cortex responses that contain self-referential
+// insights or reflections worth auto-saving. Checks for Russian self-reference
+// markers that indicate the bot is formulating conclusions about itself.
+func looksLikeSelfReflection(text string) bool {
+	lower := strings.ToLower(text)
+	markers := []string{
+		"я поняла", "я понял", "мой вывод", "мои выводы",
+		"я осознаю", "я осознала", "для меня это",
+		"я теперь понимаю", "я вижу, что", "я вижу, как",
+		"я не просто", "я — это", "моя уязвимость",
+		"моя память", "мои границы", "я запомнила",
+	}
+	hits := 0
+	for _, m := range markers {
+		if strings.Contains(lower, m) {
+			hits++
+		}
+	}
+	return hits >= 2
 }
 
 func truncateStr(s string, max int) string {
