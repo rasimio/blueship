@@ -2148,11 +2148,7 @@ func resolveDisambiguation(msg string, options []bs.ClarificationOption) *bs.Cla
 		}
 	}
 
-	// Short non-numeric message (< 30 chars) that didn't match labels —
-	// likely an affirmative. Resolve to first option.
-	if len(msg) < 30 {
-		return &options[0]
-	}
-
+	// Can't resolve programmatically — return nil.
+	// Cortex will see the disambiguation in session history and decide from context.
 	return nil
 }
