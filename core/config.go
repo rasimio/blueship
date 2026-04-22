@@ -150,10 +150,10 @@ type A2AConfig struct {
 	// POST /a2a/callback. Nil = callbacks silently dropped.
 	CallbackHandler func(ctx context.Context, peer, event string, payload json.RawMessage) `yaml:"-" json:"-"`
 
-	// TaskTrigger is signalled when a callback wakes a paused agent task.
-	// The scheduler listens on this to run immediately instead of waiting
-	// for the next tick. Initialized by Ship.Run if nil.
-	TaskTrigger chan struct{} `yaml:"-" json:"-"`
+	// TaskTrigger carries a peer task ID from the callback handler to the
+	// scheduler. The scheduler wakes the paused task and runs immediately.
+	// Empty string = just trigger a run without waking.
+	TaskTrigger chan string `yaml:"-" json:"-"`
 }
 
 // A2APeerConfig describes a known remote ship.

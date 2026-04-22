@@ -9,11 +9,12 @@ import (
 // RunLoop runs fn immediately, then on interval until ctx is cancelled.
 // Panics are recovered and logged.
 func RunLoop(ctx context.Context, logger *slog.Logger, name string, interval time.Duration, fn func(ctx context.Context) error) {
-	RunLoopWithTrigger(ctx, logger, name, interval, fn, nil)
+	RunLoopWithTrigger(ctx, logger, name, interval, fn, nil, nil)
 }
 
-// RunLoopWithTrigger is like RunLoop but also runs fn immediately when trigger fires.
-func RunLoopWithTrigger(ctx context.Context, logger *slog.Logger, name string, interval time.Duration, fn func(ctx context.Context) error, trigger <-chan struct{}) {
+// RunLoopWithTrigger is like RunLoop but also accepts a trigger channel.
+// When trigger fires with a value, onTrigger is called first, then fn runs.
+func RunLoopWithTrigger(ctx context.Context, logger *slog.Logger, name string, interval time.Duration, fn func(ctx context.Context) error, trigger <-chan string, onTrigger func(ctx context.Context, value string)) {
 	if interval <= 0 {
 		logger.Error("invalid loop interval, skipping", "name", name, "interval", interval)
 		return
@@ -53,7 +54,10 @@ func RunLoopWithTrigger(ctx context.Context, logger *slog.Logger, name string, i
 			return
 		case <-ticker.C:
 			run()
-		case <-trigger:
+		case val := <-trigger:
+			if onTrigger != nil {
+				onTrigger(ctx, val)
+			}
 			run()
 		}
 	}

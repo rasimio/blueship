@@ -220,7 +220,7 @@ func (s *Ship) Run(ctx context.Context) error {
 		agentSched = agenttask.NewScheduler(taskStore, s.handlers, globalRegistry, msgStore, deps, notifyFn, s.logger)
 
 		// Use trigger channel for instant callback wakeup (if configured).
-		var trigger <-chan struct{}
+		var trigger <-chan string
 		if s.cfg.A2A.TaskTrigger != nil {
 			trigger = s.cfg.A2A.TaskTrigger
 		}
@@ -228,7 +228,7 @@ func (s *Ship) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			scheduler.RunLoopWithTrigger(ctx, s.logger, "agent-tasks", 1*time.Minute, agentSched.Run, trigger)
+			scheduler.RunLoopWithTrigger(ctx, s.logger, "agent-tasks", 1*time.Minute, agentSched.Run, trigger, agentSched.WakeFromCallback)
 		}()
 	}
 

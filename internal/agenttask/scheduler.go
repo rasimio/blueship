@@ -53,6 +53,21 @@ func NewScheduler(
 
 // Run executes one scheduler tick: picks up pending tasks and dispatches handlers.
 // Called by scheduler.RunLoop every 60 seconds.
+// WakeFromCallback processes a peer task ID from the callback channel.
+// Called by RunLoopWithTrigger before Run().
+func (s *Scheduler) WakeFromCallback(ctx context.Context, peerTaskID string) {
+	if peerTaskID == "" {
+		return
+	}
+	wokenID, err := s.store.WakePausedByPeerTask(ctx, peerTaskID)
+	if err != nil {
+		s.logger.Info("agent-tasks: no paused task for callback", "peer_task", peerTaskID)
+		return
+	}
+	s.logger.Info("agent-tasks: woke paused task from callback",
+		"task_id", wokenID, "peer_task", peerTaskID)
+}
+
 func (s *Scheduler) Run(ctx context.Context) error {
 	s.logger.Info("agent-tasks: tick")
 
