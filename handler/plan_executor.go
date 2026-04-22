@@ -25,6 +25,7 @@ type PlanStep struct {
 type goalPlanProgress struct {
 	SessionID   string          `json:"session_id"`
 	PeerTaskID  string          `json:"peer_task_id,omitempty"`
+	RepoPath    string          `json:"repo_path,omitempty"` // set by code_repo_create, used in substitution
 	Plan        []PlanStep      `json:"plan,omitempty"`
 	CurrentStep int             `json:"current_step"`
 	LastResult  json.RawMessage `json:"last_result,omitempty"` // result from last tool call
@@ -159,11 +160,27 @@ Output ONLY the JSON array. No explanations.`, task.Title, desc, buildToolsList(
 
 	// Parse plan from LLM output.
 	plan, parseErr := parsePlan(reply)
-	if parseErr != nil {
-		deps.Logger.Warn("plan-executor: failed to parse plan, retrying next iteration",
-			"error", parseErr, "reply_len", len(reply))
-		progress.Phase = "plan_parse_error"
-		progress.Summary = fmt.Sprintf("Plan parse error: %v. Reply: %s", parseErr, truncate(reply, 300))
+	if parseErr != nil || len(plan) < 4 {
+		deps.Logger.Warn("plan-executor: invalid plan, retrying next iteration",
+			"error", parseErr, "steps", len(plan), "reply_len", len(reply))
+		progress.Phase = "plan_invalid"
+		progress.Summary = fmt.Sprintf("Plan invalid (%d steps). Reply: %s", len(plan), truncate(reply, 300))
+		progressJSON, _ := json.Marshal(progress)
+		return core.IterationResult{Progress: progressJSON}, nil
+	}
+
+	// Validate: plan must contain at least one "tool" step with code_task_create.
+	hasTaskCreate := false
+	for _, s := range plan {
+		if s.Action == "tool" && s.Tool == "code_task_create" {
+			hasTaskCreate = true
+			break
+		}
+	}
+	if !hasTaskCreate {
+		deps.Logger.Warn("plan-executor: plan missing code_task_create, retrying")
+		progress.Phase = "plan_invalid"
+		progress.Summary = "Plan missing code_task_create step"
 		progressJSON, _ := json.Marshal(progress)
 		return core.IterationResult{Progress: progressJSON}, nil
 	}
@@ -277,13 +294,15 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 
 	deps.Logger.Info("plan-executor: tool success", "tool", step.Tool, "result_len", len(result), "result_preview", truncate(result, 100))
 
-	// Extract peer_task_id from result if present.
+	// Extract known fields from result.
 	var resultMap map[string]any
 	if json.Unmarshal([]byte(result), &resultMap) == nil {
 		if tid, ok := resultMap["task_id"].(string); ok && tid != "" {
 			progress.PeerTaskID = tid
 		}
-		// Store full result for variable substitution.
+		if rp, ok := resultMap["repo_path"].(string); ok && rp != "" {
+			progress.RepoPath = rp
+		}
 		progress.LastResult = json.RawMessage(result)
 	}
 
@@ -397,6 +416,12 @@ func substituteVars(input json.RawMessage, progress *goalPlanProgress) json.RawM
 	}
 	s := string(input)
 	s = strings.ReplaceAll(s, "$peer_task_id", progress.PeerTaskID)
+
+	// Substitute repo_path variants — LLM writes $result.repo_path, $result.path, etc.
+	if progress.RepoPath != "" {
+		s = strings.ReplaceAll(s, "$result.repo_path", progress.RepoPath)
+		s = strings.ReplaceAll(s, "$result.path", progress.RepoPath)
+	}
 
 	// Substitute $result.field references.
 	if len(progress.LastResult) > 0 {
