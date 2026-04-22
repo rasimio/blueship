@@ -155,6 +155,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		UserID:          task.UserID,
 		Config:          s.deps.Config,
 		ContextInjector: s.deps.ContextInjector,
+		RuleEngine:      s.deps.RuleEngine,
 	}
 
 	// Apply deadline or default timeout.

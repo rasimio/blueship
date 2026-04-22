@@ -157,13 +157,50 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		msg += fmt.Sprintf("\n\nLow iteration budget: %d remaining.", remaining)
 	}
 
-	// 6. Inject context (active notes, etc.) if available.
+	// 6. Run Rule Engine (same pipeline as cortex gateway).
+	var ruleGuidance string
+	if deps.RuleEngine != nil {
+		now := time.Now().In(b.tz)
+		engineRules := deps.RuleEngine(ctx, core.RuleContext{
+			UserID:  task.UserID.String(),
+			Hour:    now.Hour(),
+			Message: msg,
+		})
+
+		if len(engineRules) > 0 {
+			var rb strings.Builder
+			rb.WriteString("[active rules]\n")
+			for _, r := range engineRules {
+				fmt.Fprintf(&rb, "WHEN: %s\nDO: %s\n\n", r.Trigger, r.Action)
+
+				// Execute pre-actions (same as gateway).
+				for _, pa := range r.PreActions {
+					if deps.Registry != nil {
+						deps.Registry.Execute(ctx, pa.Tool, pa.Input)
+					}
+				}
+			}
+			rb.WriteString("[/active rules]")
+			ruleGuidance = rb.String()
+		}
+	}
+
+	// 7. Inject context (active notes, etc.) if available.
 	var injectedCtx string
 	if deps.ContextInjector != nil {
 		injectedCtx = deps.ContextInjector(ctx, task.UserID.String(), msg)
 	}
 
-	// 7. Run agent loop with tool tracing and compaction.
+	// Append rule guidance to injected context.
+	if ruleGuidance != "" {
+		if injectedCtx != "" {
+			injectedCtx += "\n\n" + ruleGuidance
+		} else {
+			injectedCtx = ruleGuidance
+		}
+	}
+
+	// 8. Run agent loop with tool tracing and compaction.
 	loop := agent.NewLoop(deps.LLM, deps.Store, deps.Registry, deps.RoleTools, deps.Config, deps.Logger)
 	loop.SetCompactor(agent.NewCompactor(deps.LLM, deps.Config, deps.Logger))
 
