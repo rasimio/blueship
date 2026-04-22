@@ -167,6 +167,44 @@ func (s *AgentTaskStore) EnsureRecurring(ctx context.Context, userID uuid.UUID, 
 	return err
 }
 
+// PauseTask saves progress, increments iteration, and sets status to 'paused'.
+// Used by goal handlers that need to wait for an external event (e.g. A2A callback).
+func (s *AgentTaskStore) PauseTask(ctx context.Context, id uuid.UUID, progress json.RawMessage) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE agent_tasks
+		SET progress = $2, status = 'paused', iteration = iteration + 1
+		WHERE id = $1`, id, progress)
+	return err
+}
+
+// WakeGoalByLiyaTask finds a paused goal task waiting for the given Liya task ID
+// and sets it back to pending. Returns the goal task ID or sql.ErrNoRows if none found.
+func (s *AgentTaskStore) WakeGoalByLiyaTask(ctx context.Context, liyaTaskID string) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := s.db.GetContext(ctx, &id, `
+		UPDATE agent_tasks
+		SET status = 'pending'
+		WHERE status = 'paused'
+		  AND handler = 'goal'
+		  AND progress->>'liya_task_id' = $1
+		RETURNING id`, liyaTaskID)
+	return id, err
+}
+
+// WakeStalePaused resets paused tasks back to pending if they've been paused too long
+// (safety net for lost callbacks). Returns the number of tasks woken.
+func (s *AgentTaskStore) WakeStalePaused(ctx context.Context, staleAfter time.Duration) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE agent_tasks
+		SET status = 'pending'
+		WHERE status = 'paused' AND last_run_at < $1`,
+		time.Now().Add(-staleAfter))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // ListForUser returns tasks for a user, optionally filtered by status.
 func (s *AgentTaskStore) ListForUser(ctx context.Context, userID uuid.UUID, status string) ([]AgentTask, error) {
 	var tasks []AgentTask

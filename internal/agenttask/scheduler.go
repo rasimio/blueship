@@ -66,6 +66,13 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		s.logger.Info("agent-tasks: reset stale tasks", "count", n)
 	}
 
+	// Watchdog: wake paused tasks that haven't received a callback in 30 min.
+	if n, err := s.store.WakeStalePaused(ctx, 30*time.Minute); err != nil {
+		s.logger.Warn("agent-tasks: wake stale paused failed", "error", err)
+	} else if n > 0 {
+		s.logger.Info("agent-tasks: woke stale paused tasks (lost callback?)", "count", n)
+	}
+
 	tasks, err := s.store.PendingTasks(ctx)
 	if err != nil {
 		s.logger.Error("agent-tasks: pending query failed", "error", err)
@@ -180,6 +187,18 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	// Notify user only if handler explicitly requested it (not scheduler's decision).
 	if result.Notify != "" && s.notify != nil && !strings.Contains(result.Notify, "[no-op]") {
 		s.notify(dbCtx, task.UserID, result.Notify)
+	}
+
+	if result.Pause {
+		s.logger.Info("agent-tasks: paused (waiting for callback)",
+			"task_id", task.ID,
+			"handler", task.Handler,
+			"iteration", task.Iteration+1,
+		)
+		if err := s.store.PauseTask(dbCtx, task.ID, result.Progress); err != nil {
+			s.logger.Error("agent-tasks: pause update error", "error", err)
+		}
+		return
 	}
 
 	if result.Done {

@@ -49,6 +49,7 @@ type AgentTask struct {
 // IterationResult is returned by AgentHandler.Run after each iteration.
 type IterationResult struct {
 	Done     bool            // true = task complete
+	Pause    bool            // true = pause until external wakeup (e.g. A2A callback)
 	Progress json.RawMessage // saved to DB between iterations
 	Output   string          // final text (when Done=true)
 	Notify   string          // send to user immediately (milestone, blocker)
