@@ -282,14 +282,19 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 					if name, ok := inp["name"].(string); ok && name != "" {
 						listResult, listErr := deps.Registry.Execute(ctx, "code_repo_list", nil)
 						if !listErr {
-							var repos []map[string]any
-							if json.Unmarshal([]byte(listResult), &repos) == nil {
-								for _, r := range repos {
-									if rn, _ := r["name"].(string); rn == name {
-										if rp, _ := r["path"].(string); rp != "" {
-											progress.RepoPath = rp
-											result = fmt.Sprintf(`{"repo_path":"%s","name":"%s","status":"already_exists"}`, rp, name)
-										}
+							// code_repo_list returns {"repos": [...], "count": N}
+							var wrapper struct {
+								Repos []struct {
+									Name string `json:"name"`
+									Path string `json:"path"`
+								} `json:"repos"`
+							}
+							if json.Unmarshal([]byte(listResult), &wrapper) == nil {
+								for _, r := range wrapper.Repos {
+									if r.Name == name && r.Path != "" {
+										progress.RepoPath = r.Path
+										result = fmt.Sprintf(`{"repo_path":"%s","name":"%s","status":"already_exists"}`, r.Path, name)
+										deps.Logger.Info("plan-executor: found repo path from list", "name", name, "path", r.Path)
 									}
 								}
 							}
@@ -325,16 +330,18 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 		// Fallback: if name is present but no path, ask registry for repo info.
 		if progress.RepoPath == "" {
 			if name, ok := resultMap["name"].(string); ok && name != "" {
-				// Try code_repo_list to find the path.
 				listResult, isErr := deps.Registry.Execute(ctx, "code_repo_list", nil)
 				if !isErr {
-					var repos []map[string]any
-					if json.Unmarshal([]byte(listResult), &repos) == nil {
-						for _, r := range repos {
-							if rn, _ := r["name"].(string); rn == name {
-								if rp, _ := r["path"].(string); rp != "" {
-									progress.RepoPath = rp
-								}
+					var wrapper struct {
+						Repos []struct {
+							Name string `json:"name"`
+							Path string `json:"path"`
+						} `json:"repos"`
+					}
+					if json.Unmarshal([]byte(listResult), &wrapper) == nil {
+						for _, r := range wrapper.Repos {
+							if r.Name == name && r.Path != "" {
+								progress.RepoPath = r.Path
 							}
 						}
 					}
