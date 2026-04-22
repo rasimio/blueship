@@ -395,10 +395,31 @@ func substituteVars(input json.RawMessage, progress *goalPlanProgress) json.RawM
 	if len(progress.LastResult) > 0 {
 		var lastResult map[string]any
 		if json.Unmarshal(progress.LastResult, &lastResult) == nil {
+			// First pass: exact field match.
 			for k, v := range lastResult {
 				placeholder := fmt.Sprintf("$result.%s", k)
 				if str, ok := v.(string); ok {
 					s = strings.ReplaceAll(s, placeholder, str)
+				}
+			}
+			// Second pass: if any $result.* remains unresolved, try to match
+			// by suffix (e.g. $result.path → repo_path, $result.id → task_id).
+			if strings.Contains(s, "$result.") {
+				for k, v := range lastResult {
+					str, ok := v.(string)
+					if !ok || str == "" {
+						continue
+					}
+					// Check if any unresolved placeholder ends with this key's suffix.
+					// E.g. "repo_path" matches "$result.path", "task_id" matches "$result.id".
+					for suffix := k; strings.Contains(suffix, "_"); {
+						parts := strings.SplitN(suffix, "_", 2)
+						suffix = parts[1]
+						placeholder := fmt.Sprintf("$result.%s", suffix)
+						if strings.Contains(s, placeholder) {
+							s = strings.ReplaceAll(s, placeholder, str)
+						}
+					}
 				}
 			}
 		}
