@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -135,6 +136,10 @@ type UserState struct {
 
 	// Emotion state from last reflex prep — used for TTS instruct.
 	LastStrategy string
+
+	// PendingDisambiguation stores options from a clarification_needed reflex
+	// so the next short answer ("1", "да") can be resolved to a tool call.
+	PendingDisambiguation []bs.ClarificationOption
 
 	// DebugMode appends tool traces to each response.
 	DebugMode bool
@@ -891,7 +896,25 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	var preTraces []agent.ToolTrace
-	if msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil && g.reflexModel() != "" {
+
+	// Resolve pending disambiguation: if previous turn asked "which option?"
+	// and this message is a short answer, inject the chosen tool directly.
+	if len(us.PendingDisambiguation) > 0 && msgText != "" {
+		if chosen := resolveDisambiguation(msgText, us.PendingDisambiguation); chosen != nil {
+			reflexGuidance = fmt.Sprintf("[DISAMBIGUATION RESOLVED]\nПользователь выбрал: %s\nВызови %s.\n", chosen.Label, chosen.Tool)
+			us.PendingDisambiguation = nil
+			g.logger.Info("disambiguation: resolved", "tool", chosen.Tool, "label", chosen.Label)
+			// Still run context injection for AME traces.
+			if us.Deps != nil && us.Deps.ContextInjector != nil {
+				injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText)
+			}
+		} else {
+			// Not a resolution — clear pending and proceed normally.
+			us.PendingDisambiguation = nil
+		}
+	}
+
+	if reflexGuidance == "" && msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil && g.reflexModel() != "" {
 		// Reflex/Cortex pipeline: structured context → reflex plan → pre-actions → filtered cortex input.
 		var silent bool
 		injectedCtx, reflexGuidance, postActions, preTraces, engineRuleCount, silent = g.runReflexPipeline(ctx, us, msgText)
@@ -1459,6 +1482,8 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 			fmt.Fprintf(&guidance, "%d. %s\n", i+1, opt.Label)
 		}
 		guidance.WriteString("\nНЕ вызывай инструменты. Задай короткий вопрос с вариантами.\n\n")
+		// Save options for resolution on the next turn.
+		us.PendingDisambiguation = reflexResult.ClarificationOptions
 		g.logger.Info("reflex: disambiguation",
 			"options", len(reflexResult.ClarificationOptions),
 			"intent", reflexResult.Intent,
@@ -2100,4 +2125,36 @@ func sanitizeLeakedToolCalls(text string) string {
 	text = strings.TrimPrefix(text, "thought")
 
 	return strings.TrimSpace(text)
+}
+
+// resolveDisambiguation checks if a short message resolves a pending disambiguation.
+// Returns the chosen option or nil if the message doesn't match any option.
+func resolveDisambiguation(msg string, options []bs.ClarificationOption) *bs.ClarificationOption {
+	msg = strings.TrimSpace(strings.ToLower(msg))
+	if msg == "" || len(options) == 0 {
+		return nil
+	}
+
+	// Numeric choice: "1", "2", etc.
+	if idx, err := strconv.Atoi(msg); err == nil && idx >= 1 && idx <= len(options) {
+		return &options[idx-1]
+	}
+
+	// Keyword match against option labels.
+	for i := range options {
+		label := strings.ToLower(options[i].Label)
+		if strings.Contains(label, msg) || strings.Contains(msg, label) {
+			return &options[i]
+		}
+	}
+
+	// Affirmative short answers resolve to option 1 (most common case).
+	affirmatives := []string{"да", "yes", "ок", "ok", "давай", "погнали", "запускай", "го", "автопилот"}
+	for _, a := range affirmatives {
+		if msg == a {
+			return &options[0]
+		}
+	}
+
+	return nil
 }
