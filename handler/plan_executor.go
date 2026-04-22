@@ -303,6 +303,29 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 		if rp, ok := resultMap["repo_path"].(string); ok && rp != "" {
 			progress.RepoPath = rp
 		}
+		// code_repo_create returns "path" not "repo_path" — extract either.
+		if rp, ok := resultMap["path"].(string); ok && rp != "" && progress.RepoPath == "" {
+			progress.RepoPath = rp
+		}
+		// Fallback: if name is present but no path, ask registry for repo info.
+		if progress.RepoPath == "" {
+			if name, ok := resultMap["name"].(string); ok && name != "" {
+				// Try code_repo_list to find the path.
+				listResult, isErr := deps.Registry.Execute(ctx, "code_repo_list", nil)
+				if !isErr {
+					var repos []map[string]any
+					if json.Unmarshal([]byte(listResult), &repos) == nil {
+						for _, r := range repos {
+							if rn, _ := r["name"].(string); rn == name {
+								if rp, _ := r["path"].(string); rp != "" {
+									progress.RepoPath = rp
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 		progress.LastResult = json.RawMessage(result)
 	}
 
