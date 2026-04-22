@@ -199,6 +199,14 @@ func (b *Background) executeStep(ctx context.Context, task core.AgentTask, deps 
 		return b.execToolStep(ctx, deps, progress, step)
 
 	case "wait":
+		// Only pause if we're actually tracking a peer task (async operation).
+		// Skip wait if no peer_task_id — means previous tool was sync, no callback expected.
+		if progress.PeerTaskID == "" {
+			deps.Logger.Info("plan-executor: skipping wait (no peer task)", "step", progress.CurrentStep)
+			progress.CurrentStep++
+			progressJSON, _ := json.Marshal(progress)
+			return core.IterationResult{Progress: progressJSON}, nil
+		}
 		progress.Phase = "waiting"
 		progress.Summary = fmt.Sprintf("Waiting for callback (step %d/%d)", progress.CurrentStep+1, len(progress.Plan))
 		progress.CurrentStep++
