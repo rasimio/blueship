@@ -13,7 +13,8 @@ import (
 
 // Background implements core.AgentHandler for generic multi-iteration tasks.
 // Uses a shared session across all iterations so LLM has full conversation history.
-// Iteration 0 = planning, 1..N-2 = execution, N-1 = synthesis.
+// Supports auto-pause: if the LLM calls an async peer tool (code_task_create, etc.),
+// the handler pauses until an external callback wakes the task.
 type Background struct {
 	tz *time.Location
 }
@@ -25,6 +26,16 @@ func NewBackground(tz *time.Location) *Background {
 func (b *Background) DefaultTools() []string {
 	return nil
 }
+
+// pauseTools are async peer tools that require waiting for a callback.
+var pauseTools = map[string]bool{
+	"code_task_create":  true,
+	"code_task_execute": true,
+	"code_task_publish": true,
+	"code_task_revise":  true,
+}
+
+const maxRevisions = 3
 
 func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.AgentDeps) (core.IterationResult, error) {
 	// 1. Load system prompt.
@@ -54,7 +65,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s",
 		now.Format("2006-01-02 15:04 MST (Monday)"), systemPrompt)
 
-	// 2. Parse progress (contains session_id for shared session + plan)
+	// 2. Parse progress (contains session_id for shared session + pause state)
 	var progress bgProgress
 	if len(task.Progress) > 0 && string(task.Progress) != "{}" {
 		json.Unmarshal(task.Progress, &progress)
@@ -110,11 +121,17 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 	isLast := task.MaxIterations > 0 && task.Iteration+1 >= task.MaxIterations
 
-	// Build user message. Tasks with a custom prompt (config.prompt) are
-	// self-contained — no multi-phase planning/execution/synthesis overlay.
 	var msg string
-	if instructionKey != "background-task" {
-		msg = fmt.Sprintf("[TASK: %s]\n%s", task.Title, desc)
+
+	// Resumed from pause — tell LLM what woke it.
+	if progress.PeerTaskID != "" && progress.Phase == "waiting" {
+		msg = fmt.Sprintf("[RESUME] You were paused waiting for peer task %s. Check its current status and decide next steps.\nIteration: %d/%d",
+			progress.PeerTaskID, task.Iteration+1, task.MaxIterations)
+	} else if instructionKey != "background-task" {
+		// Tasks with a custom prompt (config.prompt) are self-contained —
+		// no multi-phase planning/execution/synthesis overlay.
+		msg = fmt.Sprintf("[TASK: %s]\n%s\nIteration: %d/%d",
+			task.Title, desc, task.Iteration+1, task.MaxIterations)
 	} else {
 		isFirst := task.Iteration == 0
 
@@ -130,36 +147,74 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			task.Title, desc, task.Iteration+1, task.MaxIterations, phasePrompt)
 	}
 
+	// Budget warning.
+	remaining := task.MaxIterations - (task.Iteration + 1)
+	if remaining <= 3 && remaining > 0 {
+		msg += fmt.Sprintf("\n\nLow iteration budget: %d remaining.", remaining)
+	}
+
 	// 6. Inject context (active notes, etc.) if available.
 	var injectedCtx string
 	if deps.ContextInjector != nil {
 		injectedCtx = deps.ContextInjector(ctx, task.UserID.String(), msg)
 	}
 
-	// 7. Run agent loop (shared session — LLM sees full history)
+	// 7. Run agent loop with tool tracing.
 	loop := agent.NewLoop(deps.LLM, deps.Store, deps.Registry, deps.RoleTools, deps.Config, deps.Logger)
 
-	reply, err := loop.Run(ctx, agent.RunConfig{
+	result, err := loop.RunTracked(ctx, agent.RunConfig{
 		SessionID:       sessID,
 		SystemPrompt:    systemPrompt,
 		InjectedContext: injectedCtx,
 		Model:           routerModel,
 		MaxTokens:       deps.Config.Limits.MaxOutputTokens,
 		MaxTurns:        deps.Config.Gateway.MaxTurns,
-		Role:            "background",
+		Role:            modelRole,
 	}, msg)
 	if err != nil {
 		return core.IterationResult{}, fmt.Errorf("agent loop: %w", err)
 	}
 
-	// 7. Save progress with session ID
+	reply := result.Text
+
+	// 8. Scan tool traces for async peer tools and revision tracking.
+	var peerTaskID string
+	calledRevise := false
+
+	for _, trace := range result.ToolTraces {
+		if pauseTools[trace.Name] {
+			var out map[string]any
+			if json.Unmarshal([]byte(trace.Output), &out) == nil {
+				if tid, ok := out["task_id"].(string); ok && tid != "" {
+					peerTaskID = tid
+				}
+			}
+		}
+		if trace.Name == "code_task_revise" {
+			calledRevise = true
+		}
+	}
+
+	// 9. Update revision tracking.
+	if peerTaskID != "" && peerTaskID != progress.PeerTaskID {
+		progress.RevisionCount = 0
+	}
+	if calledRevise {
+		progress.RevisionCount++
+	}
+
+	// 10. Save progress with session ID.
 	progress.Phase = fmt.Sprintf("iteration_%d", task.Iteration+1)
 	progress.Summary = truncate(reply, 500)
-	progressJSON, _ := json.Marshal(progress)
+	if peerTaskID != "" {
+		progress.PeerTaskID = peerTaskID
+	}
 
-	if isLast {
+	// 11. Check for [DONE].
+	if strings.Contains(reply, "[DONE]") || isLast {
 		clean := strings.ReplaceAll(reply, "[DONE]", "")
 		clean = strings.ReplaceAll(clean, "[CONTINUE]", "")
+		clean = strings.ReplaceAll(clean, "[PAUSE]", "")
 		clean = strings.ReplaceAll(clean, "[MILESTONE]", "")
 		clean = strings.TrimSpace(clean)
 
@@ -168,7 +223,6 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 		// Filter no-op and garbage output (e.g. raw UUIDs from tool results).
 		if clean == "" || strings.Contains(clean, "[no-op]") || isGarbageOutput(clean) {
-			deps.Store.ArchiveSession(ctx, sessID)
 			return core.IterationResult{Done: true}, nil
 		}
 		return core.IterationResult{
@@ -177,6 +231,42 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			Notify: clean,
 		}, nil
 	}
+
+	// 12. Revision cap — escalate if stuck in error loop.
+	if progress.RevisionCount >= maxRevisions {
+		progress.Phase = "error_loop"
+		progressJSON, _ := json.Marshal(progress)
+
+		return core.IterationResult{
+			Pause:    true,
+			Progress: progressJSON,
+			Notify: fmt.Sprintf("%s — peer task %s failed %d times. Need human input.\n\n%s",
+				task.Title, progress.PeerTaskID, progress.RevisionCount, truncate(reply, 300)),
+		}, nil
+	}
+
+	// 13. Determine if we should pause (async peer tool was called or explicit [PAUSE]).
+	shouldPause := peerTaskID != "" || strings.Contains(reply, "[PAUSE]")
+
+	if shouldPause {
+		progress.Phase = "waiting"
+		progressJSON, _ := json.Marshal(progress)
+
+		var notify string
+		if strings.Contains(reply, "[MILESTONE]") {
+			notify = fmt.Sprintf("%s (iteration %d/%d)\n\n%s",
+				task.Title, task.Iteration+1, task.MaxIterations, truncate(reply, 400))
+		}
+
+		return core.IterationResult{
+			Pause:    true,
+			Progress: progressJSON,
+			Notify:   notify,
+		}, nil
+	}
+
+	// 14. No pause — continue to next iteration.
+	progressJSON, _ := json.Marshal(progress)
 
 	var notify string
 	if strings.Contains(reply, "[MILESTONE]") {
@@ -191,10 +281,12 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	}, nil
 }
 
-// bgProgress extends TaskProgress with session management.
+// bgProgress extends TaskProgress with session management and pause state.
 type bgProgress struct {
 	core.TaskProgress
-	SessionID string `json:"session_id"` // shared session across iterations
+	SessionID     string `json:"session_id"`              // shared session across iterations
+	PeerTaskID    string `json:"peer_task_id,omitempty"`   // async peer task being awaited
+	RevisionCount int    `json:"revision_count,omitempty"` // consecutive revisions for same peer task
 }
 
 // isGarbageOutput detects raw tool output that shouldn't be sent to users
