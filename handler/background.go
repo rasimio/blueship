@@ -255,8 +255,11 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		}, nil
 	}
 
-	// 13. Determine if we should pause (async peer tool was called or explicit [PAUSE]).
-	shouldPause := peerTaskID != "" || strings.Contains(reply, "[PAUSE]")
+	// 13. Determine if we should pause.
+	// Pause when: new async peer tool called, explicit [PAUSE], OR
+	// already tracking a peer task and no workflow advancement this iteration.
+	shouldPause := peerTaskID != "" || strings.Contains(reply, "[PAUSE]") ||
+		(progress.PeerTaskID != "" && progress.Phase == "waiting")
 
 	if shouldPause {
 		progress.Phase = "waiting"
