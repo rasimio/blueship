@@ -286,11 +286,17 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 	progressJSON, _ := json.Marshal(progress)
 
 	// Check if next step is "wait" — if so, execute it immediately (no extra iteration).
+	// But only pause if we have a peer_task_id (an async task to wait for).
 	if progress.CurrentStep < len(progress.Plan) && progress.Plan[progress.CurrentStep].Action == "wait" {
-		progress.Phase = "waiting"
+		if progress.PeerTaskID != "" {
+			progress.Phase = "waiting"
+			progress.CurrentStep++
+			progressJSON, _ = json.Marshal(progress)
+			return core.IterationResult{Pause: true, Progress: progressJSON}, nil
+		}
+		// No peer task — skip the wait.
 		progress.CurrentStep++
 		progressJSON, _ = json.Marshal(progress)
-		return core.IterationResult{Pause: true, Progress: progressJSON}, nil
 	}
 
 	return core.IterationResult{Progress: progressJSON}, nil
