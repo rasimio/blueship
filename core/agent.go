@@ -83,6 +83,9 @@ type AgentDeps struct {
 	// ContextInjector builds per-request context (active notes, etc.) for the agent loop.
 	ContextInjector func(ctx context.Context, userID, message string) string
 
+	// ReflexPreparer returns structured context for the reflex pipeline.
+	ReflexPreparer func(ctx context.Context, userID, message string) *ReflexContext
+
 	// RuleEngine evaluates structured rules against context.
 	// Returns matched rules with guidance, pre-actions, and tool restrictions.
 	RuleEngine func(ctx context.Context, rc RuleContext) []ActiveRule
