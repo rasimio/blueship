@@ -274,12 +274,27 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 		// "already exists" is not a real error — resource is there, move on.
 		if strings.Contains(result, "already exists") {
 			deps.Logger.Info("plan-executor: resource already exists, treating as success", "tool", step.Tool)
-			// Extract path from error message (format: `local path "/path/to/repo" already exists`)
-			if start := strings.Index(result, `"`); start >= 0 {
-				if end := strings.Index(result[start+1:], `"`); end >= 0 {
-					path := result[start+1 : start+1+end]
-					result = fmt.Sprintf(`{"repo_path":"%s","status":"already_exists"}`, path)
-					isError = false
+			isError = false
+			// Try to get repo path from input name via code_repo_list.
+			if step.Tool == "code_repo_create" {
+				var inp map[string]any
+				if json.Unmarshal(input, &inp) == nil {
+					if name, ok := inp["name"].(string); ok && name != "" {
+						listResult, listErr := deps.Registry.Execute(ctx, "code_repo_list", nil)
+						if !listErr {
+							var repos []map[string]any
+							if json.Unmarshal([]byte(listResult), &repos) == nil {
+								for _, r := range repos {
+									if rn, _ := r["name"].(string); rn == name {
+										if rp, _ := r["path"].(string); rp != "" {
+											progress.RepoPath = rp
+											result = fmt.Sprintf(`{"repo_path":"%s","name":"%s","status":"already_exists"}`, rp, name)
+										}
+									}
+								}
+							}
+						}
+					}
 				}
 			}
 		} else {
