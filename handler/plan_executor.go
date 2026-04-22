@@ -245,6 +245,13 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 	// Substitute variables in input.
 	input := substituteVars(step.Input, progress)
 
+	deps.Logger.Info("plan-executor: tool input",
+		"tool", step.Tool,
+		"input", truncate(string(input), 150),
+		"last_result_len", len(progress.LastResult),
+		"peer_task_id", progress.PeerTaskID,
+	)
+
 	result, isError := deps.Registry.Execute(ctx, step.Tool, input)
 	if isError {
 		// "already exists" is not a real error — resource is there, move on.
@@ -268,7 +275,7 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 		}
 	}
 
-	deps.Logger.Info("plan-executor: tool success", "tool", step.Tool, "result_len", len(result))
+	deps.Logger.Info("plan-executor: tool success", "tool", step.Tool, "result_len", len(result), "result_preview", truncate(result, 100))
 
 	// Extract peer_task_id from result if present.
 	var resultMap map[string]any
