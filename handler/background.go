@@ -38,6 +38,17 @@ var pauseTools = map[string]bool{
 const maxRevisions = 3
 
 func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.AgentDeps) (core.IterationResult, error) {
+	// Check if this is a plan-based goal (goal-orchestrator prompt).
+	// Plan executor: LLM plans once, handler executes mechanically.
+	if task.Config != nil {
+		var cfg struct {
+			Prompt string `json:"prompt"`
+		}
+		if json.Unmarshal(task.Config, &cfg) == nil && cfg.Prompt == "goal-orchestrator" {
+			return b.runPlanExecutor(ctx, task, deps)
+		}
+	}
+
 	// 1. Load system prompt.
 	// Task config may override the instruction prompt key (default: "background-task").
 	instructionKey := "background-task"
