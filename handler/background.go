@@ -123,10 +123,14 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 	var msg string
 
-	// Resumed from pause — tell LLM what woke it.
+	// Resumed from pause — tell LLM what woke it + last progress summary.
 	if progress.PeerTaskID != "" && progress.Phase == "waiting" {
-		msg = fmt.Sprintf("[RESUME] You were paused waiting for peer task %s. Check its current status and decide next steps.\nIteration: %d/%d",
-			progress.PeerTaskID, task.Iteration+1, task.MaxIterations)
+		resumeMsg := fmt.Sprintf("[RESUME] You were paused waiting for peer task %s. Check its current status and decide next steps.",
+			progress.PeerTaskID)
+		if progress.Summary != "" {
+			resumeMsg += fmt.Sprintf("\n\nLast progress: %s", progress.Summary)
+		}
+		msg = fmt.Sprintf("%s\nIteration: %d/%d", resumeMsg, task.Iteration+1, task.MaxIterations)
 	} else if instructionKey != "background-task" {
 		// Tasks with a custom prompt (config.prompt) are self-contained —
 		// no multi-phase planning/execution/synthesis overlay.
@@ -159,8 +163,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		injectedCtx = deps.ContextInjector(ctx, task.UserID.String(), msg)
 	}
 
-	// 7. Run agent loop with tool tracing.
+	// 7. Run agent loop with tool tracing and compaction.
 	loop := agent.NewLoop(deps.LLM, deps.Store, deps.Registry, deps.RoleTools, deps.Config, deps.Logger)
+	loop.SetCompactor(agent.NewCompactor(deps.LLM, deps.Config, deps.Logger))
 
 	result, err := loop.RunTracked(ctx, agent.RunConfig{
 		SessionID:       sessID,
