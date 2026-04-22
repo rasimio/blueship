@@ -247,12 +247,25 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 
 	result, isError := deps.Registry.Execute(ctx, step.Tool, input)
 	if isError {
-		deps.Logger.Warn("plan-executor: tool error", "tool", step.Tool, "error", result)
-		progress.Phase = "tool_error"
-		progress.Summary = fmt.Sprintf("Tool %s failed: %s", step.Tool, truncate(result, 300))
-		progressJSON, _ := json.Marshal(progress)
-		// Don't advance — let next iteration handle (replan or retry).
-		return core.IterationResult{Progress: progressJSON}, nil
+		// "already exists" is not a real error — resource is there, move on.
+		if strings.Contains(result, "already exists") {
+			deps.Logger.Info("plan-executor: resource already exists, treating as success", "tool", step.Tool)
+			// Extract path from error message (format: `local path "/path/to/repo" already exists`)
+			if start := strings.Index(result, `"`); start >= 0 {
+				if end := strings.Index(result[start+1:], `"`); end >= 0 {
+					path := result[start+1 : start+1+end]
+					result = fmt.Sprintf(`{"repo_path":"%s","status":"already_exists"}`, path)
+					isError = false
+				}
+			}
+		} else {
+			deps.Logger.Warn("plan-executor: tool error", "tool", step.Tool, "error", result)
+			progress.Phase = "tool_error"
+			progress.Summary = fmt.Sprintf("Tool %s failed: %s", step.Tool, truncate(result, 300))
+			progressJSON, _ := json.Marshal(progress)
+			// Don't advance — let next iteration handle (replan or retry).
+			return core.IterationResult{Progress: progressJSON}, nil
+		}
 	}
 
 	deps.Logger.Info("plan-executor: tool success", "tool", step.Tool, "result_len", len(result))
