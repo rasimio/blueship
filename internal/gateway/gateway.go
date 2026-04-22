@@ -2148,12 +2148,10 @@ func resolveDisambiguation(msg string, options []bs.ClarificationOption) *bs.Cla
 		}
 	}
 
-	// Affirmative short answers resolve to option 1 (most common case).
-	affirmatives := []string{"да", "yes", "ок", "ok", "давай", "погнали", "запускай", "го", "автопилот"}
-	for _, a := range affirmatives {
-		if msg == a {
-			return &options[0]
-		}
+	// Short non-numeric message (< 30 chars) that didn't match labels —
+	// likely an affirmative. Resolve to first option.
+	if len(msg) < 30 {
+		return &options[0]
 	}
 
 	return nil
