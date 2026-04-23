@@ -83,7 +83,7 @@ func (b *Background) runPlanExecutor(ctx context.Context, task core.AgentTask, d
 	}
 
 	// Have plan → EXECUTION PHASE.
-	return b.executeStep(ctx, task, deps, &progress, sessID, routerModel)
+	return b.executeStep(ctx, task, deps, &progress, sessID, routerModel, modelRole)
 }
 
 // planPhase asks the LLM to create a structured plan for the goal.
@@ -214,7 +214,7 @@ func (b *Background) planPhase(ctx context.Context, task core.AgentTask, deps co
 }
 
 // executeStep runs one step from the plan.
-func (b *Background) executeStep(ctx context.Context, task core.AgentTask, deps core.AgentDeps, progress *goalPlanProgress, sessID, model string) (core.IterationResult, error) {
+func (b *Background) executeStep(ctx context.Context, task core.AgentTask, deps core.AgentDeps, progress *goalPlanProgress, sessID, model, modelRole string) (core.IterationResult, error) {
 	if progress.CurrentStep >= len(progress.Plan) {
 		// Plan exhausted without explicit "done" step.
 		return core.IterationResult{Done: true, Output: progress.Summary, Notify: progress.Summary}, nil
@@ -247,7 +247,7 @@ func (b *Background) executeStep(ctx context.Context, task core.AgentTask, deps 
 		return core.IterationResult{Pause: true, Progress: progressJSON}, nil
 
 	case "decide":
-		return b.execDecideStep(ctx, task, deps, progress, step, sessID, model)
+		return b.execDecideStep(ctx, task, deps, progress, step, sessID, model, modelRole)
 
 	case "milestone":
 		msg := step.Message
@@ -404,7 +404,7 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 }
 
 // execDecideStep asks the LLM to make a binary decision.
-func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, deps core.AgentDeps, progress *goalPlanProgress, step PlanStep, sessID, model string) (core.IterationResult, error) {
+func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, deps core.AgentDeps, progress *goalPlanProgress, step PlanStep, sessID, model, modelRole string) (core.IterationResult, error) {
 	// Fetch context data if context_tool specified.
 	var contextData string
 	if step.ContextTool != "" {
@@ -439,7 +439,7 @@ func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, de
 		Model:        model,
 		MaxTokens:    256,
 		MaxTurns:     1,
-		Role:         "cortex",
+		Role:         modelRole,
 	}, decisionPrompt)
 	if err != nil {
 		return core.IterationResult{}, fmt.Errorf("decide: %w", err)
