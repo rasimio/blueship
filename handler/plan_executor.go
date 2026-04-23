@@ -188,6 +188,37 @@ Output ONLY the JSON array. No explanations.`, task.Title, desc, buildToolsList(
 		return core.IterationResult{Progress: progressJSON}, nil
 	}
 
+	// Ensure code_task_execute exists after first decide (plan review).
+	// LLM frequently omits this critical step.
+	hasExecute := false
+	for _, s := range plan {
+		if s.Action == "tool" && s.Tool == "code_task_execute" {
+			hasExecute = true
+			break
+		}
+	}
+	if !hasExecute {
+		// Find first "decide" after code_task_create and inject execute + wait after it.
+		pastCreate := false
+		for i, s := range plan {
+			if s.Action == "tool" && s.Tool == "code_task_create" {
+				pastCreate = true
+			}
+			if pastCreate && s.Action == "decide" {
+				// Insert execute + wait after this decide step.
+				executeStep := PlanStep{Action: "tool", Tool: "code_task_execute", Input: json.RawMessage(`{"task_id":"$peer_task_id"}`)}
+				waitStep := PlanStep{Action: "wait"}
+				newPlan := make([]PlanStep, 0, len(plan)+2)
+				newPlan = append(newPlan, plan[:i+1]...)
+				newPlan = append(newPlan, executeStep, waitStep)
+				newPlan = append(newPlan, plan[i+1:]...)
+				plan = newPlan
+				deps.Logger.Info("plan-executor: injected missing code_task_execute after decide", "at", i+1)
+				break
+			}
+		}
+	}
+
 	progress.Plan = plan
 	progress.CurrentStep = 0
 	progress.Phase = "executing"
