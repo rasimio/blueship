@@ -79,7 +79,7 @@ func (b *Background) runPlanExecutor(ctx context.Context, task core.AgentTask, d
 
 	// No plan yet → PLANNING PHASE.
 	if len(progress.Plan) == 0 {
-		return b.planPhase(ctx, task, deps, &progress, sessID, routerModel)
+		return b.planPhase(ctx, task, deps, &progress, sessID, routerModel, modelRole)
 	}
 
 	// Have plan → EXECUTION PHASE.
@@ -87,7 +87,7 @@ func (b *Background) runPlanExecutor(ctx context.Context, task core.AgentTask, d
 }
 
 // planPhase asks the LLM to create a structured plan for the goal.
-func (b *Background) planPhase(ctx context.Context, task core.AgentTask, deps core.AgentDeps, progress *goalPlanProgress, sessID, model string) (core.IterationResult, error) {
+func (b *Background) planPhase(ctx context.Context, task core.AgentTask, deps core.AgentDeps, progress *goalPlanProgress, sessID, model, modelRole string) (core.IterationResult, error) {
 	desc := ""
 	if task.Description != nil {
 		desc = *task.Description
@@ -129,15 +129,17 @@ func (b *Background) planPhase(ctx context.Context, task core.AgentTask, deps co
 		}
 	}
 
-	loop := agent.NewLoop(deps.LLM, deps.Store, deps.Registry, deps.RoleTools, deps.Config, deps.Logger)
+	// Planning: no tools — model must output JSON plan as text, not call tools.
+	emptyRegistry := core.NewToolRegistry()
+	loop := agent.NewLoop(deps.LLM, deps.Store, emptyRegistry, deps.RoleTools, deps.Config, deps.Logger)
 	reply, err := loop.Run(ctx, agent.RunConfig{
 		SessionID:       sessID,
 		SystemPrompt:    systemPrompt,
 		InjectedContext: injectedCtx,
 		Model:           model,
 		MaxTokens:       deps.Config.Limits.MaxOutputTokens,
-		MaxTurns:        1, // single turn — just output the plan
-		Role:            "cortex",
+		MaxTurns:        1,
+		Role:            modelRole,
 	}, planPrompt)
 	if err != nil {
 		return core.IterationResult{}, fmt.Errorf("planning: %w", err)
