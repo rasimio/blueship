@@ -491,6 +491,7 @@ No explanations. Just APPROVE or REVISE: feedback.`,
 
 	if strings.HasPrefix(strings.ToUpper(reply), "APPROVE") {
 		progress.CurrentStep++
+		progress.RetryCount = 0
 		progress.Phase = fmt.Sprintf("step_%d", progress.CurrentStep)
 		progress.Summary = fmt.Sprintf("Approved step %d, continuing", progress.CurrentStep)
 		progressJSON, _ := json.Marshal(progress)
@@ -498,6 +499,22 @@ No explanations. Just APPROVE or REVISE: feedback.`,
 	}
 
 	// REVISE — extract feedback, call code_task_revise if peer task exists.
+	progress.RetryCount++
+
+	// Cap revisions: after 3 revises on same decide step, force approve and continue.
+	if progress.RetryCount >= maxToolRetries {
+		deps.Logger.Warn("plan-executor: max revisions reached, force approving", "step", progress.CurrentStep, "retries", progress.RetryCount)
+		progress.CurrentStep++
+		progress.RetryCount = 0
+		progress.Phase = fmt.Sprintf("step_%d", progress.CurrentStep)
+		progress.Summary = fmt.Sprintf("Force approved after %d revisions, continuing", maxToolRetries)
+		progressJSON, _ := json.Marshal(progress)
+		return core.IterationResult{
+			Progress: progressJSON,
+			Notify:   fmt.Sprintf("[GOAL] Force approved step after %d failed revisions. Moving on.", maxToolRetries),
+		}, nil
+	}
+
 	feedback := reply
 	if idx := strings.Index(reply, ":"); idx >= 0 {
 		feedback = strings.TrimSpace(reply[idx+1:])
@@ -511,7 +528,7 @@ No explanations. Just APPROVE or REVISE: feedback.`,
 
 	// After revise, go back to wait for the peer task to be redone.
 	progress.Phase = "waiting"
-	progress.Summary = fmt.Sprintf("Revised: %s", truncate(feedback, 200))
+	progress.Summary = fmt.Sprintf("Revised (%d/%d): %s", progress.RetryCount, maxToolRetries, truncate(feedback, 200))
 	// Don't advance CurrentStep — stay at decide, will re-evaluate after callback.
 	progressJSON, _ := json.Marshal(progress)
 	return core.IterationResult{Pause: true, Progress: progressJSON}, nil
