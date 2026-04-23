@@ -93,17 +93,12 @@ func (b *Background) planPhase(ctx context.Context, task core.AgentTask, deps co
 		desc = *task.Description
 	}
 
-	// Load system prompt.
-	var parts []string
-	promptKeys := append(deps.Config.SystemPromptKeys, "goal-orchestrator")
-	for _, key := range promptKeys {
-		p, err := deps.Prompts.Get(ctx, key)
-		if err != nil {
-			return core.IterationResult{}, fmt.Errorf("load prompt %q: %w", key, err)
-		}
-		parts = append(parts, p)
+	// Load ONLY goal-orchestrator prompt for planning (no personality prompts).
+	// Personality prompts cause the model to "chat" instead of generating JSON.
+	systemPrompt, err := deps.Prompts.Get(ctx, "goal-orchestrator")
+	if err != nil {
+		return core.IterationResult{}, fmt.Errorf("load prompt goal-orchestrator: %w", err)
 	}
-	systemPrompt := strings.Join(parts, "\n\n")
 
 	now := time.Now().In(b.tz)
 	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s", now.Format("2006-01-02 15:04 MST (Monday)"), systemPrompt)
