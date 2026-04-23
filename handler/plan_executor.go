@@ -25,13 +25,16 @@ type PlanStep struct {
 type goalPlanProgress struct {
 	SessionID   string          `json:"session_id"`
 	PeerTaskID  string          `json:"peer_task_id,omitempty"`
-	RepoPath    string          `json:"repo_path,omitempty"` // set by code_repo_create, used in substitution
+	RepoPath    string          `json:"repo_path,omitempty"`
 	Plan        []PlanStep      `json:"plan,omitempty"`
 	CurrentStep int             `json:"current_step"`
-	LastResult  json.RawMessage `json:"last_result,omitempty"` // result from last tool call
+	RetryCount  int             `json:"retry_count,omitempty"` // consecutive retries on same step
+	LastResult  json.RawMessage `json:"last_result,omitempty"`
 	Phase       string          `json:"phase"`
 	Summary     string          `json:"summary"`
 }
+
+const maxToolRetries = 3
 
 // runPlanExecutor handles goal tasks using the plan-then-execute pattern.
 // First iteration: LLM creates a structured plan.
@@ -245,7 +248,20 @@ func (b *Background) executeStep(ctx context.Context, task core.AgentTask, deps 
 		return core.IterationResult{Pause: true, Progress: progressJSON, Notify: msg}, nil
 
 	case "done":
-		summary := fmt.Sprintf("[DONE] %s", progress.Summary)
+		// Build structured completion report.
+		var report strings.Builder
+		report.WriteString(fmt.Sprintf("[DONE] %s\n\n", task.Title))
+		report.WriteString(fmt.Sprintf("Steps completed: %d/%d\n", progress.CurrentStep, len(progress.Plan)))
+		report.WriteString(fmt.Sprintf("Iterations used: %d/%d\n", task.Iteration+1, task.MaxIterations))
+		if progress.RepoPath != "" {
+			report.WriteString(fmt.Sprintf("Repository: %s\n", progress.RepoPath))
+		}
+		if progress.PeerTaskID != "" {
+			report.WriteString(fmt.Sprintf("Task ID: %s\n", progress.PeerTaskID))
+		}
+		report.WriteString(fmt.Sprintf("\nLast step: %s", progress.Summary))
+
+		summary := report.String()
 		deps.Store.ArchiveSession(context.Background(), sessID)
 		return core.IterationResult{Done: true, Output: summary, Notify: summary}, nil
 
@@ -303,15 +319,31 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 				}
 			}
 		} else {
-			deps.Logger.Warn("plan-executor: tool error", "tool", step.Tool, "error", result)
+			progress.RetryCount++
+			deps.Logger.Warn("plan-executor: tool error", "tool", step.Tool, "retry", progress.RetryCount, "error", result)
+
+			if progress.RetryCount >= maxToolRetries {
+				// Too many retries — skip this step and notify user.
+				deps.Logger.Warn("plan-executor: max retries reached, skipping step", "step", progress.CurrentStep, "tool", step.Tool)
+				progress.CurrentStep++
+				progress.RetryCount = 0
+				progress.Phase = "step_skipped"
+				progress.Summary = fmt.Sprintf("Skipped step %s after %d failures: %s", step.Tool, maxToolRetries, truncate(result, 200))
+				progressJSON, _ := json.Marshal(progress)
+				return core.IterationResult{
+					Progress: progressJSON,
+					Notify:   fmt.Sprintf("[GOAL] Step %s failed %d times, skipping: %s", step.Tool, maxToolRetries, truncate(result, 150)),
+				}, nil
+			}
+
 			progress.Phase = "tool_error"
-			progress.Summary = fmt.Sprintf("Tool %s failed: %s", step.Tool, truncate(result, 300))
+			progress.Summary = fmt.Sprintf("Tool %s failed (retry %d/%d): %s", step.Tool, progress.RetryCount, maxToolRetries, truncate(result, 200))
 			progressJSON, _ := json.Marshal(progress)
-			// Don't advance — let next iteration handle (replan or retry).
 			return core.IterationResult{Progress: progressJSON}, nil
 		}
 	}
 
+	progress.RetryCount = 0 // reset on success
 	deps.Logger.Info("plan-executor: tool success", "tool", step.Tool, "result_len", len(result), "result_preview", truncate(result, 100))
 
 	// Extract known fields from result.
