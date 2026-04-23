@@ -34,7 +34,6 @@ type goalPlanProgress struct {
 	Summary     string          `json:"summary"`
 }
 
-const maxToolRetries = 3
 
 // runPlanExecutor handles goal tasks using the plan-then-execute pattern.
 // First iteration: LLM creates a structured plan.
@@ -112,27 +111,10 @@ func (b *Background) planPhase(ctx context.Context, task core.AgentTask, deps co
 	// Run reflex pipeline for context.
 	reflex := runReflexPipeline(ctx, deps, b.tz, desc)
 
-	// Build planning prompt.
-	planPrompt := fmt.Sprintf(`[GOAL: %s]
-%s
-
-Create a step-by-step execution plan as a JSON array. Each step must have:
-- "action": one of "tool", "wait", "decide", "milestone", "done"
-- "tool": tool name (for "tool" action)
-- "input": JSON object with tool parameters (for "tool" action). Use $peer_task_id for the current task ID.
-- "question": what to evaluate (for "decide" action)
-- "context_tool": tool to call before decision to get data, e.g. "code_task_status" (for "decide" action)
-- "message": notification text (for "milestone" action)
-
-Available tools: %s
-
-Rules:
-- "wait" pauses until external callback (use after creating async tasks)
-- "decide" asks the LLM to evaluate and choose APPROVE or REVISE
-- "milestone" notifies the user and pauses for approval
-- End the plan with {"action": "done"}
-
-Output ONLY the JSON array. No explanations.`, task.Title, desc, buildToolsList(deps))
+	// Build planning prompt — goal-orchestrator system prompt already contains
+	// all plan format instructions. User message only provides goal + tools.
+	goalPlanUser, _ := deps.Prompts.Get(ctx, "goal-plan-user")
+	planPrompt := fmt.Sprintf(goalPlanUser, task.Title, desc, buildToolsList(deps))
 
 	// Inject context.
 	var injectedCtx string
@@ -352,23 +334,8 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 		} else {
 			progress.RetryCount++
 			deps.Logger.Warn("plan-executor: tool error", "tool", step.Tool, "retry", progress.RetryCount, "error", result)
-
-			if progress.RetryCount >= maxToolRetries {
-				// Too many retries — skip this step and notify user.
-				deps.Logger.Warn("plan-executor: max retries reached, skipping step", "step", progress.CurrentStep, "tool", step.Tool)
-				progress.CurrentStep++
-				progress.RetryCount = 0
-				progress.Phase = "step_skipped"
-				progress.Summary = fmt.Sprintf("Skipped step %s after %d failures: %s", step.Tool, maxToolRetries, truncate(result, 200))
-				progressJSON, _ := json.Marshal(progress)
-				return core.IterationResult{
-					Progress: progressJSON,
-					Notify:   fmt.Sprintf("[GOAL] Step %s failed %d times, skipping: %s", step.Tool, maxToolRetries, truncate(result, 150)),
-				}, nil
-			}
-
 			progress.Phase = "tool_error"
-			progress.Summary = fmt.Sprintf("Tool %s failed (retry %d/%d): %s", step.Tool, progress.RetryCount, maxToolRetries, truncate(result, 200))
+			progress.Summary = fmt.Sprintf("Tool %s failed (attempt %d): %s", step.Tool, progress.RetryCount, truncate(result, 200))
 			progressJSON, _ := json.Marshal(progress)
 			return core.IterationResult{Progress: progressJSON}, nil
 		}
@@ -454,24 +421,16 @@ func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, de
 		question = "Should we proceed?"
 	}
 
-	decisionPrompt := fmt.Sprintf(`You are reviewing step %d of a goal plan for: %s
+	// Load decision prompts from DB.
+	decideSystem, _ := deps.Prompts.Get(ctx, "goal-decide-system")
+	decideUser, _ := deps.Prompts.Get(ctx, "goal-decide-user")
 
-Data:
-%s
-
-Question: %s
-
-Answer ONLY one of:
-- APPROVE (to continue to next step)
-- REVISE: <specific feedback for what to change>
-
-No explanations. Just APPROVE or REVISE: feedback.`,
+	decisionPrompt := fmt.Sprintf(decideUser,
 		progress.CurrentStep+1, task.Title,
 		truncate(contextData, 3000),
-		question)
+		question, progress.RetryCount)
 
-	// Load system prompt.
-	systemPrompt := "You are a decision-making assistant. Output ONLY 'APPROVE' or 'REVISE: <feedback>'. Nothing else."
+	systemPrompt := decideSystem
 
 	loop := agent.NewLoop(deps.LLM, deps.Store, deps.Registry, deps.RoleTools, deps.Config, deps.Logger)
 	reply, err := loop.Run(ctx, agent.RunConfig{
@@ -501,20 +460,6 @@ No explanations. Just APPROVE or REVISE: feedback.`,
 	// REVISE — extract feedback, call code_task_revise if peer task exists.
 	progress.RetryCount++
 
-	// Cap revisions: after 3 revises on same decide step, force approve and continue.
-	if progress.RetryCount >= maxToolRetries {
-		deps.Logger.Warn("plan-executor: max revisions reached, force approving", "step", progress.CurrentStep, "retries", progress.RetryCount)
-		progress.CurrentStep++
-		progress.RetryCount = 0
-		progress.Phase = fmt.Sprintf("step_%d", progress.CurrentStep)
-		progress.Summary = fmt.Sprintf("Force approved after %d revisions, continuing", maxToolRetries)
-		progressJSON, _ := json.Marshal(progress)
-		return core.IterationResult{
-			Progress: progressJSON,
-			Notify:   fmt.Sprintf("[GOAL] Force approved step after %d failed revisions. Moving on.", maxToolRetries),
-		}, nil
-	}
-
 	feedback := reply
 	if idx := strings.Index(reply, ":"); idx >= 0 {
 		feedback = strings.TrimSpace(reply[idx+1:])
@@ -528,7 +473,7 @@ No explanations. Just APPROVE or REVISE: feedback.`,
 
 	// After revise, go back to wait for the peer task to be redone.
 	progress.Phase = "waiting"
-	progress.Summary = fmt.Sprintf("Revised (%d/%d): %s", progress.RetryCount, maxToolRetries, truncate(feedback, 200))
+	progress.Summary = fmt.Sprintf("Revised (attempt %d): %s", progress.RetryCount, truncate(feedback, 200))
 	// Don't advance CurrentStep — stay at decide, will re-evaluate after callback.
 	progressJSON, _ := json.Marshal(progress)
 	return core.IterationResult{Pause: true, Progress: progressJSON}, nil
