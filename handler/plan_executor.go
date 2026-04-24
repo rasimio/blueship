@@ -47,24 +47,40 @@ type goalPlanProgress struct {
 // that cannot produce a branch or an LLM that keeps rejecting a correct result.
 const maxStepRetries = 3
 
+// StructuredGoalExecutor implements core.GoalHandler for goals whose strategy
+// is "structured" (LLM generates a JSON plan up front; executor interprets
+// steps mechanically). Currently contains Arlene-specific assumptions about
+// code_task_* tool names — those will be lifted out in Phase 2 of the
+// migration. For Phase 1 the only change is: this executor operates on
+// core.Goal instead of core.AgentTask.
+type StructuredGoalExecutor struct {
+	tz *time.Location
+}
+
+// NewStructuredGoalExecutor constructs an executor with the given timezone
+// for "[current_datetime: ...]" context injection.
+func NewStructuredGoalExecutor(tz *time.Location) *StructuredGoalExecutor {
+	return &StructuredGoalExecutor{tz: tz}
+}
+
 
 // runPlanExecutor handles goal tasks using the plan-then-execute pattern.
 // First iteration: LLM creates a structured plan.
 // Subsequent iterations: handler executes steps mechanically, consulting LLM only at decision points.
-func (b *Background) runPlanExecutor(ctx context.Context, task core.AgentTask, deps core.AgentDeps) (core.IterationResult, error) {
+func (e *StructuredGoalExecutor) Run(ctx context.Context, goal core.Goal, deps core.AgentDeps) (core.IterationResult, error) {
 	// Parse progress.
 	var progress goalPlanProgress
-	if len(task.Progress) > 0 && string(task.Progress) != "{}" {
-		json.Unmarshal(task.Progress, &progress)
+	if len(goal.Progress) > 0 && string(goal.Progress) != "{}" {
+		json.Unmarshal(goal.Progress, &progress)
 	}
 
 	// Resolve model.
 	modelRole := "cortex"
-	if task.Config != nil {
+	if goal.Config != nil {
 		var roleCfg struct {
 			ModelRole string `json:"model_role"`
 		}
-		if json.Unmarshal(task.Config, &roleCfg) == nil && roleCfg.ModelRole != "" {
+		if json.Unmarshal(goal.Config, &roleCfg) == nil && roleCfg.ModelRole != "" {
 			modelRole = roleCfg.ModelRole
 		}
 	}
@@ -83,7 +99,7 @@ func (b *Background) runPlanExecutor(ctx context.Context, task core.AgentTask, d
 	sessID := progress.SessionID
 	if sessID == "" {
 		var err error
-		sessID, err = deps.Store.CreateSessionWithSource(ctx, task.UserID.String(), displayModel, "agent_task", task.ID.String())
+		sessID, err = deps.Store.CreateSessionWithSource(ctx, goal.UserID.String(), displayModel, "agent_task", goal.ID.String())
 		if err != nil {
 			return core.IterationResult{}, fmt.Errorf("create session: %w", err)
 		}
@@ -92,11 +108,11 @@ func (b *Background) runPlanExecutor(ctx context.Context, task core.AgentTask, d
 
 	// No plan yet → PLANNING PHASE.
 	if len(progress.Plan) == 0 {
-		return b.planPhase(ctx, task, deps, &progress, sessID, routerModel, modelRole)
+		return e.planPhase(ctx, goal, deps, &progress, sessID, routerModel, modelRole)
 	}
 
 	// Have plan → EXECUTION PHASE.
-	return b.executeStep(ctx, task, deps, &progress, sessID, routerModel, modelRole)
+	return e.executeStep(ctx, goal, deps, &progress, sessID, routerModel, modelRole)
 }
 
 // planPhase asks the LLM to create a structured plan for the goal.
@@ -108,10 +124,10 @@ func (b *Background) runPlanExecutor(ctx context.Context, task core.AgentTask, d
 // agent.Loop would contaminate subsequent plan retries with the model's
 // earlier prose-style outputs — single-shot guarantees every retry starts
 // from the same clean prompt.
-func (b *Background) planPhase(ctx context.Context, task core.AgentTask, deps core.AgentDeps, progress *goalPlanProgress, sessID, model, modelRole string) (core.IterationResult, error) {
+func (e *StructuredGoalExecutor) planPhase(ctx context.Context, goal core.Goal, deps core.AgentDeps, progress *goalPlanProgress, sessID, model, modelRole string) (core.IterationResult, error) {
 	desc := ""
-	if task.Description != nil {
-		desc = *task.Description
+	if goal.Description != nil {
+		desc = *goal.Description
 	}
 
 	_ = modelRole // reserved for future per-role prompt selection
@@ -120,11 +136,11 @@ func (b *Background) planPhase(ctx context.Context, task core.AgentTask, deps co
 	if err != nil {
 		return core.IterationResult{}, fmt.Errorf("load prompt goal-plan-system: %w", err)
 	}
-	now := time.Now().In(b.tz)
+	now := time.Now().In(e.tz)
 	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s", now.Format("2006-01-02 15:04 MST (Monday)"), systemPrompt)
 
 	goalPlanUser, _ := deps.Prompts.Get(ctx, "goal-plan-user")
-	planPrompt := fmt.Sprintf(goalPlanUser, task.Title, desc, buildToolsList(deps))
+	planPrompt := fmt.Sprintf(goalPlanUser, goal.Title, desc, buildToolsList(deps))
 
 	resp, err := deps.LLM.Complete(ctx, core.CompletionRequest{
 		Model:     model,
@@ -217,7 +233,7 @@ func (b *Background) planPhase(ctx context.Context, task core.AgentTask, deps co
 }
 
 // executeStep runs one step from the plan.
-func (b *Background) executeStep(ctx context.Context, task core.AgentTask, deps core.AgentDeps, progress *goalPlanProgress, sessID, model, modelRole string) (core.IterationResult, error) {
+func (e *StructuredGoalExecutor) executeStep(ctx context.Context, goal core.Goal, deps core.AgentDeps, progress *goalPlanProgress, sessID, model, modelRole string) (core.IterationResult, error) {
 	if progress.CurrentStep >= len(progress.Plan) {
 		// Plan exhausted without explicit "done" step.
 		return core.IterationResult{Done: true, Output: progress.Summary, Notify: progress.Summary}, nil
@@ -232,7 +248,7 @@ func (b *Background) executeStep(ctx context.Context, task core.AgentTask, deps 
 
 	switch step.Action {
 	case "tool":
-		return b.execToolStep(ctx, deps, progress, step)
+		return e.execToolStep(ctx, deps, progress, step)
 
 	case "wait":
 		// Only pause if we're actually tracking a peer task (async operation).
@@ -250,12 +266,12 @@ func (b *Background) executeStep(ctx context.Context, task core.AgentTask, deps 
 		return core.IterationResult{Pause: true, Progress: progressJSON}, nil
 
 	case "decide":
-		return b.execDecideStep(ctx, task, deps, progress, step, sessID, model, modelRole)
+		return e.execDecideStep(ctx, goal, deps, progress, step, sessID, model, modelRole)
 
 	case "milestone":
 		msg := step.Message
 		if msg == "" {
-			msg = fmt.Sprintf("%s — milestone reached (step %d/%d)", task.Title, progress.CurrentStep+1, len(progress.Plan))
+			msg = fmt.Sprintf("%s — milestone reached (step %d/%d)", goal.Title, progress.CurrentStep+1, len(progress.Plan))
 		}
 		progress.CurrentStep++
 		progress.Phase = "milestone"
@@ -266,9 +282,9 @@ func (b *Background) executeStep(ctx context.Context, task core.AgentTask, deps 
 	case "done":
 		// Build structured completion report.
 		var report strings.Builder
-		report.WriteString(fmt.Sprintf("[DONE] %s\n\n", task.Title))
+		report.WriteString(fmt.Sprintf("[DONE] %s\n\n", goal.Title))
 		report.WriteString(fmt.Sprintf("Steps completed: %d/%d\n", progress.CurrentStep, len(progress.Plan)))
-		report.WriteString(fmt.Sprintf("Iterations used: %d/%d\n", task.Iteration+1, task.MaxIterations))
+		report.WriteString(fmt.Sprintf("Iterations used: %d/%d\n", goal.Iteration+1, goal.MaxIterations))
 		if progress.RepoPath != "" {
 			report.WriteString(fmt.Sprintf("Repository: %s\n", progress.RepoPath))
 		}
@@ -290,7 +306,7 @@ func (b *Background) executeStep(ctx context.Context, task core.AgentTask, deps 
 }
 
 // execToolStep calls a tool directly and advances the plan.
-func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, progress *goalPlanProgress, step PlanStep) (core.IterationResult, error) {
+func (e *StructuredGoalExecutor) execToolStep(ctx context.Context, deps core.AgentDeps, progress *goalPlanProgress, step PlanStep) (core.IterationResult, error) {
 	// Substitute variables in input.
 	input := substituteVars(step.Input, progress)
 
@@ -413,7 +429,7 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 }
 
 // execDecideStep asks the LLM to make a binary decision.
-func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, deps core.AgentDeps, progress *goalPlanProgress, step PlanStep, sessID, model, modelRole string) (core.IterationResult, error) {
+func (e *StructuredGoalExecutor) execDecideStep(ctx context.Context, goal core.Goal, deps core.AgentDeps, progress *goalPlanProgress, step PlanStep, sessID, model, modelRole string) (core.IterationResult, error) {
 	// Fetch context data if context_tool specified.
 	var contextData string
 	if step.ContextTool != "" {
@@ -448,7 +464,7 @@ func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, de
 				peer.Status, peer.CommitSHA, peer.Branch)
 			deps.Logger.Info("plan-executor: auto-REVISE (post-execute, no code)",
 				"status", peer.Status, "commit", peer.CommitSHA, "branch", peer.Branch)
-			return b.handleRevise(ctx, deps, progress, autoMsg)
+			return e.handleRevise(ctx, deps, progress, autoMsg)
 		}
 	}
 
@@ -471,7 +487,7 @@ func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, de
 	}
 
 	decisionPrompt := fmt.Sprintf(decideUser,
-		progress.CurrentStep+1, task.Title,
+		progress.CurrentStep+1, goal.Title,
 		contextBlock,
 		question, progress.RetryCount)
 
@@ -503,7 +519,7 @@ func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, de
 		return core.IterationResult{Progress: progressJSON}, nil
 	}
 
-	return b.handleRevise(ctx, deps, progress, reply)
+	return e.handleRevise(ctx, deps, progress, reply)
 }
 
 // handleRevise processes a REVISE decision: calls code_task_revise with feedback,
@@ -512,7 +528,7 @@ func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, de
 //
 // Increments ReviseCount, not RetryCount, because the rewind will cause a
 // successful code_task_execute to reset RetryCount to 0 and mask the loop.
-func (b *Background) handleRevise(ctx context.Context, deps core.AgentDeps, progress *goalPlanProgress, reply string) (core.IterationResult, error) {
+func (e *StructuredGoalExecutor) handleRevise(ctx context.Context, deps core.AgentDeps, progress *goalPlanProgress, reply string) (core.IterationResult, error) {
 	progress.ReviseCount++
 
 	feedback := reply

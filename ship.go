@@ -21,8 +21,9 @@ import (
 	"github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/agenttask"
 	"github.com/rasimio/blueship/internal/anthropic"
-	"github.com/rasimio/blueship/internal/gemini"
 	"github.com/rasimio/blueship/internal/gateway"
+	"github.com/rasimio/blueship/internal/gemini"
+	"github.com/rasimio/blueship/internal/goal"
 	"github.com/rasimio/blueship/internal/infrastructure/ws"
 	"github.com/rasimio/blueship/internal/ollama"
 	"github.com/rasimio/blueship/internal/openai"
@@ -38,10 +39,11 @@ import (
 
 // Ship is the main BlueShip runtime instance.
 type Ship struct {
-	cfg      Config
-	modules  []Module
-	handlers map[string]core.AgentHandler
-	logger   *slog.Logger
+	cfg          Config
+	modules      []Module
+	handlers     map[string]core.AgentHandler          // scheduled-task handlers (heartbeat, etc.)
+	goalHandlers map[core.GoalStrategy]core.GoalHandler // goal strategy executors
+	logger       *slog.Logger
 }
 
 // New creates a new BlueShip instance with the given configuration.
@@ -59,6 +61,17 @@ func New(cfg Config) *Ship {
 // RegisterModule adds a module to the BlueShip instance.
 func (s *Ship) RegisterModule(m Module) {
 	s.modules = append(s.modules, m)
+}
+
+// RegisterGoalHandler registers an executor for one GoalStrategy value.
+// Agents choose which strategies their goals support by registering the
+// corresponding handlers. If no handler is registered for a goal's strategy
+// the scheduler fails that goal on first dispatch.
+func (s *Ship) RegisterGoalHandler(strategy core.GoalStrategy, h core.GoalHandler) {
+	if s.goalHandlers == nil {
+		s.goalHandlers = make(map[core.GoalStrategy]core.GoalHandler)
+	}
+	s.goalHandlers[strategy] = h
 }
 
 // RegisterAgentHandler registers a named handler for autonomous agent tasks.
@@ -175,6 +188,9 @@ func (s *Ship) Run(ctx context.Context) error {
 		// Build a global tool registry for agent tasks.
 		globalRegistry := core.NewToolRegistry()
 		tool.RegisterBuiltinTools(globalRegistry, deps)
+		if err := tool.RegisterGoalTools(globalRegistry, deps); err != nil {
+			return fmt.Errorf("register goal tools: %w", err)
+		}
 		reg.RegisterAllTools(globalRegistry, deps)
 
 		// Load tool descriptions from DB.
@@ -231,6 +247,21 @@ func (s *Ship) Run(ctx context.Context) error {
 			defer wg.Done()
 			scheduler.RunLoopWithTrigger(ctx, s.logger, "agent-tasks", 1*time.Minute, agentSched.Run, trigger, agentSched.WakeFromCallback)
 		}()
+
+		// Goal scheduler runs alongside agent-task scheduler. They don't share
+		// state; goals use a separate table (blueship.goals) and a separate
+		// handler registry keyed by GoalStrategy instead of handler name.
+		// Handlers are registered by the agent (e.g. StructuredGoalExecutor
+		// from blueship/handler) — the Ship itself stays agent-agnostic.
+		if len(s.goalHandlers) > 0 {
+			goalStore := core.NewGoalStore(shipDB)
+			goalSched := goal.NewScheduler(goalStore, s.goalHandlers, globalRegistry, msgStore, deps, notifyFn, s.logger)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				scheduler.RunLoopWithTrigger(ctx, s.logger, "goals", 1*time.Minute, goalSched.Run, trigger, goalSched.WakeFromCallback)
+			}()
+		}
 	}
 
 	// 5. Start Telegram Gateway
@@ -353,6 +384,9 @@ func (s *Ship) startA2A(ctx context.Context, deps *Deps, reg *moduleRegistry) er
 	// rebuilt separately on each request, but the A2A path never sees those.
 	a2aReg := core.NewToolRegistry()
 	tool.RegisterBuiltinTools(a2aReg, deps)
+	if err := tool.RegisterGoalTools(a2aReg, deps); err != nil {
+		s.logger.Warn("a2a: register goal tools failed", "error", err)
+	}
 	for _, m := range s.modules {
 		if tp, ok := m.(ToolProvider); ok {
 			tp.RegisterTools(a2aReg, deps)

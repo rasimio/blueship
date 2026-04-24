@@ -11,44 +11,43 @@ import (
 	"github.com/rasimio/blueship/core"
 )
 
-// Background implements core.AgentHandler for generic multi-iteration tasks.
-// Uses a shared session across all iterations so LLM has full conversation history.
-// Supports auto-pause: if the LLM calls an async peer tool (code_task_create, etc.),
-// the handler pauses until an external callback wakes the task.
+// Background implements core.AgentHandler for recurring scheduled tasks
+// (heartbeat, inner-thought, session-summary, etc.). Long-running goals
+// have their own lifecycle primitive (core.Goal) and their own executor
+// (StructuredGoalExecutor). This handler no longer knows anything about
+// goals.
+//
+// Uses a shared session across iterations for non-recurring tasks, so the
+// LLM sees full conversation history. Recurring tasks (schedule != nil)
+// get a fresh session per tick to bound history growth.
+//
+// Auto-pause: if the LLM calls a tool flagged async/peer-callable (via its
+// registration metadata — see core.ToolRegistry), the handler pauses
+// until an external callback wakes the task. The list of pause-triggering
+// tool names is agent-configurable; it is NOT hardcoded here.
 type Background struct {
-	tz *time.Location
+	tz         *time.Location
+	pauseTools map[string]bool // tool names that trigger pause when invoked
 }
 
-func NewBackground(tz *time.Location) *Background {
-	return &Background{tz: tz}
+// NewBackground constructs a scheduled-task handler. pauseTools is the set
+// of async/peer-callable tool names this agent recognises — when the LLM
+// invokes one of them, the handler pauses awaiting a callback. Pass nil
+// or empty map if the agent has no async peer integrations.
+func NewBackground(tz *time.Location, pauseTools map[string]bool) *Background {
+	if pauseTools == nil {
+		pauseTools = map[string]bool{}
+	}
+	return &Background{tz: tz, pauseTools: pauseTools}
 }
 
 func (b *Background) DefaultTools() []string {
 	return nil
 }
 
-// pauseTools are async peer tools that require waiting for a callback.
-var pauseTools = map[string]bool{
-	"code_task_create":  true,
-	"code_task_execute": true,
-	"code_task_publish": true,
-	"code_task_revise":  true,
-}
-
 const maxRevisions = 3
 
 func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.AgentDeps) (core.IterationResult, error) {
-	// Check if this is a plan-based goal (goal-orchestrator prompt).
-	// Plan executor: LLM plans once, handler executes mechanically.
-	if task.Config != nil {
-		var cfg struct {
-			Prompt string `json:"prompt"`
-		}
-		if json.Unmarshal(task.Config, &cfg) == nil && cfg.Prompt == "goal-orchestrator" {
-			return b.runPlanExecutor(ctx, task, deps)
-		}
-	}
-
 	// 1. Load system prompt.
 	// Task config may override the instruction prompt key (default: "background-task").
 	instructionKey := "background-task"
@@ -203,7 +202,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	calledRevise := false
 
 	for _, trace := range result.ToolTraces {
-		if pauseTools[trace.Name] {
+		if b.pauseTools[trace.Name] {
 			var out map[string]any
 			if json.Unmarshal([]byte(trace.Output), &out) == nil {
 				if tid, ok := out["task_id"].(string); ok && tid != "" {
