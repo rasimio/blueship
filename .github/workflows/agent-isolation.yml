@@ -1,0 +1,47 @@
+name: agent-isolation
+
+# BlueShip is a generic single-agent runtime. Code must stay free of
+# references to any specific agent (Arlene, Liya, etc.) — those belong
+# in the agent's own repo. This workflow fails the build if agent-specific
+# names or known agent-specific tool names leak back in.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  no-agent-specific-names:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Grep for agent-specific identifiers in Go source
+        run: |
+          set +e
+          HITS=$(grep -rnE '\bArlene\b|\barlene\b|\bLiya\b|\bliya\b|\bЛия\b|goal-orchestrator' --include='*.go' . | grep -v rasimio || true)
+          if [ -n "$HITS" ]; then
+            echo "BlueShip must not reference any specific agent. Offending lines:"
+            echo "$HITS"
+            exit 1
+          fi
+
+      - name: Grep for known agent-specific tool names
+        run: |
+          set +e
+          HITS=$(grep -rnE 'code_task_|code_repo_' --include='*.go' . || true)
+          if [ -n "$HITS" ]; then
+            echo "BlueShip must not hardcode peer tool names (belong to specific agents). Offending lines:"
+            echo "$HITS"
+            exit 1
+          fi
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - run: go build ./...
+      - run: go vet ./...

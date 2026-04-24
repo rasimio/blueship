@@ -129,7 +129,7 @@ type RetryConfig struct {
 // through A2A if they were explicitly marked Exposed in the ToolRegistry.
 type A2AConfig struct {
 	Enabled   bool
-	Name      string // ship identifier published in the agent card (e.g. "liya")
+	Name      string // ship identifier published in the agent card
 	Version   string // semver or build tag
 	Port      int    // 0 = disabled
 	BaseURL   string // externally reachable URL for agent card self-reference
@@ -158,7 +158,7 @@ type A2AConfig struct {
 
 // A2APeerConfig describes a known remote ship.
 type A2APeerConfig struct {
-	Name      string // stable identifier ("liya")
+	Name      string // stable identifier of the peer agent
 	BaseURL   string // e.g. "http://localhost:8090"
 	AuthToken string // bearer token to send on outgoing calls
 }

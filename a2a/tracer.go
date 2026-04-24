@@ -34,7 +34,7 @@ type MessageSender interface {
 type TelegramGroupTracer struct {
 	Sender    MessageSender
 	ChatID    string
-	SelfName  string // this ship's name (e.g. "arlene")
+	SelfName  string // this ship's name
 	Level     TraceLevel
 	Logger    *slog.Logger
 }

@@ -102,7 +102,7 @@ func (g *Gateway) parseCommand(text string) (cmd string, forUs bool) {
 //  2. Reply to one of our own previous messages.
 //
 // Anything else — including a reply to another user or bot, ambient chat,
-// or a vocative "Лия, ..." without the @-mention — is skipped. This keeps
+// or a vocative "<name>, ..." without the @-mention — is skipped. This keeps
 // the bot quiet in shared rooms unless the user actually invokes it via
 // Telegram's built-in mention or reply UI.
 func (g *Gateway) shouldProcessGroupMessage(msg *telegram.Message, text string) bool {
@@ -605,8 +605,8 @@ func (g *Gateway) GetOwnerUser() *UserState {
 
 // formatRulesAsGuidance renders a slice of ActiveRule entries into the
 // "WHEN: ... DO: ... TOOLS: ..." shape the cortex prompt already understands.
-// Used by the no-reflex rule engine path so liya (and other agents without a
-// reflex pipeline) get the same guidance injection as reflex-driven agents.
+// Used by the no-reflex rule-engine path so agents without a reflex pipeline
+// still get guidance injection.
 func formatRulesAsGuidance(rules []bs.ActiveRule) string {
 	if len(rules) == 0 {
 		return ""
@@ -862,8 +862,8 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	var postActions []bs.PostAction // executed after cortex response
 	var engineRuleCount int
 
-	// Rule engine pass for agents that run WITHOUT a ReflexPreparer (e.g.
-	// liya). Two responsibilities:
+	// Rule engine pass for agents that run WITHOUT a ReflexPreparer.
+	// Two responsibilities:
 	//   1. Abort the turn immediately if any silent rule matched.
 	//   2. Format non-silent rules as guidance and surface them into the
 	//      cortex prompt via reflexGuidance + debug dump.
@@ -1353,11 +1353,10 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 
 	// Tool list for the reflex prompt: one tool per line with its full
 	// description. Reflex needs descriptions to disambiguate semantically
-	// close tools (code_task_status vs memory_search on a UUID, etc.) —
-	// name-only lists force it to guess from the name alone, which is
-	// where most mis-selection bugs come from. The descriptions are the
-	// same DB-driven strings the cortex sees, via the per-user registry
-	// built during getOrInitUser.
+	// close tools — name-only lists force it to guess, which is where
+	// most mis-selection bugs come from. The descriptions are the same
+	// DB-driven strings the cortex sees, via the per-user registry built
+	// during getOrInitUser.
 	toolsList := "none configured"
 	if us.Registry != nil && g.deps.RoleTools != nil {
 		names := g.deps.RoleTools.Get("cortex")

@@ -59,7 +59,7 @@ func (s *Store) UpsertPeer(ctx context.Context, name, baseURL, token string) (*a
 	return &p, nil
 }
 
-// GetPeerByName looks up a peer by its stable name (e.g. "liya").
+// GetPeerByName looks up a peer by its stable name.
 func (s *Store) GetPeerByName(ctx context.Context, name string) (*a2a.Peer, error) {
 	const q = `
 		SELECT id, name, base_url, auth_token, agent_card, card_fetched_at,

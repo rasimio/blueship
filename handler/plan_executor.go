@@ -85,8 +85,7 @@ type goalPlanProgress struct {
 	// LastAsyncStepIdx is the plan index of the most recent tool step that
 	// paused waiting for a peer callback. REVISE rewinds to this step so
 	// the executor re-drives the async path on the regenerated plan.
-	// -1 = none seen yet; generic replacement for the old hardcoded
-	// "find last code_task_execute step" scan.
+	// -1 = none seen yet.
 	LastAsyncStepIdx int             `json:"last_async_step_idx,omitempty"`
 	LastResult       json.RawMessage `json:"last_result,omitempty"`
 	Phase            string          `json:"phase"`
@@ -104,12 +103,13 @@ const maxStepRetries = 3
 // again only at explicit decide gates.
 //
 // Generic, agent-agnostic. It does NOT know about any specific tool
-// names: behaviours that used to be hardcoded (auto-REVISE when a peer
-// didn't produce code, call code_task_revise on reject, rewind to the
-// last code_task_execute step) are now expressed declaratively on the
-// plan step itself (Precondition, OnRevise) and via tracked state
-// (LastAsyncStepIdx). Agents drop in their own tool catalog and their
-// own plan template; this executor just runs the plan.
+// names. Behaviours that feel domain-specific (auto-REVISE when a
+// peer's result doesn't meet expectations, invoking a peer's revise
+// endpoint on reject, rewinding to the last async step) are all
+// expressed declaratively on the plan step itself (Precondition,
+// OnRevise) and via tracked state (LastAsyncStepIdx). Agents drop
+// in their own tool catalog and their own plan template; this
+// executor just runs the plan.
 type StructuredGoalExecutor struct {
 	tz *time.Location
 }
@@ -541,9 +541,9 @@ func (e *StructuredGoalExecutor) handleRevise(ctx context.Context, deps core.Age
 	}
 
 	// Optional: fire the plan's declared revise-callback tool so the
-	// peer knows to regenerate. Historically this was a hardcoded
-	// code_task_revise call; now the plan author supplies it declaratively
-	// (or omits it for purely local re-plans).
+	// peer knows to regenerate. The plan author supplies the tool name
+	// and input template declaratively, or omits it for purely local
+	// re-plans.
 	if step.OnRevise != nil && step.OnRevise.Tool != "" {
 		var input json.RawMessage
 		if len(step.OnRevise.Input) > 0 {
@@ -561,7 +561,6 @@ func (e *StructuredGoalExecutor) handleRevise(ctx context.Context, deps core.Age
 
 	// Rewind CurrentStep to the most recent async (paused) step so the
 	// next iteration re-drives execution on the regenerated peer state.
-	// Generic replacement for the old hardcoded "find last code_task_execute".
 	if progress.LastAsyncStepIdx >= 0 && progress.LastAsyncStepIdx < progress.CurrentStep {
 		deps.Logger.Info("plan-executor: REVISE rewind",
 			"from_step", progress.CurrentStep, "to_step", progress.LastAsyncStepIdx,
@@ -638,8 +637,7 @@ func isPresent(v any) bool {
 
 // formatMetadata renders the top-level scalar fields of a JSON object as a
 // compact "Context metadata:\n- key: value\n…" block for the decide prompt.
-// Generic replacement for the earlier code_task-specific formatter: any
-// tool's status payload gets its salient signals surfaced up top, while
+// Any tool's status payload gets its salient signals surfaced up top, while
 // large strings are summarised (not dumped) to keep the truncation budget
 // available for the full raw JSON underneath.
 //

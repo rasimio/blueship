@@ -14,9 +14,9 @@ import (
 //
 // These tools operate on the `goals` table via core.GoalStore. Any agent
 // running on BlueShip can use them — they're agent-agnostic: the same
-// `goal_create` works for Arlene creating a "write a Prometheus exporter"
-// goal and for a hypothetical marketing agent creating a "draft Q2
-// announcement" goal.
+// `goal_create` works for a personal-assistant agent setting up an
+// autonomous research task and for a marketing agent kicking off a
+// campaign generation.
 //
 // Descriptions are loaded from the tool_descriptions DB table at startup
 // (same pattern as other registered tools). Missing description rows in
