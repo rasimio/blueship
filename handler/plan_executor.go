@@ -92,69 +92,62 @@ func (b *Background) runPlanExecutor(ctx context.Context, task core.AgentTask, d
 }
 
 // planPhase asks the LLM to create a structured plan for the goal.
+//
+// Planning is a pure single-shot LLM call: no session, no history, no tools,
+// no personality prompts, no reflex context injection. The model sees only
+// the dedicated goal-plan-system prompt (strict JSON-only instructions) and
+// a user message with the goal and available tool names. Session-backed
+// agent.Loop would contaminate subsequent plan retries with the model's
+// earlier prose-style outputs — single-shot guarantees every retry starts
+// from the same clean prompt.
 func (b *Background) planPhase(ctx context.Context, task core.AgentTask, deps core.AgentDeps, progress *goalPlanProgress, sessID, model, modelRole string) (core.IterationResult, error) {
 	desc := ""
 	if task.Description != nil {
 		desc = *task.Description
 	}
 
-	// Load ONLY goal-orchestrator prompt for planning (no personality prompts).
-	// Personality prompts cause the model to "chat" instead of generating JSON.
-	systemPrompt, err := deps.Prompts.Get(ctx, "goal-orchestrator")
-	if err != nil {
-		return core.IterationResult{}, fmt.Errorf("load prompt goal-orchestrator: %w", err)
-	}
+	_ = modelRole // reserved for future per-role prompt selection
 
+	systemPrompt, err := deps.Prompts.Get(ctx, "goal-plan-system")
+	if err != nil {
+		return core.IterationResult{}, fmt.Errorf("load prompt goal-plan-system: %w", err)
+	}
 	now := time.Now().In(b.tz)
 	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s", now.Format("2006-01-02 15:04 MST (Monday)"), systemPrompt)
 
-	// Run reflex pipeline for context.
-	reflex := runReflexPipeline(ctx, deps, b.tz, desc)
-
-	// Build planning prompt — goal-orchestrator system prompt already contains
-	// all plan format instructions. User message only provides goal + tools.
 	goalPlanUser, _ := deps.Prompts.Get(ctx, "goal-plan-user")
 	planPrompt := fmt.Sprintf(goalPlanUser, task.Title, desc, buildToolsList(deps))
 
-	// Inject context.
-	var injectedCtx string
-	if reflex.InjectedCtx != "" {
-		injectedCtx = reflex.InjectedCtx
-	}
-	if reflex.Guidance != "" {
-		if injectedCtx != "" {
-			injectedCtx += "\n\n" + reflex.Guidance
-		} else {
-			injectedCtx = reflex.Guidance
-		}
-	}
-
-	// Planning: no tools — model must output JSON plan as text, not call tools.
-	emptyRegistry := core.NewToolRegistry()
-	loop := agent.NewLoop(deps.LLM, deps.Store, emptyRegistry, deps.RoleTools, deps.Config, deps.Logger)
-	reply, err := loop.Run(ctx, agent.RunConfig{
-		SessionID:       sessID,
-		SystemPrompt:    systemPrompt,
-		InjectedContext: injectedCtx,
-		Model:           model,
-		MaxTokens:       deps.Config.Limits.MaxOutputTokens,
-		MaxTurns:        1,
-		Role:            modelRole,
-	}, planPrompt)
+	resp, err := deps.LLM.Complete(ctx, core.CompletionRequest{
+		Model:     model,
+		MaxTokens: deps.Config.Limits.MaxOutputTokens,
+		System:    systemPrompt,
+		Messages:  []core.Message{{Role: "user", Content: planPrompt}},
+	})
 	if err != nil {
-		return core.IterationResult{}, fmt.Errorf("planning: %w", err)
+		return core.IterationResult{}, fmt.Errorf("planning LLM: %w", err)
 	}
+	reply := core.ExtractText(resp.Content)
 
 	// Parse plan from LLM output.
 	plan, parseErr := parsePlan(reply)
 	if parseErr != nil || len(plan) < 4 {
-		deps.Logger.Warn("plan-executor: invalid plan, retrying next iteration",
-			"error", parseErr, "steps", len(plan), "reply_len", len(reply))
+		progress.RetryCount++
+		deps.Logger.Warn("plan-executor: invalid plan",
+			"error", parseErr, "steps", len(plan), "reply_len", len(reply),
+			"attempt", progress.RetryCount, "reply_head", truncate(reply, 200))
+		if progress.RetryCount >= maxStepRetries {
+			summary := fmt.Sprintf("Goal failed: could not generate a valid plan in %d attempts. Last reply head: %s",
+				progress.RetryCount, truncate(reply, 300))
+			return core.IterationResult{Done: true, Output: summary, Notify: summary}, nil
+		}
 		progress.Phase = "plan_invalid"
-		progress.Summary = fmt.Sprintf("Plan invalid (%d steps). Reply: %s", len(plan), truncate(reply, 300))
+		progress.Summary = fmt.Sprintf("Plan invalid (attempt %d/%d, %d steps): %s",
+			progress.RetryCount, maxStepRetries, len(plan), truncate(reply, 200))
 		progressJSON, _ := json.Marshal(progress)
 		return core.IterationResult{Progress: progressJSON}, nil
 	}
+	progress.RetryCount = 0 // plan accepted — reset the counter for execution-phase retries
 
 	// Validate: plan must contain at least one "tool" step with code_task_create.
 	hasTaskCreate := false
