@@ -28,7 +28,15 @@ type goalPlanProgress struct {
 	RepoPath    string          `json:"repo_path,omitempty"`
 	Plan        []PlanStep      `json:"plan,omitempty"`
 	CurrentStep int             `json:"current_step"`
-	RetryCount  int             `json:"retry_count,omitempty"` // consecutive retries on same step
+	// RetryCount is the consecutive tool-error count on the current step.
+	// Reset to 0 when any tool call succeeds.
+	RetryCount int `json:"retry_count,omitempty"`
+	// ReviseCount is the number of REVISE decisions issued on this step. It
+	// accumulates across the execute→decide→REVISE→rewind→execute cycle,
+	// because a successful re-execution does NOT mean the reviewer will
+	// approve the next time. Persists separately from RetryCount so that
+	// tool retries (which reset on success) don't mask a decide loop.
+	ReviseCount int             `json:"revise_count,omitempty"`
 	LastResult  json.RawMessage `json:"last_result,omitempty"`
 	Phase       string          `json:"phase"`
 	Summary     string          `json:"summary"`
@@ -416,26 +424,31 @@ func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, de
 		}
 	}
 
+	// When the context comes from code_task_status, extract the key metadata
+	// fields up front. If we only hand the reviewer the raw JSON, a huge diff
+	// eats the 3000-char truncation window and the reviewer ends up judging
+	// the work from a mid-diff fragment — it tends to REVISE "can't verify"
+	// even when commit_sha, test_pass=true, and a 36KB diff already prove
+	// the code is there. Surfacing the metadata explicitly lets it judge on
+	// the facts, not on a truncated string.
+	var peer peerTaskStatus
+	var peerParsed bool
+	if step.ContextTool == "code_task_status" && contextData != "" {
+		peerParsed = json.Unmarshal([]byte(contextData), &peer) == nil
+	}
+
 	// Fix B: short-circuit auto-REVISE for post-execute decisions when the peer
 	// task has no produced code. This prevents the LLM from approving plan_ready
 	// state (which means "plan regenerated after revise, but code not re-executed").
-	if step.ContextTool == "code_task_status" && contextData != "" && hasExecuteBeforeStep(progress.Plan, progress.CurrentStep) {
-		var peer struct {
-			Status    string `json:"status"`
-			CommitSHA string `json:"commit_sha"`
-			Diff      string `json:"diff"`
-			Branch    string `json:"branch"`
-		}
-		if json.Unmarshal([]byte(contextData), &peer) == nil {
-			codeReady := (peer.Status == "done" || peer.Status == "review_ready") &&
-				(peer.CommitSHA != "" || peer.Diff != "" || peer.Branch != "")
-			if !codeReady {
-				autoMsg := fmt.Sprintf("REVISE: post-execute decide requires produced code, but peer task has status=%s, commit=%q, branch=%q",
-					peer.Status, peer.CommitSHA, peer.Branch)
-				deps.Logger.Info("plan-executor: auto-REVISE (post-execute, no code)",
-					"status", peer.Status, "commit", peer.CommitSHA, "branch", peer.Branch)
-				return b.handleRevise(ctx, deps, progress, autoMsg)
-			}
+	if peerParsed && hasExecuteBeforeStep(progress.Plan, progress.CurrentStep) {
+		codeReady := (peer.Status == "done" || peer.Status == "review_ready") &&
+			(peer.CommitSHA != "" || peer.Diff != "" || peer.Branch != "")
+		if !codeReady {
+			autoMsg := fmt.Sprintf("REVISE: post-execute decide requires produced code, but peer task has status=%s, commit=%q, branch=%q",
+				peer.Status, peer.CommitSHA, peer.Branch)
+			deps.Logger.Info("plan-executor: auto-REVISE (post-execute, no code)",
+				"status", peer.Status, "commit", peer.CommitSHA, "branch", peer.Branch)
+			return b.handleRevise(ctx, deps, progress, autoMsg)
 		}
 	}
 
@@ -449,9 +462,17 @@ func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, de
 	decideSystem, _ := deps.Prompts.Get(ctx, "goal-decide-system")
 	decideUser, _ := deps.Prompts.Get(ctx, "goal-decide-user")
 
+	// When we have structured metadata, prepend it as a compact header so the
+	// reviewer sees the signals that don't fit inside a truncated diff. The
+	// raw JSON still follows in case there's something the header missed.
+	contextBlock := truncate(contextData, 3000)
+	if peerParsed {
+		contextBlock = formatPeerMetadata(peer) + "\n\nRaw status JSON (truncated):\n" + contextBlock
+	}
+
 	decisionPrompt := fmt.Sprintf(decideUser,
 		progress.CurrentStep+1, task.Title,
-		truncate(contextData, 3000),
+		contextBlock,
 		question, progress.RetryCount)
 
 	systemPrompt := decideSystem
@@ -475,6 +496,7 @@ func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, de
 	if strings.HasPrefix(strings.ToUpper(reply), "APPROVE") {
 		progress.CurrentStep++
 		progress.RetryCount = 0
+		progress.ReviseCount = 0
 		progress.Phase = fmt.Sprintf("step_%d", progress.CurrentStep)
 		progress.Summary = fmt.Sprintf("Approved step %d, continuing", progress.CurrentStep)
 		progressJSON, _ := json.Marshal(progress)
@@ -487,8 +509,11 @@ func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, de
 // handleRevise processes a REVISE decision: calls code_task_revise with feedback,
 // rewinds CurrentStep to the last code_task_execute so the executor re-runs
 // execution on the regenerated plan, and enforces a retry cap.
+//
+// Increments ReviseCount, not RetryCount, because the rewind will cause a
+// successful code_task_execute to reset RetryCount to 0 and mask the loop.
 func (b *Background) handleRevise(ctx context.Context, deps core.AgentDeps, progress *goalPlanProgress, reply string) (core.IterationResult, error) {
-	progress.RetryCount++
+	progress.ReviseCount++
 
 	feedback := reply
 	if idx := strings.Index(reply, ":"); idx >= 0 {
@@ -496,10 +521,10 @@ func (b *Background) handleRevise(ctx context.Context, deps core.AgentDeps, prog
 	}
 
 	// Fix C: cap REVISE attempts.
-	if progress.RetryCount >= maxStepRetries {
+	if progress.ReviseCount >= maxStepRetries {
 		summary := fmt.Sprintf("Goal failed: %d revise attempts exhausted. Last feedback: %s",
-			progress.RetryCount, truncate(feedback, 300))
-		deps.Logger.Warn("plan-executor: fail-fast (revise cap)", "retries", progress.RetryCount)
+			progress.ReviseCount, truncate(feedback, 300))
+		deps.Logger.Warn("plan-executor: fail-fast (revise cap)", "revises", progress.ReviseCount)
 		return core.IterationResult{Done: true, Output: summary, Notify: summary}, nil
 	}
 
@@ -515,12 +540,13 @@ func (b *Background) handleRevise(ctx context.Context, deps core.AgentDeps, prog
 	// state without ever invoking the executor on the new plan.
 	if rewindTo := findLastExecuteStep(progress.Plan, progress.CurrentStep); rewindTo >= 0 {
 		deps.Logger.Info("plan-executor: REVISE rewind",
-			"from_step", progress.CurrentStep, "to_step", rewindTo)
+			"from_step", progress.CurrentStep, "to_step", rewindTo,
+			"revise_count", progress.ReviseCount)
 		progress.CurrentStep = rewindTo
 	}
 
 	progress.Phase = "waiting_for_revise"
-	progress.Summary = fmt.Sprintf("Revised (attempt %d): %s", progress.RetryCount, truncate(feedback, 200))
+	progress.Summary = fmt.Sprintf("Revised (attempt %d): %s", progress.ReviseCount, truncate(feedback, 200))
 	progressJSON, _ := json.Marshal(progress)
 	return core.IterationResult{Pause: true, Progress: progressJSON}, nil
 }
@@ -552,6 +578,68 @@ func hasExecuteBeforeStep(plan []PlanStep, at int) bool {
 		}
 	}
 	return false
+}
+
+// peerTaskStatus mirrors the fields we care about from code_task_status JSON.
+// All fields are optional; missing fields are rendered as empty strings or
+// zero values and skipped from the metadata header.
+type peerTaskStatus struct {
+	Status         string `json:"status"`
+	Branch         string `json:"branch"`
+	CommitSHA      string `json:"commit_sha"`
+	Diff           string `json:"diff"`
+	TestPass       *bool  `json:"test_pass"`
+	BaselineTests  *int   `json:"baseline_tests"`
+	PublishStatus  string `json:"publish_status"`
+	NumTurns       int    `json:"num_turns"`
+	DurationMs     int64  `json:"duration_ms"`
+	PlanFeedback   string `json:"plan_feedback"`
+	Error          string `json:"error"`
+}
+
+// formatPeerMetadata renders peerTaskStatus as a compact human-readable
+// header for the decide prompt. Lets the reviewer judge by metadata
+// (test_pass, commit exists, diff size) instead of trying to parse a
+// truncated diff fragment.
+func formatPeerMetadata(p peerTaskStatus) string {
+	var b strings.Builder
+	b.WriteString("Peer task metadata:\n")
+	if p.Status != "" {
+		fmt.Fprintf(&b, "- status: %s\n", p.Status)
+	}
+	if p.Branch != "" {
+		fmt.Fprintf(&b, "- branch: %s\n", p.Branch)
+	}
+	if p.CommitSHA != "" {
+		short := p.CommitSHA
+		if len(short) > 12 {
+			short = short[:12]
+		}
+		fmt.Fprintf(&b, "- commit_sha: %s\n", short)
+	}
+	fmt.Fprintf(&b, "- diff_size: %d chars\n", len(p.Diff))
+	if p.TestPass != nil {
+		fmt.Fprintf(&b, "- test_pass: %t\n", *p.TestPass)
+	}
+	if p.BaselineTests != nil {
+		fmt.Fprintf(&b, "- baseline_tests: %d\n", *p.BaselineTests)
+	}
+	if p.PublishStatus != "" {
+		fmt.Fprintf(&b, "- publish_status: %s\n", p.PublishStatus)
+	}
+	if p.NumTurns > 0 {
+		fmt.Fprintf(&b, "- num_turns: %d\n", p.NumTurns)
+	}
+	if p.DurationMs > 0 {
+		fmt.Fprintf(&b, "- duration: %ds\n", p.DurationMs/1000)
+	}
+	if p.PlanFeedback != "" {
+		fmt.Fprintf(&b, "- plan_feedback: %s\n", truncate(p.PlanFeedback, 200))
+	}
+	if p.Error != "" {
+		fmt.Fprintf(&b, "- error: %s\n", truncate(p.Error, 200))
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // substituteVars replaces $peer_task_id and $result.X in input JSON.
