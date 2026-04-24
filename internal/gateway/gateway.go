@@ -552,6 +552,9 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 	userDeps := g.deps.ForUser(userID, chatID, isOwner)
 	registry := bs.NewToolRegistry()
 	tool.RegisterBuiltinTools(registry, userDeps)
+	if err := tool.RegisterGoalTools(registry, userDeps); err != nil {
+		g.logger.Warn("gateway: register goal tools failed", "error", err)
+	}
 	g.modules.RegisterAllTools(registry, userDeps)
 
 	// Load tool descriptions from DB (overrides hardcoded descriptions).
