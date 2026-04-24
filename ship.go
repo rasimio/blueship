@@ -24,6 +24,7 @@ import (
 	"github.com/rasimio/blueship/internal/gemini"
 	"github.com/rasimio/blueship/internal/gateway"
 	"github.com/rasimio/blueship/internal/infrastructure/ws"
+	"github.com/rasimio/blueship/internal/ollama"
 	"github.com/rasimio/blueship/internal/openai"
 	"github.com/rasimio/blueship/internal/openaicodex"
 	"github.com/rasimio/blueship/internal/scheduler"
@@ -542,10 +543,19 @@ func OpenAIWithConfig(apiKey string, timeout time.Duration) CompletionProvider {
 }
 
 // OpenAICompatible creates a CompletionProvider for any OpenAI-compatible API
-// (MLX, vLLM, Ollama, LM Studio, etc.). Pass empty apiKey if auth is not required.
+// (vLLM, LM Studio, etc.). Pass empty apiKey if auth is not required.
 // extraParams are merged into every request JSON (e.g. for chat_template_kwargs).
+// For Ollama prefer Ollama() below — its /v1/ endpoint has bugs around the
+// Gemma reasoning field.
 func OpenAICompatible(baseURL, apiKey string, timeout time.Duration, extraParams map[string]any) CompletionProvider {
 	return openai.NewCompatibleProvider(baseURL, apiKey, timeout, extraParams)
+}
+
+// Ollama creates a CompletionProvider that speaks Ollama's native /api/chat
+// protocol (NDJSON streaming, options-nested generation params, think=false).
+// Pass empty baseURL for http://localhost:11434.
+func Ollama(baseURL string, timeout time.Duration) CompletionProvider {
+	return ollama.NewCompletionProvider(baseURL, timeout)
 }
 
 // Gemini creates a CompletionProvider using Gemini generateContent.
