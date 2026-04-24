@@ -48,6 +48,37 @@ type Config struct {
 	Retry    RetryConfig
 	Gateway  GatewayConfig
 	A2A      A2AConfig
+	Fleet    FleetConfig
+}
+
+// FleetConfig controls the optional BlueFleet directory integration.
+//
+// When Enabled, the ship registers itself at startup (publishes display
+// name, description, capabilities, and the exposed tool catalog) and
+// periodically refreshes a local cache of peers offering capabilities
+// listed in InterestedIn. The Fleet path is purely additive — it does not
+// yet replace A2A config-driven peers (that cutover happens in a later
+// migration phase).
+type FleetConfig struct {
+	Enabled         bool
+	BaseURL         string // e.g. "http://localhost:8500"
+	ClientID        string // OAuth client_id issued by `bluefleet-admin register`
+	ClientSecret    string // OAuth client_secret (env-sourced; do not commit)
+	DisplayName     string // human-friendly name
+	Description     string // short blurb shown in agent cards
+	EndpointURL     string // where peers invoke tools on this Ship (usually A2A.BaseURL)
+	PublicKey       string // PEM-encoded public key (optional)
+	Capabilities    []FleetCapability
+	InterestedIn    []string      // capability tags to search for peers
+	RefreshInterval time.Duration // default 5 minutes
+}
+
+// FleetCapability is one declared ability of this agent. Tag is the
+// discovery key peers search on; description is free-text.
+type FleetCapability struct {
+	Tag         string
+	Description string
+	Metadata    []byte // optional JSON metadata
 }
 
 // OwnerConfig identifies the single owner of this instance.

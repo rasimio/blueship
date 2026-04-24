@@ -21,6 +21,7 @@ import (
 	"github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/agenttask"
 	"github.com/rasimio/blueship/internal/anthropic"
+	"github.com/rasimio/blueship/internal/fleet"
 	"github.com/rasimio/blueship/internal/gateway"
 	"github.com/rasimio/blueship/internal/gemini"
 	"github.com/rasimio/blueship/internal/goal"
@@ -168,8 +169,24 @@ func (s *Ship) Run(ctx context.Context) error {
 		}
 	}
 
-	// 4. Start background jobs from modules
+	// 3c. Fleet integration (optional). Publishes identity and refreshes
+	// the peer cache in the background. Does not touch the A2A invocation
+	// path in Phase 7 — federated tool handlers land in the next phase.
 	var wg sync.WaitGroup
+	if s.cfg.Fleet.Enabled {
+		s.logger.Info("fleet: config",
+			"base_url", s.cfg.Fleet.BaseURL,
+			"client_id", s.cfg.Fleet.ClientID,
+			"capabilities", len(s.cfg.Fleet.Capabilities),
+			"interested_in", len(s.cfg.Fleet.InterestedIn))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.runFleet(ctx, deps)
+		}()
+	}
+
+	// 4. Start background jobs from modules
 	for _, m := range s.modules {
 		if jp, ok := m.(JobProvider); ok {
 			for _, job := range jp.Jobs(deps) {
@@ -337,6 +354,99 @@ func (r *moduleRegistry) RegisterAllTools(registry *ToolRegistry, d *Deps) {
 // ---------------------------------------------------------------------------
 // A2A startup
 // ---------------------------------------------------------------------------
+
+// runFleet boots the optional BlueFleet integration. Blocks until ctx is
+// cancelled. Transient errors (Fleet down, token expired between refreshes)
+// are logged but never take the Ship down.
+func (s *Ship) runFleet(ctx context.Context, deps *Deps) {
+	shipDB, err := deps.DB("ship")
+	if err != nil {
+		s.logger.Error("fleet: ship db unavailable", "error", err)
+		return
+	}
+	cfg := s.cfg.Fleet
+	// Treat unexpanded ${FOO} placeholders as "env var was not set" so the
+	// Ship silently skips Fleet until deploy provisions credentials.
+	if strings.Contains(cfg.BaseURL, "${") {
+		cfg.BaseURL = ""
+	}
+	if strings.Contains(cfg.ClientID, "${") {
+		cfg.ClientID = ""
+	}
+	if strings.Contains(cfg.ClientSecret, "${") {
+		cfg.ClientSecret = ""
+	}
+	if cfg.BaseURL == "" || cfg.ClientID == "" || cfg.ClientSecret == "" {
+		s.logger.Warn("fleet: missing base_url / client_id / client_secret — skipping")
+		return
+	}
+	cli := fleet.New(fleet.Config{
+		BaseURL:         cfg.BaseURL,
+		ClientID:        cfg.ClientID,
+		ClientSecret:    cfg.ClientSecret,
+		RefreshInterval: cfg.RefreshInterval,
+	}, s.logger)
+
+	caps := make([]fleet.Capability, 0, len(cfg.Capabilities))
+	for _, c := range cfg.Capabilities {
+		var meta json.RawMessage
+		if len(c.Metadata) > 0 {
+			meta = json.RawMessage(c.Metadata)
+		}
+		caps = append(caps, fleet.Capability{
+			Tag:         c.Tag,
+			Description: c.Description,
+			Metadata:    meta,
+		})
+	}
+
+	bs := fleet.NewBootstrap(cli, shipDB, fleet.Identity{
+		DisplayName:  cfg.DisplayName,
+		Description:  cfg.Description,
+		EndpointURL:  cfg.EndpointURL,
+		PublicKey:    cfg.PublicKey,
+		Capabilities: caps,
+	}, cfg.InterestedIn, s.logger)
+
+	bs.Run(ctx, &fleetToolPublisher{db: shipDB})
+}
+
+// fleetToolPublisher reads the ship's `tools` table and returns rows with
+// exposed=true. Keeps the fleet package decoupled from the unified tool
+// store schema.
+type fleetToolPublisher struct{ db sqlxDB }
+
+// sqlxDB is the narrow interface we need from *sqlx.DB so the shim is
+// testable.
+type sqlxDB interface {
+	SelectContext(ctx context.Context, dest any, query string, args ...any) error
+}
+
+func (p *fleetToolPublisher) ListExposedTools(ctx context.Context) ([]fleet.Tool, error) {
+	type row struct {
+		Name        string         `db:"name"`
+		Description string         `db:"description"`
+		Mode        string         `db:"mode"`
+		Schema      []byte         `db:"schema"`
+	}
+	var rows []row
+	const q = `SELECT name, COALESCE(description, '') AS description,
+	                 mode, COALESCE(schema, '{}'::jsonb) AS schema
+	           FROM tools WHERE exposed = true ORDER BY name`
+	if err := p.db.SelectContext(ctx, &rows, q); err != nil {
+		return nil, err
+	}
+	out := make([]fleet.Tool, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, fleet.Tool{
+			Name:        r.Name,
+			Description: r.Description,
+			Mode:        r.Mode,
+			InputSchema: json.RawMessage(r.Schema),
+		})
+	}
+	return out, nil
+}
 
 // registryShim adapts core.ToolRegistry to the a2a.RegistryLike interface
 // without the a2a package having to import core (which would cycle).
