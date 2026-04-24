@@ -85,8 +85,11 @@ type goalPlanProgress struct {
 	// LastAsyncStepIdx is the plan index of the most recent tool step that
 	// paused waiting for a peer callback. REVISE rewinds to this step so
 	// the executor re-drives the async path on the regenerated plan.
-	// -1 = none seen yet.
-	LastAsyncStepIdx int             `json:"last_async_step_idx,omitempty"`
+	// -1 = none seen yet. NO omitempty: the value 0 is meaningful (first
+	// step in plan) and would otherwise be stripped by the JSON marshaler,
+	// and on subsequent unmarshal the initializer default (-1) would take
+	// over, corrupting the rewind target.
+	LastAsyncStepIdx int             `json:"last_async_step_idx"`
 	LastResult       json.RawMessage `json:"last_result,omitempty"`
 	Phase            string          `json:"phase"`
 	Summary          string          `json:"summary"`
