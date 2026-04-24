@@ -34,6 +34,11 @@ type goalPlanProgress struct {
 	Summary     string          `json:"summary"`
 }
 
+// maxStepRetries caps how many times we retry any single step (tool error or REVISE)
+// before failing the goal. Prevents infinite loops on fatal states like a peer task
+// that cannot produce a branch or an LLM that keeps rejecting a correct result.
+const maxStepRetries = 3
+
 
 // runPlanExecutor handles goal tasks using the plan-then-execute pattern.
 // First iteration: LLM creates a structured plan.
@@ -331,6 +336,12 @@ func (b *Background) execToolStep(ctx context.Context, deps core.AgentDeps, prog
 		} else {
 			progress.RetryCount++
 			deps.Logger.Warn("plan-executor: tool error", "tool", step.Tool, "retry", progress.RetryCount, "error", result)
+			if progress.RetryCount >= maxStepRetries {
+				summary := fmt.Sprintf("Goal failed: tool %s errored %d times. Last error: %s",
+					step.Tool, progress.RetryCount, truncate(result, 300))
+				deps.Logger.Warn("plan-executor: fail-fast (retry cap)", "tool", step.Tool, "retries", progress.RetryCount)
+				return core.IterationResult{Done: true, Output: summary, Notify: summary}, nil
+			}
 			progress.Phase = "tool_error"
 			progress.Summary = fmt.Sprintf("Tool %s failed (attempt %d): %s", step.Tool, progress.RetryCount, truncate(result, 200))
 			progressJSON, _ := json.Marshal(progress)
@@ -412,6 +423,29 @@ func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, de
 		}
 	}
 
+	// Fix B: short-circuit auto-REVISE for post-execute decisions when the peer
+	// task has no produced code. This prevents the LLM from approving plan_ready
+	// state (which means "plan regenerated after revise, but code not re-executed").
+	if step.ContextTool == "code_task_status" && contextData != "" && hasExecuteBeforeStep(progress.Plan, progress.CurrentStep) {
+		var peer struct {
+			Status    string `json:"status"`
+			CommitSHA string `json:"commit_sha"`
+			Diff      string `json:"diff"`
+			Branch    string `json:"branch"`
+		}
+		if json.Unmarshal([]byte(contextData), &peer) == nil {
+			codeReady := (peer.Status == "done" || peer.Status == "review_ready") &&
+				(peer.CommitSHA != "" || peer.Diff != "" || peer.Branch != "")
+			if !codeReady {
+				autoMsg := fmt.Sprintf("REVISE: post-execute decide requires produced code, but peer task has status=%s, commit=%q, branch=%q",
+					peer.Status, peer.CommitSHA, peer.Branch)
+				deps.Logger.Info("plan-executor: auto-REVISE (post-execute, no code)",
+					"status", peer.Status, "commit", peer.CommitSHA, "branch", peer.Branch)
+				return b.handleRevise(ctx, deps, progress, autoMsg)
+			}
+		}
+	}
+
 	// Build constrained decision prompt.
 	question := step.Question
 	if question == "" {
@@ -454,12 +488,26 @@ func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, de
 		return core.IterationResult{Progress: progressJSON}, nil
 	}
 
-	// REVISE — extract feedback, call code_task_revise if peer task exists.
+	return b.handleRevise(ctx, deps, progress, reply)
+}
+
+// handleRevise processes a REVISE decision: calls code_task_revise with feedback,
+// rewinds CurrentStep to the last code_task_execute so the executor re-runs
+// execution on the regenerated plan, and enforces a retry cap.
+func (b *Background) handleRevise(ctx context.Context, deps core.AgentDeps, progress *goalPlanProgress, reply string) (core.IterationResult, error) {
 	progress.RetryCount++
 
 	feedback := reply
 	if idx := strings.Index(reply, ":"); idx >= 0 {
 		feedback = strings.TrimSpace(reply[idx+1:])
+	}
+
+	// Fix C: cap REVISE attempts.
+	if progress.RetryCount >= maxStepRetries {
+		summary := fmt.Sprintf("Goal failed: %d revise attempts exhausted. Last feedback: %s",
+			progress.RetryCount, truncate(feedback, 300))
+		deps.Logger.Warn("plan-executor: fail-fast (revise cap)", "retries", progress.RetryCount)
+		return core.IterationResult{Done: true, Output: summary, Notify: summary}, nil
 	}
 
 	if progress.PeerTaskID != "" {
@@ -468,12 +516,49 @@ func (b *Background) execDecideStep(ctx context.Context, task core.AgentTask, de
 		_, _ = deps.Registry.Execute(ctx, "code_task_revise", input)
 	}
 
-	// After revise, go back to wait for the peer task to be redone.
-	progress.Phase = "waiting"
+	// Fix A: rewind CurrentStep to the last code_task_execute step so the
+	// executor re-runs execution on the newly regenerated plan. Otherwise
+	// the next iteration would re-run decide and approve the plan_ready
+	// state without ever invoking the executor on the new plan.
+	if rewindTo := findLastExecuteStep(progress.Plan, progress.CurrentStep); rewindTo >= 0 {
+		deps.Logger.Info("plan-executor: REVISE rewind",
+			"from_step", progress.CurrentStep, "to_step", rewindTo)
+		progress.CurrentStep = rewindTo
+	}
+
+	progress.Phase = "waiting_for_revise"
 	progress.Summary = fmt.Sprintf("Revised (attempt %d): %s", progress.RetryCount, truncate(feedback, 200))
-	// Don't advance CurrentStep — stay at decide, will re-evaluate after callback.
 	progressJSON, _ := json.Marshal(progress)
 	return core.IterationResult{Pause: true, Progress: progressJSON}, nil
+}
+
+// findLastExecuteStep returns the index of the last code_task_execute step
+// at or before `before`. Returns -1 if none found.
+func findLastExecuteStep(plan []PlanStep, before int) int {
+	if before >= len(plan) {
+		before = len(plan) - 1
+	}
+	for i := before; i >= 0; i-- {
+		if plan[i].Action == "tool" && plan[i].Tool == "code_task_execute" {
+			return i
+		}
+	}
+	return -1
+}
+
+// hasExecuteBeforeStep reports whether any code_task_execute step appears
+// strictly before `at` in the plan. Used to distinguish post-execute decides
+// (which must verify actual produced code) from pre-execute plan-review decides.
+func hasExecuteBeforeStep(plan []PlanStep, at int) bool {
+	if at > len(plan) {
+		at = len(plan)
+	}
+	for i := 0; i < at; i++ {
+		if plan[i].Action == "tool" && plan[i].Tool == "code_task_execute" {
+			return true
+		}
+	}
+	return false
 }
 
 // substituteVars replaces $peer_task_id and $result.X in input JSON.
