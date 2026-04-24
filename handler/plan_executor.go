@@ -12,22 +12,67 @@ import (
 )
 
 // PlanStep represents one step in a goal execution plan.
+//
+// The plan author (the planning LLM + plan template) chooses which fields
+// are used per step. Only `Action` is always required. The executor does
+// not inspect tool names or make domain assumptions — everything that
+// would require such knowledge (precondition guard for decide, revise
+// callback, etc.) is expressed declaratively in the step itself.
 type PlanStep struct {
 	Action      string          `json:"action"`                 // "tool", "wait", "decide", "milestone", "done"
 	Tool        string          `json:"tool,omitempty"`         // tool name for "tool" action
 	Input       json.RawMessage `json:"input,omitempty"`        // tool input (supports $variable substitution)
 	Question    string          `json:"question,omitempty"`     // for "decide" action
-	ContextTool string          `json:"context_tool,omitempty"` // tool to call before decision (e.g. code_task_status)
+	ContextTool string          `json:"context_tool,omitempty"` // tool to call before decide to build reviewer context
 	Message     string          `json:"message,omitempty"`      // for "milestone" action
+
+	// Precondition (optional, decide steps) is a declarative guard that
+	// auto-REVISEs the decide BEFORE consulting the LLM when expected
+	// artifacts are not present in the context_tool result. Cheap safety
+	// net against reviewers approving half-finished work on a truncated
+	// context view.
+	Precondition *PlanPrecondition `json:"precondition,omitempty"`
+
+	// OnRevise (optional, decide steps) is an invocation that the
+	// executor fires whenever this decide returns REVISE. Typical use:
+	// call a peer's `*_revise` tool with the reviewer feedback so the
+	// peer regenerates before we re-enter the execute step. If absent,
+	// REVISE just rewinds CurrentStep and pauses without external side
+	// effects.
+	OnRevise *PlanToolCall `json:"on_revise,omitempty"`
+}
+
+// PlanPrecondition is a declarative guard for decide steps. It operates
+// on the top-level JSON returned by the decide step's context_tool.
+//
+//   StatusIn   — the result's `status` field must equal one of these.
+//   AnyPresent — at least one of these result keys must be non-empty
+//                (any scalar != "" / != 0 / != null / != false).
+//
+// If neither list is set the precondition is a no-op. If either fails,
+// the executor auto-REVISEs with a structured message naming the failing
+// condition (no LLM call, no budget burned).
+type PlanPrecondition struct {
+	StatusIn   []string `json:"status_in,omitempty"`
+	AnyPresent []string `json:"any_present,omitempty"`
+}
+
+// PlanToolCall is an embeddable invocation spec: which tool to call and
+// what input template to use. `{feedback}` in Input is replaced with the
+// reviewer's REVISE feedback at call time; other `$*` placeholders use
+// normal plan-variable substitution.
+type PlanToolCall struct {
+	Tool  string          `json:"tool"`
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
 // goalPlanProgress stores plan execution state between iterations.
 type goalPlanProgress struct {
-	SessionID   string          `json:"session_id"`
-	PeerTaskID  string          `json:"peer_task_id,omitempty"`
-	RepoPath    string          `json:"repo_path,omitempty"`
-	Plan        []PlanStep      `json:"plan,omitempty"`
-	CurrentStep int             `json:"current_step"`
+	SessionID   string     `json:"session_id"`
+	PeerTaskID  string     `json:"peer_task_id,omitempty"`
+	RepoPath    string     `json:"repo_path,omitempty"`
+	Plan        []PlanStep `json:"plan,omitempty"`
+	CurrentStep int        `json:"current_step"`
 	// RetryCount is the consecutive tool-error count on the current step.
 	// Reset to 0 when any tool call succeeds.
 	RetryCount int `json:"retry_count,omitempty"`
@@ -36,10 +81,16 @@ type goalPlanProgress struct {
 	// because a successful re-execution does NOT mean the reviewer will
 	// approve the next time. Persists separately from RetryCount so that
 	// tool retries (which reset on success) don't mask a decide loop.
-	ReviseCount int             `json:"revise_count,omitempty"`
-	LastResult  json.RawMessage `json:"last_result,omitempty"`
-	Phase       string          `json:"phase"`
-	Summary     string          `json:"summary"`
+	ReviseCount int `json:"revise_count,omitempty"`
+	// LastAsyncStepIdx is the plan index of the most recent tool step that
+	// paused waiting for a peer callback. REVISE rewinds to this step so
+	// the executor re-drives the async path on the regenerated plan.
+	// -1 = none seen yet; generic replacement for the old hardcoded
+	// "find last code_task_execute step" scan.
+	LastAsyncStepIdx int             `json:"last_async_step_idx,omitempty"`
+	LastResult       json.RawMessage `json:"last_result,omitempty"`
+	Phase            string          `json:"phase"`
+	Summary          string          `json:"summary"`
 }
 
 // maxStepRetries caps how many times we retry any single step (tool error or REVISE)
@@ -47,12 +98,18 @@ type goalPlanProgress struct {
 // that cannot produce a branch or an LLM that keeps rejecting a correct result.
 const maxStepRetries = 3
 
-// StructuredGoalExecutor implements core.GoalHandler for goals whose strategy
-// is "structured" (LLM generates a JSON plan up front; executor interprets
-// steps mechanically). Currently contains Arlene-specific assumptions about
-// code_task_* tool names — those will be lifted out in Phase 2 of the
-// migration. For Phase 1 the only change is: this executor operates on
-// core.Goal instead of core.AgentTask.
+// StructuredGoalExecutor implements core.GoalHandler for goals whose
+// strategy is "structured" — the LLM generates a JSON plan up front
+// and the executor interprets steps mechanically, consulting the LLM
+// again only at explicit decide gates.
+//
+// Generic, agent-agnostic. It does NOT know about any specific tool
+// names: behaviours that used to be hardcoded (auto-REVISE when a peer
+// didn't produce code, call code_task_revise on reject, rewind to the
+// last code_task_execute step) are now expressed declaratively on the
+// plan step itself (Precondition, OnRevise) and via tracked state
+// (LastAsyncStepIdx). Agents drop in their own tool catalog and their
+// own plan template; this executor just runs the plan.
 type StructuredGoalExecutor struct {
 	tz *time.Location
 }
@@ -70,6 +127,7 @@ func NewStructuredGoalExecutor(tz *time.Location) *StructuredGoalExecutor {
 func (e *StructuredGoalExecutor) Run(ctx context.Context, goal core.Goal, deps core.AgentDeps) (core.IterationResult, error) {
 	// Parse progress.
 	var progress goalPlanProgress
+	progress.LastAsyncStepIdx = -1
 	if len(goal.Progress) > 0 && string(goal.Progress) != "{}" {
 		json.Unmarshal(goal.Progress, &progress)
 	}
@@ -173,51 +231,22 @@ func (e *StructuredGoalExecutor) planPhase(ctx context.Context, goal core.Goal, 
 	}
 	progress.RetryCount = 0 // plan accepted — reset the counter for execution-phase retries
 
-	// Validate: plan must contain at least one "tool" step with code_task_create.
-	hasTaskCreate := false
+	// Plan must contain at least one "tool" step so the executor has
+	// something to do. Structure-only plans (all decide/wait/milestone)
+	// would loop forever.
+	hasTool := false
 	for _, s := range plan {
-		if s.Action == "tool" && s.Tool == "code_task_create" {
-			hasTaskCreate = true
+		if s.Action == "tool" {
+			hasTool = true
 			break
 		}
 	}
-	if !hasTaskCreate {
-		deps.Logger.Warn("plan-executor: plan missing code_task_create, retrying")
+	if !hasTool {
+		deps.Logger.Warn("plan-executor: plan has no tool steps, retrying")
 		progress.Phase = "plan_invalid"
-		progress.Summary = "Plan missing code_task_create step"
+		progress.Summary = "Plan must include at least one tool step"
 		progressJSON, _ := json.Marshal(progress)
 		return core.IterationResult{Progress: progressJSON}, nil
-	}
-
-	// Ensure code_task_execute exists after first decide (plan review).
-	// LLM frequently omits this critical step.
-	hasExecute := false
-	for _, s := range plan {
-		if s.Action == "tool" && s.Tool == "code_task_execute" {
-			hasExecute = true
-			break
-		}
-	}
-	if !hasExecute {
-		// Find first "decide" after code_task_create and inject execute + wait after it.
-		pastCreate := false
-		for i, s := range plan {
-			if s.Action == "tool" && s.Tool == "code_task_create" {
-				pastCreate = true
-			}
-			if pastCreate && s.Action == "decide" {
-				// Insert execute + wait after this decide step.
-				executeStep := PlanStep{Action: "tool", Tool: "code_task_execute", Input: json.RawMessage(`{"task_id":"$peer_task_id"}`)}
-				waitStep := PlanStep{Action: "wait"}
-				newPlan := make([]PlanStep, 0, len(plan)+2)
-				newPlan = append(newPlan, plan[:i+1]...)
-				newPlan = append(newPlan, executeStep, waitStep)
-				newPlan = append(newPlan, plan[i+1:]...)
-				plan = newPlan
-				deps.Logger.Info("plan-executor: injected missing code_task_execute after decide", "at", i+1)
-				break
-			}
-		}
 	}
 
 	progress.Plan = plan
@@ -320,36 +349,14 @@ func (e *StructuredGoalExecutor) execToolStep(ctx context.Context, deps core.Age
 	result, isError := deps.Registry.Execute(ctx, step.Tool, input)
 	if isError {
 		// "already exists" is not a real error — resource is there, move on.
+		// We don't try to recover the missing fields (e.g. repo_path) here;
+		// that's a plan-authoring concern. If the plan needs a specific
+		// piece of data after an "already_exists" success, it should
+		// include a follow-up step (e.g. a listing/read tool) rather than
+		// relying on the executor to know how.
 		if strings.Contains(result, "already exists") {
 			deps.Logger.Info("plan-executor: resource already exists, treating as success", "tool", step.Tool)
 			isError = false
-			// Try to get repo path from input name via code_repo_list.
-			if step.Tool == "code_repo_create" {
-				var inp map[string]any
-				if json.Unmarshal(input, &inp) == nil {
-					if name, ok := inp["name"].(string); ok && name != "" {
-						listResult, listErr := deps.Registry.Execute(ctx, "code_repo_list", nil)
-						if !listErr {
-							// code_repo_list returns {"repos": [...], "count": N}
-							var wrapper struct {
-								Repos []struct {
-									Name string `json:"name"`
-									Path string `json:"path"`
-								} `json:"repos"`
-							}
-							if json.Unmarshal([]byte(listResult), &wrapper) == nil {
-								for _, r := range wrapper.Repos {
-									if r.Name == name && r.Path != "" {
-										progress.RepoPath = r.Path
-										result = fmt.Sprintf(`{"repo_path":"%s","name":"%s","status":"already_exists"}`, r.Path, name)
-										deps.Logger.Info("plan-executor: found repo path from list", "name", name, "path", r.Path)
-									}
-								}
-							}
-						}
-					}
-				}
-			}
 		} else {
 			progress.RetryCount++
 			deps.Logger.Warn("plan-executor: tool error", "tool", step.Tool, "retry", progress.RetryCount, "error", result)
@@ -369,7 +376,13 @@ func (e *StructuredGoalExecutor) execToolStep(ctx context.Context, deps core.Age
 	progress.RetryCount = 0 // reset on success
 	deps.Logger.Info("plan-executor: tool success", "tool", step.Tool, "result_len", len(result), "result_preview", truncate(result, 100))
 
-	// Extract known fields from result.
+	// Extract a small set of GENERIC well-known fields from the result.
+	// These are conventions any tool can opt into, not domain-specific
+	// assumptions: a task_id string becomes the peer_task_id for
+	// subsequent $peer_task_id substitution; a repo_path (or path, as
+	// some repo-scoped tools return it) becomes $result.repo_path /
+	// $result.path. Everything else sits in progress.LastResult and the
+	// plan's variable-substitution layer resolves it on demand.
 	var resultMap map[string]any
 	if json.Unmarshal([]byte(result), &resultMap) == nil {
 		if tid, ok := resultMap["task_id"].(string); ok && tid != "" {
@@ -378,30 +391,8 @@ func (e *StructuredGoalExecutor) execToolStep(ctx context.Context, deps core.Age
 		if rp, ok := resultMap["repo_path"].(string); ok && rp != "" {
 			progress.RepoPath = rp
 		}
-		// code_repo_create returns "path" not "repo_path" — extract either.
 		if rp, ok := resultMap["path"].(string); ok && rp != "" && progress.RepoPath == "" {
 			progress.RepoPath = rp
-		}
-		// Fallback: if name is present but no path, ask registry for repo info.
-		if progress.RepoPath == "" {
-			if name, ok := resultMap["name"].(string); ok && name != "" {
-				listResult, isErr := deps.Registry.Execute(ctx, "code_repo_list", nil)
-				if !isErr {
-					var wrapper struct {
-						Repos []struct {
-							Name string `json:"name"`
-							Path string `json:"path"`
-						} `json:"repos"`
-					}
-					if json.Unmarshal([]byte(listResult), &wrapper) == nil {
-						for _, r := range wrapper.Repos {
-							if r.Name == name && r.Path != "" {
-								progress.RepoPath = r.Path
-							}
-						}
-					}
-				}
-			}
 		}
 		progress.LastResult = json.RawMessage(result)
 	}
@@ -415,6 +406,11 @@ func (e *StructuredGoalExecutor) execToolStep(ctx context.Context, deps core.Age
 	// But only pause if we have a peer_task_id (an async task to wait for).
 	if progress.CurrentStep < len(progress.Plan) && progress.Plan[progress.CurrentStep].Action == "wait" {
 		if progress.PeerTaskID != "" {
+			// Record this tool step index as the "last async" so a future
+			// REVISE can rewind here without scanning for specific tool
+			// names. CurrentStep currently points to the wait step; the
+			// tool step that produced the peer_task_id is just before it.
+			progress.LastAsyncStepIdx = progress.CurrentStep - 1
 			progress.Phase = "waiting"
 			progress.CurrentStep++
 			progressJSON, _ = json.Marshal(progress)
@@ -440,31 +436,24 @@ func (e *StructuredGoalExecutor) execDecideStep(ctx context.Context, goal core.G
 		}
 	}
 
-	// When the context comes from code_task_status, extract the key metadata
-	// fields up front. If we only hand the reviewer the raw JSON, a huge diff
-	// eats the 3000-char truncation window and the reviewer ends up judging
-	// the work from a mid-diff fragment — it tends to REVISE "can't verify"
-	// even when commit_sha, test_pass=true, and a 36KB diff already prove
-	// the code is there. Surfacing the metadata explicitly lets it judge on
-	// the facts, not on a truncated string.
-	var peer peerTaskStatus
-	var peerParsed bool
-	if step.ContextTool == "code_task_status" && contextData != "" {
-		peerParsed = json.Unmarshal([]byte(contextData), &peer) == nil
+	// Parse the context data as a flat JSON object. This is generic —
+	// we don't assume any particular schema. Anything we do with fields
+	// is gated by declarative knobs on the plan step (Precondition).
+	var contextObj map[string]any
+	var contextParsed bool
+	if contextData != "" {
+		contextParsed = json.Unmarshal([]byte(contextData), &contextObj) == nil
 	}
 
-	// Fix B: short-circuit auto-REVISE for post-execute decisions when the peer
-	// task has no produced code. This prevents the LLM from approving plan_ready
-	// state (which means "plan regenerated after revise, but code not re-executed").
-	if peerParsed && hasExecuteBeforeStep(progress.Plan, progress.CurrentStep) {
-		codeReady := (peer.Status == "done" || peer.Status == "review_ready") &&
-			(peer.CommitSHA != "" || peer.Diff != "" || peer.Branch != "")
-		if !codeReady {
-			autoMsg := fmt.Sprintf("REVISE: post-execute decide requires produced code, but peer task has status=%s, commit=%q, branch=%q",
-				peer.Status, peer.CommitSHA, peer.Branch)
-			deps.Logger.Info("plan-executor: auto-REVISE (post-execute, no code)",
-				"status", peer.Status, "commit", peer.CommitSHA, "branch", peer.Branch)
-			return e.handleRevise(ctx, deps, progress, autoMsg)
+	// Declarative auto-REVISE: if the step has a Precondition and any
+	// clause fails, revise without consulting the LLM. No hardcoded
+	// tool names or field schemas — the plan author decides what
+	// "ready" looks like for the step they're guarding.
+	if step.Precondition != nil && contextParsed {
+		if failMsg := evalPrecondition(step.Precondition, contextObj); failMsg != "" {
+			auto := fmt.Sprintf("REVISE: %s", failMsg)
+			deps.Logger.Info("plan-executor: auto-REVISE (precondition failed)", "reason", failMsg)
+			return e.handleRevise(ctx, deps, progress, step, auto)
 		}
 	}
 
@@ -478,12 +467,13 @@ func (e *StructuredGoalExecutor) execDecideStep(ctx context.Context, goal core.G
 	decideSystem, _ := deps.Prompts.Get(ctx, "goal-decide-system")
 	decideUser, _ := deps.Prompts.Get(ctx, "goal-decide-user")
 
-	// When we have structured metadata, prepend it as a compact header so the
-	// reviewer sees the signals that don't fit inside a truncated diff. The
-	// raw JSON still follows in case there's something the header missed.
+	// Generic metadata header: pick scalar top-level fields from the
+	// context JSON and print them compactly. Large strings are summarised
+	// as "<field> (string, N chars)" so the reviewer sees they exist
+	// without the value eating the truncation budget.
 	contextBlock := truncate(contextData, 3000)
-	if peerParsed {
-		contextBlock = formatPeerMetadata(peer) + "\n\nRaw status JSON (truncated):\n" + contextBlock
+	if contextParsed {
+		contextBlock = formatMetadata(contextObj) + "\n\nRaw context JSON (truncated):\n" + contextBlock
 	}
 
 	decisionPrompt := fmt.Sprintf(decideUser,
@@ -519,16 +509,22 @@ func (e *StructuredGoalExecutor) execDecideStep(ctx context.Context, goal core.G
 		return core.IterationResult{Progress: progressJSON}, nil
 	}
 
-	return e.handleRevise(ctx, deps, progress, reply)
+	return e.handleRevise(ctx, deps, progress, step, reply)
 }
 
-// handleRevise processes a REVISE decision: calls code_task_revise with feedback,
-// rewinds CurrentStep to the last code_task_execute so the executor re-runs
-// execution on the regenerated plan, and enforces a retry cap.
-//
-// Increments ReviseCount, not RetryCount, because the rewind will cause a
-// successful code_task_execute to reset RetryCount to 0 and mask the loop.
-func (e *StructuredGoalExecutor) handleRevise(ctx context.Context, deps core.AgentDeps, progress *goalPlanProgress, reply string) (core.IterationResult, error) {
+// handleRevise processes a REVISE decision:
+//   - Increments ReviseCount (not RetryCount — tool success wipes
+//     RetryCount, which would mask a decide loop).
+//   - Caps at maxStepRetries and fails the goal if exceeded.
+//   - If the decide step declared an OnRevise tool call, invokes it
+//     with `{feedback}` and `$*` placeholders substituted. Typical use:
+//     call a peer's revise endpoint so the peer regenerates before we
+//     re-run the async step.
+//   - Rewinds CurrentStep to progress.LastAsyncStepIdx (the most recent
+//     tool step that paused on a peer callback) so the next iteration
+//     re-drives the async path. If no async step was ever reached,
+//     stays in place.
+func (e *StructuredGoalExecutor) handleRevise(ctx context.Context, deps core.AgentDeps, progress *goalPlanProgress, step PlanStep, reply string) (core.IterationResult, error) {
 	progress.ReviseCount++
 
 	feedback := reply
@@ -544,21 +540,33 @@ func (e *StructuredGoalExecutor) handleRevise(ctx context.Context, deps core.Age
 		return core.IterationResult{Done: true, Output: summary, Notify: summary}, nil
 	}
 
-	if progress.PeerTaskID != "" {
-		input := json.RawMessage(fmt.Sprintf(`{"task_id":"%s","feedback":"%s"}`,
-			progress.PeerTaskID, strings.ReplaceAll(feedback, `"`, `\"`)))
-		_, _ = deps.Registry.Execute(ctx, "code_task_revise", input)
+	// Optional: fire the plan's declared revise-callback tool so the
+	// peer knows to regenerate. Historically this was a hardcoded
+	// code_task_revise call; now the plan author supplies it declaratively
+	// (or omits it for purely local re-plans).
+	if step.OnRevise != nil && step.OnRevise.Tool != "" {
+		var input json.RawMessage
+		if len(step.OnRevise.Input) > 0 {
+			// {feedback} substitution + standard $var substitution.
+			raw := string(step.OnRevise.Input)
+			raw = strings.ReplaceAll(raw, "{feedback}", strings.ReplaceAll(feedback, `"`, `\"`))
+			input = substituteVars(json.RawMessage(raw), progress)
+		} else {
+			input = substituteVars(json.RawMessage(fmt.Sprintf(
+				`{"task_id":"%s","feedback":"%s"}`,
+				progress.PeerTaskID, strings.ReplaceAll(feedback, `"`, `\"`))), progress)
+		}
+		_, _ = deps.Registry.Execute(ctx, step.OnRevise.Tool, input)
 	}
 
-	// Fix A: rewind CurrentStep to the last code_task_execute step so the
-	// executor re-runs execution on the newly regenerated plan. Otherwise
-	// the next iteration would re-run decide and approve the plan_ready
-	// state without ever invoking the executor on the new plan.
-	if rewindTo := findLastExecuteStep(progress.Plan, progress.CurrentStep); rewindTo >= 0 {
+	// Rewind CurrentStep to the most recent async (paused) step so the
+	// next iteration re-drives execution on the regenerated peer state.
+	// Generic replacement for the old hardcoded "find last code_task_execute".
+	if progress.LastAsyncStepIdx >= 0 && progress.LastAsyncStepIdx < progress.CurrentStep {
 		deps.Logger.Info("plan-executor: REVISE rewind",
-			"from_step", progress.CurrentStep, "to_step", rewindTo,
+			"from_step", progress.CurrentStep, "to_step", progress.LastAsyncStepIdx,
 			"revise_count", progress.ReviseCount)
-		progress.CurrentStep = rewindTo
+		progress.CurrentStep = progress.LastAsyncStepIdx
 	}
 
 	progress.Phase = "waiting_for_revise"
@@ -567,93 +575,111 @@ func (e *StructuredGoalExecutor) handleRevise(ctx context.Context, deps core.Age
 	return core.IterationResult{Pause: true, Progress: progressJSON}, nil
 }
 
-// findLastExecuteStep returns the index of the last code_task_execute step
-// at or before `before`. Returns -1 if none found.
-func findLastExecuteStep(plan []PlanStep, before int) int {
-	if before >= len(plan) {
-		before = len(plan) - 1
+// evalPrecondition returns an empty string if the step's declarative
+// precondition passes against the given context object, or a human-readable
+// failure message otherwise. No schema assumptions — works against any
+// JSON-deserialised object.
+func evalPrecondition(p *PlanPrecondition, ctx map[string]any) string {
+	if p == nil {
+		return ""
 	}
-	for i := before; i >= 0; i-- {
-		if plan[i].Action == "tool" && plan[i].Tool == "code_task_execute" {
-			return i
+	if len(p.StatusIn) > 0 {
+		status, _ := ctx["status"].(string)
+		if !stringInSlice(status, p.StatusIn) {
+			return fmt.Sprintf("status=%q not in %v", status, p.StatusIn)
 		}
 	}
-	return -1
+	if len(p.AnyPresent) > 0 {
+		anyPresent := false
+		for _, k := range p.AnyPresent {
+			if v, ok := ctx[k]; ok && isPresent(v) {
+				anyPresent = true
+				break
+			}
+		}
+		if !anyPresent {
+			return fmt.Sprintf("none of %v present", p.AnyPresent)
+		}
+	}
+	return ""
 }
 
-// hasExecuteBeforeStep reports whether any code_task_execute step appears
-// strictly before `at` in the plan. Used to distinguish post-execute decides
-// (which must verify actual produced code) from pre-execute plan-review decides.
-func hasExecuteBeforeStep(plan []PlanStep, at int) bool {
-	if at > len(plan) {
-		at = len(plan)
-	}
-	for i := 0; i < at; i++ {
-		if plan[i].Action == "tool" && plan[i].Tool == "code_task_execute" {
+func stringInSlice(s string, xs []string) bool {
+	for _, x := range xs {
+		if s == x {
 			return true
 		}
 	}
 	return false
 }
 
-// peerTaskStatus mirrors the fields we care about from code_task_status JSON.
-// All fields are optional; missing fields are rendered as empty strings or
-// zero values and skipped from the metadata header.
-type peerTaskStatus struct {
-	Status         string `json:"status"`
-	Branch         string `json:"branch"`
-	CommitSHA      string `json:"commit_sha"`
-	Diff           string `json:"diff"`
-	TestPass       *bool  `json:"test_pass"`
-	BaselineTests  *int   `json:"baseline_tests"`
-	PublishStatus  string `json:"publish_status"`
-	NumTurns       int    `json:"num_turns"`
-	DurationMs     int64  `json:"duration_ms"`
-	PlanFeedback   string `json:"plan_feedback"`
-	Error          string `json:"error"`
+// isPresent reports whether a JSON-decoded value counts as "present" for
+// a precondition check. Empty strings, zero numbers, false bools, nil,
+// empty slices/maps all count as absent.
+func isPresent(v any) bool {
+	switch vv := v.(type) {
+	case nil:
+		return false
+	case string:
+		return vv != ""
+	case bool:
+		return vv
+	case float64:
+		return vv != 0
+	case int:
+		return vv != 0
+	case []any:
+		return len(vv) > 0
+	case map[string]any:
+		return len(vv) > 0
+	}
+	return true
 }
 
-// formatPeerMetadata renders peerTaskStatus as a compact human-readable
-// header for the decide prompt. Lets the reviewer judge by metadata
-// (test_pass, commit exists, diff size) instead of trying to parse a
-// truncated diff fragment.
-func formatPeerMetadata(p peerTaskStatus) string {
+// formatMetadata renders the top-level scalar fields of a JSON object as a
+// compact "Context metadata:\n- key: value\n…" block for the decide prompt.
+// Generic replacement for the earlier code_task-specific formatter: any
+// tool's status payload gets its salient signals surfaced up top, while
+// large strings are summarised (not dumped) to keep the truncation budget
+// available for the full raw JSON underneath.
+//
+// Rules for rendering:
+//   - strings ≤ 120 chars: printed quoted.
+//   - strings > 120 chars: printed as `<key> (string, N chars)`.
+//   - bools / numbers / small slices / small maps: printed as-is.
+//   - nil values: skipped.
+//   - nested objects / large slices: printed as `<key>: <type>`.
+func formatMetadata(obj map[string]any) string {
+	if len(obj) == 0 {
+		return ""
+	}
 	var b strings.Builder
-	b.WriteString("Peer task metadata:\n")
-	if p.Status != "" {
-		fmt.Fprintf(&b, "- status: %s\n", p.Status)
-	}
-	if p.Branch != "" {
-		fmt.Fprintf(&b, "- branch: %s\n", p.Branch)
-	}
-	if p.CommitSHA != "" {
-		short := p.CommitSHA
-		if len(short) > 12 {
-			short = short[:12]
+	b.WriteString("Context metadata:\n")
+	for k, v := range obj {
+		switch vv := v.(type) {
+		case nil:
+			// skip
+		case string:
+			if len(vv) == 0 {
+				fmt.Fprintf(&b, "- %s: \"\"\n", k)
+			} else if len(vv) <= 120 {
+				fmt.Fprintf(&b, "- %s: %q\n", k, vv)
+			} else {
+				fmt.Fprintf(&b, "- %s: (string, %d chars)\n", k, len(vv))
+			}
+		case bool:
+			fmt.Fprintf(&b, "- %s: %t\n", k, vv)
+		case float64:
+			fmt.Fprintf(&b, "- %s: %v\n", k, vv)
+		case int:
+			fmt.Fprintf(&b, "- %s: %d\n", k, vv)
+		case []any:
+			fmt.Fprintf(&b, "- %s: array[%d]\n", k, len(vv))
+		case map[string]any:
+			fmt.Fprintf(&b, "- %s: object{%d keys}\n", k, len(vv))
+		default:
+			fmt.Fprintf(&b, "- %s: <%T>\n", k, v)
 		}
-		fmt.Fprintf(&b, "- commit_sha: %s\n", short)
-	}
-	fmt.Fprintf(&b, "- diff_size: %d chars\n", len(p.Diff))
-	if p.TestPass != nil {
-		fmt.Fprintf(&b, "- test_pass: %t\n", *p.TestPass)
-	}
-	if p.BaselineTests != nil {
-		fmt.Fprintf(&b, "- baseline_tests: %d\n", *p.BaselineTests)
-	}
-	if p.PublishStatus != "" {
-		fmt.Fprintf(&b, "- publish_status: %s\n", p.PublishStatus)
-	}
-	if p.NumTurns > 0 {
-		fmt.Fprintf(&b, "- num_turns: %d\n", p.NumTurns)
-	}
-	if p.DurationMs > 0 {
-		fmt.Fprintf(&b, "- duration: %ds\n", p.DurationMs/1000)
-	}
-	if p.PlanFeedback != "" {
-		fmt.Fprintf(&b, "- plan_feedback: %s\n", truncate(p.PlanFeedback, 200))
-	}
-	if p.Error != "" {
-		fmt.Fprintf(&b, "- error: %s\n", truncate(p.Error, 200))
 	}
 	return strings.TrimRight(b.String(), "\n")
 }

@@ -26,19 +26,30 @@ import (
 // until an external callback wakes the task. The list of pause-triggering
 // tool names is agent-configurable; it is NOT hardcoded here.
 type Background struct {
-	tz         *time.Location
-	pauseTools map[string]bool // tool names that trigger pause when invoked
+	tz          *time.Location
+	pauseTools  map[string]bool // tool names that trigger pause when invoked
+	reviseTools map[string]bool // tool names that count as a "revision" (escalation guard)
 }
 
-// NewBackground constructs a scheduled-task handler. pauseTools is the set
-// of async/peer-callable tool names this agent recognises — when the LLM
-// invokes one of them, the handler pauses awaiting a callback. Pass nil
-// or empty map if the agent has no async peer integrations.
-func NewBackground(tz *time.Location, pauseTools map[string]bool) *Background {
+// NewBackground constructs a scheduled-task handler.
+//
+// pauseTools — async/peer-callable tool names: when the LLM invokes one
+// of them, the handler pauses awaiting a callback. Pass nil/empty for
+// agents with no async peer integrations.
+//
+// reviseTools — tool names that, when called, increment the handler's
+// revision counter. After maxRevisions consecutive invocations on the
+// same peer task the handler pauses and notifies the owner. Prevents
+// inner-thought-style agent loops from getting stuck revising a peer
+// forever. Pass nil/empty to disable the guard.
+func NewBackground(tz *time.Location, pauseTools, reviseTools map[string]bool) *Background {
 	if pauseTools == nil {
 		pauseTools = map[string]bool{}
 	}
-	return &Background{tz: tz, pauseTools: pauseTools}
+	if reviseTools == nil {
+		reviseTools = map[string]bool{}
+	}
+	return &Background{tz: tz, pauseTools: pauseTools, reviseTools: reviseTools}
 }
 
 func (b *Background) DefaultTools() []string {
@@ -210,7 +221,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 				}
 			}
 		}
-		if trace.Name == "code_task_revise" {
+		if b.reviseTools[trace.Name] {
 			calledRevise = true
 		}
 	}
