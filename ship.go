@@ -65,13 +65,14 @@ func (f *fleetAuth) snapshot() (*fleet.JWKSCache, string) {
 
 // Ship is the main BlueShip runtime instance.
 type Ship struct {
-	cfg          Config
-	modules      []Module
-	handlers     map[string]core.AgentHandler          // scheduled-task handlers (heartbeat, etc.)
-	goalHandlers map[core.GoalStrategy]core.GoalHandler // goal strategy executors
-	logger       *slog.Logger
-	fleetAuth    *fleetAuth        // populated by runFleet; consumed by A2A server's JWT middleware
-	a2aRegistry  *core.ToolRegistry // shared between A2A dispatcher + Fleet identity publish
+	cfg              Config
+	modules          []Module
+	handlers         map[string]core.AgentHandler          // recurring-task handlers, keyed by AgentTask.Handler
+	strategyHandlers map[string]core.AgentHandler          // strategy executors (direct / structured / delegate), keyed by AgentTask.Strategy
+	goalHandlers     map[core.GoalStrategy]core.GoalHandler // legacy goals path (no longer wired; kept until iter3 cleanup)
+	logger           *slog.Logger
+	fleetAuth        *fleetAuth        // populated by runFleet; consumed by A2A server's JWT middleware
+	a2aRegistry      *core.ToolRegistry // shared between A2A dispatcher + Fleet identity publish
 }
 
 // New creates a new BlueShip instance with the given configuration.
@@ -110,6 +111,16 @@ func (s *Ship) RegisterAgentHandler(name string, h core.AgentHandler) {
 		s.handlers = make(map[string]core.AgentHandler)
 	}
 	s.handlers[name] = h
+}
+
+// RegisterStrategyHandler registers an executor for a strategy value
+// (direct / structured / delegate). The agent_task scheduler falls back
+// to strategy-based dispatch when AgentTask.Handler is empty.
+func (s *Ship) RegisterStrategyHandler(strategy string, h core.AgentHandler) {
+	if s.strategyHandlers == nil {
+		s.strategyHandlers = make(map[string]core.AgentHandler)
+	}
+	s.strategyHandlers[strategy] = h
 }
 
 // Run starts BlueShip: connects to DB, initializes providers, starts transport, runs jobs.
@@ -276,7 +287,7 @@ func (s *Ship) Run(ctx context.Context) error {
 			}
 		}
 
-		agentSched = agenttask.NewScheduler(taskStore, s.handlers, globalRegistry, msgStore, deps, notifyFn, s.logger)
+		agentSched = agenttask.NewScheduler(taskStore, s.handlers, s.strategyHandlers, globalRegistry, msgStore, deps, notifyFn, s.logger)
 
 		// Use trigger channel for instant callback wakeup (if configured).
 		var trigger <-chan string

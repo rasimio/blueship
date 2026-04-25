@@ -15,14 +15,22 @@ import (
 const DefaultTaskTimeout = 5 * time.Minute
 
 // Scheduler polls agent_tasks and dispatches handlers.
+//
+// Two dispatch paths:
+//   - handler-keyed: AgentTask.Handler != "" — used by recurring jobs
+//     (heartbeat, inner-thought, session-summary, etc.).
+//   - strategy-keyed: AgentTask.Handler == "" — used by goal-style tasks
+//     (direct / structured / delegate). Strategy maps to a handler in
+//     strategyHandlers; if absent the task is failed.
 type Scheduler struct {
-	store    *core.AgentTaskStore
-	handlers map[string]core.AgentHandler
-	registry *core.ToolRegistry // master registry with all tools
-	msgStore core.MessageStore  // session/message persistence
-	deps     *core.Deps
-	notify   func(ctx context.Context, userID uuid.UUID, text string)
-	logger   *slog.Logger
+	store            *core.AgentTaskStore
+	handlers         map[string]core.AgentHandler
+	strategyHandlers map[string]core.AgentHandler
+	registry         *core.ToolRegistry
+	msgStore         core.MessageStore
+	deps             *core.Deps
+	notify           func(ctx context.Context, userID uuid.UUID, text string)
+	logger           *slog.Logger
 
 	mu     sync.Mutex
 	busy   map[string]bool // task ID → currently executing
@@ -33,6 +41,7 @@ type Scheduler struct {
 func NewScheduler(
 	store *core.AgentTaskStore,
 	handlers map[string]core.AgentHandler,
+	strategyHandlers map[string]core.AgentHandler,
 	registry *core.ToolRegistry,
 	msgStore core.MessageStore,
 	deps *core.Deps,
@@ -40,14 +49,15 @@ func NewScheduler(
 	logger *slog.Logger,
 ) *Scheduler {
 	return &Scheduler{
-		store:    store,
-		handlers: handlers,
-		registry: registry,
-		msgStore: msgStore,
-		deps:     deps,
-		notify:   notify,
-		logger:   logger,
-		busy:     make(map[string]bool),
+		store:            store,
+		handlers:         handlers,
+		strategyHandlers: strategyHandlers,
+		registry:         registry,
+		msgStore:         msgStore,
+		deps:             deps,
+		notify:           notify,
+		logger:           logger,
+		busy:             make(map[string]bool),
 	}
 }
 
@@ -97,15 +107,16 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	s.logger.Info("agent-tasks: pending", "count", len(tasks))
 
 	for _, task := range tasks {
-		handler, ok := s.handlers[task.Handler]
+		handler, dispatchTag, ok := s.resolveHandler(task)
 		if !ok {
-			s.logger.Warn("agent-tasks: unknown handler", "handler", task.Handler, "task_id", task.ID)
-			if err := s.store.Fail(ctx, task.ID, "unknown handler: "+task.Handler); err != nil {
+			s.logger.Warn("agent-tasks: no dispatcher",
+				"handler", task.Handler, "strategy", task.Strategy, "task_id", task.ID)
+			reason := "no dispatcher: handler=" + task.Handler + " strategy=" + task.Strategy
+			if err := s.store.Fail(ctx, task.ID, reason); err != nil {
 				s.logger.Error("agent-tasks: fail update error", "error", err)
 			}
 			continue
 		}
-
 		if s.isBusy(task.ID.String()) {
 			continue
 		}
@@ -116,7 +127,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		}
 
 		s.taskWg.Add(1)
-		go s.executeTask(ctx, task, handler)
+		go s.executeTask(ctx, task, handler, dispatchTag)
 	}
 
 	return nil
@@ -128,14 +139,14 @@ func (s *Scheduler) Wait() {
 	s.taskWg.Wait()
 }
 
-func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handler core.AgentHandler) {
+func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handler core.AgentHandler, dispatchTag string) {
 	defer s.taskWg.Done()
 	s.setBusy(task.ID.String(), true)
 	defer s.setBusy(task.ID.String(), false)
 
 	s.logger.Info("agent-tasks: starting",
 		"task_id", task.ID,
-		"handler", task.Handler,
+		"dispatch", dispatchTag,
 		"title", task.Title,
 		"iteration", task.Iteration+1,
 	)
@@ -242,6 +253,22 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			s.logger.Error("agent-tasks: progress update error", "error", err)
 		}
 	}
+}
+
+// resolveHandler picks the right executor for a task, preferring the
+// handler-keyed map (recurring jobs) and falling back to the strategy-
+// keyed map (goal-style direct/structured/delegate). Returns the
+// dispatch tag for diagnostics.
+func (s *Scheduler) resolveHandler(task core.AgentTask) (core.AgentHandler, string, bool) {
+	if task.Handler != "" {
+		h, ok := s.handlers[task.Handler]
+		return h, "handler:" + task.Handler, ok
+	}
+	if task.Strategy != "" && task.Strategy != core.StrategyRecurring {
+		h, ok := s.strategyHandlers[task.Strategy]
+		return h, "strategy:" + task.Strategy, ok
+	}
+	return nil, "", false
 }
 
 // shouldRunNow checks if a recurring task should run based on its schedule.

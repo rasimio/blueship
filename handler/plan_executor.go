@@ -123,25 +123,29 @@ func NewStructuredGoalExecutor(tz *time.Location) *StructuredGoalExecutor {
 	return &StructuredGoalExecutor{tz: tz}
 }
 
+// DefaultTools returns nil — the structured executor uses whatever tool
+// allowlist the agent_task itself declares (AgentTask.Tools); the
+// scheduler resolves that against the master registry.
+func (e *StructuredGoalExecutor) DefaultTools() []string { return nil }
 
 // runPlanExecutor handles goal tasks using the plan-then-execute pattern.
 // First iteration: LLM creates a structured plan.
 // Subsequent iterations: handler executes steps mechanically, consulting LLM only at decision points.
-func (e *StructuredGoalExecutor) Run(ctx context.Context, goal core.Goal, deps core.AgentDeps) (core.IterationResult, error) {
+func (e *StructuredGoalExecutor) Run(ctx context.Context, task core.AgentTask, deps core.AgentDeps) (core.IterationResult, error) {
 	// Parse progress.
 	var progress goalPlanProgress
 	progress.LastAsyncStepIdx = -1
-	if len(goal.Progress) > 0 && string(goal.Progress) != "{}" {
-		json.Unmarshal(goal.Progress, &progress)
+	if len(task.Progress) > 0 && string(task.Progress) != "{}" {
+		json.Unmarshal(task.Progress, &progress)
 	}
 
 	// Resolve model.
 	modelRole := "cortex"
-	if goal.Config != nil {
+	if task.Config != nil {
 		var roleCfg struct {
 			ModelRole string `json:"model_role"`
 		}
-		if json.Unmarshal(goal.Config, &roleCfg) == nil && roleCfg.ModelRole != "" {
+		if json.Unmarshal(task.Config, &roleCfg) == nil && roleCfg.ModelRole != "" {
 			modelRole = roleCfg.ModelRole
 		}
 	}
@@ -160,7 +164,7 @@ func (e *StructuredGoalExecutor) Run(ctx context.Context, goal core.Goal, deps c
 	sessID := progress.SessionID
 	if sessID == "" {
 		var err error
-		sessID, err = deps.Store.CreateSessionWithSource(ctx, goal.UserID.String(), displayModel, "agent_task", goal.ID.String())
+		sessID, err = deps.Store.CreateSessionWithSource(ctx, task.UserID.String(), displayModel, "agent_task", task.ID.String())
 		if err != nil {
 			return core.IterationResult{}, fmt.Errorf("create session: %w", err)
 		}
@@ -169,11 +173,11 @@ func (e *StructuredGoalExecutor) Run(ctx context.Context, goal core.Goal, deps c
 
 	// No plan yet → PLANNING PHASE.
 	if len(progress.Plan) == 0 {
-		return e.planPhase(ctx, goal, deps, &progress, sessID, routerModel, modelRole)
+		return e.planPhase(ctx, task, deps, &progress, sessID, routerModel, modelRole)
 	}
 
 	// Have plan → EXECUTION PHASE.
-	return e.executeStep(ctx, goal, deps, &progress, sessID, routerModel, modelRole)
+	return e.executeStep(ctx, task, deps, &progress, sessID, routerModel, modelRole)
 }
 
 // planPhase asks the LLM to create a structured plan for the goal.
@@ -185,10 +189,10 @@ func (e *StructuredGoalExecutor) Run(ctx context.Context, goal core.Goal, deps c
 // agent.Loop would contaminate subsequent plan retries with the model's
 // earlier prose-style outputs — single-shot guarantees every retry starts
 // from the same clean prompt.
-func (e *StructuredGoalExecutor) planPhase(ctx context.Context, goal core.Goal, deps core.AgentDeps, progress *goalPlanProgress, sessID, model, modelRole string) (core.IterationResult, error) {
+func (e *StructuredGoalExecutor) planPhase(ctx context.Context, task core.AgentTask, deps core.AgentDeps, progress *goalPlanProgress, sessID, model, modelRole string) (core.IterationResult, error) {
 	desc := ""
-	if goal.Description != nil {
-		desc = *goal.Description
+	if task.Description != nil {
+		desc = *task.Description
 	}
 
 	_ = modelRole // reserved for future per-role prompt selection
@@ -201,7 +205,7 @@ func (e *StructuredGoalExecutor) planPhase(ctx context.Context, goal core.Goal, 
 	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s", now.Format("2006-01-02 15:04 MST (Monday)"), systemPrompt)
 
 	goalPlanUser, _ := deps.Prompts.Get(ctx, "goal-plan-user")
-	planPrompt := fmt.Sprintf(goalPlanUser, goal.Title, desc, buildToolsList(deps))
+	planPrompt := fmt.Sprintf(goalPlanUser, task.Title, desc, buildToolsList(deps))
 
 	resp, err := deps.LLM.Complete(ctx, core.CompletionRequest{
 		Model:     model,
@@ -265,7 +269,7 @@ func (e *StructuredGoalExecutor) planPhase(ctx context.Context, goal core.Goal, 
 }
 
 // executeStep runs one step from the plan.
-func (e *StructuredGoalExecutor) executeStep(ctx context.Context, goal core.Goal, deps core.AgentDeps, progress *goalPlanProgress, sessID, model, modelRole string) (core.IterationResult, error) {
+func (e *StructuredGoalExecutor) executeStep(ctx context.Context, task core.AgentTask, deps core.AgentDeps, progress *goalPlanProgress, sessID, model, modelRole string) (core.IterationResult, error) {
 	if progress.CurrentStep >= len(progress.Plan) {
 		// Plan exhausted without explicit "done" step.
 		return core.IterationResult{Done: true, Output: progress.Summary, Notify: progress.Summary}, nil
@@ -298,12 +302,12 @@ func (e *StructuredGoalExecutor) executeStep(ctx context.Context, goal core.Goal
 		return core.IterationResult{Pause: true, Progress: progressJSON}, nil
 
 	case "decide":
-		return e.execDecideStep(ctx, goal, deps, progress, step, sessID, model, modelRole)
+		return e.execDecideStep(ctx, task, deps, progress, step, sessID, model, modelRole)
 
 	case "milestone":
 		msg := step.Message
 		if msg == "" {
-			msg = fmt.Sprintf("%s — milestone reached (step %d/%d)", goal.Title, progress.CurrentStep+1, len(progress.Plan))
+			msg = fmt.Sprintf("%s — milestone reached (step %d/%d)", task.Title, progress.CurrentStep+1, len(progress.Plan))
 		}
 		progress.CurrentStep++
 		progress.Phase = "milestone"
@@ -314,9 +318,9 @@ func (e *StructuredGoalExecutor) executeStep(ctx context.Context, goal core.Goal
 	case "done":
 		// Build structured completion report.
 		var report strings.Builder
-		report.WriteString(fmt.Sprintf("[DONE] %s\n\n", goal.Title))
+		report.WriteString(fmt.Sprintf("[DONE] %s\n\n", task.Title))
 		report.WriteString(fmt.Sprintf("Steps completed: %d/%d\n", progress.CurrentStep, len(progress.Plan)))
-		report.WriteString(fmt.Sprintf("Iterations used: %d/%d\n", goal.Iteration+1, goal.MaxIterations))
+		report.WriteString(fmt.Sprintf("Iterations used: %d/%d\n", task.Iteration+1, task.MaxIterations))
 		if progress.RepoPath != "" {
 			report.WriteString(fmt.Sprintf("Repository: %s\n", progress.RepoPath))
 		}
@@ -428,7 +432,7 @@ func (e *StructuredGoalExecutor) execToolStep(ctx context.Context, deps core.Age
 }
 
 // execDecideStep asks the LLM to make a binary decision.
-func (e *StructuredGoalExecutor) execDecideStep(ctx context.Context, goal core.Goal, deps core.AgentDeps, progress *goalPlanProgress, step PlanStep, sessID, model, modelRole string) (core.IterationResult, error) {
+func (e *StructuredGoalExecutor) execDecideStep(ctx context.Context, task core.AgentTask, deps core.AgentDeps, progress *goalPlanProgress, step PlanStep, sessID, model, modelRole string) (core.IterationResult, error) {
 	// Fetch context data if context_tool specified.
 	var contextData string
 	if step.ContextTool != "" {
@@ -480,7 +484,7 @@ func (e *StructuredGoalExecutor) execDecideStep(ctx context.Context, goal core.G
 	}
 
 	decisionPrompt := fmt.Sprintf(decideUser,
-		progress.CurrentStep+1, goal.Title,
+		progress.CurrentStep+1, task.Title,
 		contextBlock,
 		question, progress.RetryCount)
 
