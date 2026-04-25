@@ -235,6 +235,9 @@ func (s *Ship) Run(ctx context.Context) error {
 		if err := tool.RegisterGoalTools(globalRegistry, deps); err != nil {
 			return fmt.Errorf("register goal tools: %w", err)
 		}
+		if err := tool.RegisterAgentTaskTools(globalRegistry, deps); err != nil {
+			return fmt.Errorf("register agent_task tools: %w", err)
+		}
 		reg.RegisterAllTools(globalRegistry, deps)
 
 		taskStore := core.NewAgentTaskStore(shipDB)
@@ -678,6 +681,9 @@ func (s *Ship) startA2A(ctx context.Context, deps *Deps, reg *moduleRegistry) er
 	tool.RegisterBuiltinTools(a2aReg, deps)
 	if err := tool.RegisterGoalTools(a2aReg, deps); err != nil {
 		s.logger.Warn("a2a: register goal tools failed", "error", err)
+	}
+	if err := tool.RegisterAgentTaskTools(a2aReg, deps); err != nil {
+		s.logger.Warn("a2a: register agent_task tools failed", "error", err)
 	}
 	for _, m := range s.modules {
 		if tp, ok := m.(ToolProvider); ok {

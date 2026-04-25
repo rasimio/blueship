@@ -117,6 +117,11 @@ func (s *AgentTaskStore) ResetForNextRun(ctx context.Context, id uuid.UUID) erro
 }
 
 // Create inserts a new task and returns it with the generated ID.
+//
+// Strategy defaults to "recurring" so existing call sites that only set
+// Handler+Schedule keep their semantics. New callers explicitly set
+// Strategy to one of {direct, structured, delegate} along with the
+// matching fields (Plan / AcceptanceCriteria / DelegateTo / UseAgents).
 func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask, error) {
 	if task.ID == uuid.Nil {
 		task.ID = uuid.New()
@@ -127,21 +132,31 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 	if task.Progress == nil {
 		task.Progress = json.RawMessage(`{}`)
 	}
+	if task.Plan == nil {
+		task.Plan = json.RawMessage(`{}`)
+	}
 	if task.Status == "" {
 		task.Status = "pending"
 	}
 	if task.MaxIterations == 0 {
 		task.MaxIterations = 10
 	}
+	if task.Strategy == "" {
+		task.Strategy = StrategyRecurring
+	}
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_tasks (id, user_id, title, description, handler, config, tools,
-		                         schedule, deadline, status, progress, max_iterations)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		                         schedule, deadline, status, progress, max_iterations,
+		                         strategy, delegate_to, plan, use_agents,
+		                         acceptance_criteria, session_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
 		task.ID, task.UserID, task.Title, task.Description,
 		task.Handler, task.Config, task.Tools,
 		task.Schedule, task.Deadline,
-		task.Status, task.Progress, task.MaxIterations)
+		task.Status, task.Progress, task.MaxIterations,
+		task.Strategy, task.DelegateTo, task.Plan, task.UseAgents,
+		task.AcceptanceCriteria, task.SessionID)
 	if err != nil {
 		return AgentTask{}, fmt.Errorf("create agent task: %w", err)
 	}
@@ -159,11 +174,21 @@ func (s *AgentTaskStore) Get(ctx context.Context, id uuid.UUID) (AgentTask, erro
 // If one exists, updates the schedule. Uses the unique partial index from migration 014.
 func (s *AgentTaskStore) EnsureRecurring(ctx context.Context, userID uuid.UUID, handler, schedule, title string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO agent_tasks (user_id, handler, schedule, title, status, max_iterations, config, progress)
-		VALUES ($1, $2, $3, $4, 'pending', 1, '{}', '{}')
+		INSERT INTO agent_tasks (user_id, handler, schedule, title, status, max_iterations,
+		                         config, progress, strategy, plan)
+		VALUES ($1, $2, $3, $4, 'pending', 1, '{}', '{}', 'recurring', '{}')
 		ON CONFLICT (user_id, handler) WHERE schedule IS NOT NULL AND status != 'failed'
 		DO UPDATE SET schedule = EXCLUDED.schedule, title = EXCLUDED.title`,
 		userID, handler, schedule, title)
+	return err
+}
+
+// Approve resumes a paused task (used after manual review milestones).
+func (s *AgentTaskStore) Approve(ctx context.Context, id uuid.UUID) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE agent_tasks
+		SET status = 'pending'
+		WHERE id = $1 AND status = 'paused'`, id)
 	return err
 }
 

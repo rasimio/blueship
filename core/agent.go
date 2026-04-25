@@ -21,15 +21,43 @@ type AgentHandler interface {
 }
 
 // AgentTask is a persistent autonomous task (maps to agent_tasks table).
+//
+// One primitive covers four execution shapes, distinguished by Strategy:
+//   - "recurring"  — Handler is invoked on every Schedule tick. Used for
+//                     heartbeat / inner-thought / session-summary jobs.
+//   - "direct"    — single LLM cycle with the configured tools. Cortex
+//                     freely chooses what to do; finishes when the
+//                     AcceptanceCriteria evaluator says it's done.
+//   - "structured"— Plan is an ordered list of steps the executor walks
+//                     through; each iteration may revise on REVISE; ends
+//                     when AcceptanceCriteria is met.
+//   - "delegate"  — Plan is shipped to DelegateTo (a peer agent_id) via
+//                     A2A. The peer runs the lifecycle locally and
+//                     emits milestone events.
+//
+// Completion is criteria-driven: handlers / executors no longer rely on
+// Iteration >= MaxIterations to mark a task done. MaxIterations remains
+// only as a runaway-safety cap.
 type AgentTask struct {
 	ID          uuid.UUID       `db:"id" json:"id"`
 	UserID      uuid.UUID       `db:"user_id" json:"user_id"`
 	Title       string          `db:"title" json:"title"`
 	Description *string         `db:"description" json:"description,omitempty"`
 
-	Handler       string          `db:"handler" json:"handler"`
-	Config        json.RawMessage `db:"config" json:"config"`
-	Tools         pq.StringArray  `db:"tools" json:"tools,omitempty"`
+	// AcceptanceCriteria is plain-language describing what "done" means.
+	// Each iteration's output is checked against this; an explicit Done
+	// signal from the evaluator (or the handler) ends the task.
+	AcceptanceCriteria *string `db:"acceptance_criteria" json:"acceptance_criteria,omitempty"`
+
+	Strategy   string  `db:"strategy" json:"strategy"`
+	Handler    string  `db:"handler" json:"handler,omitempty"` // empty for non-recurring strategies
+	DelegateTo *string `db:"delegate_to" json:"delegate_to,omitempty"`
+
+	Config json.RawMessage `db:"config" json:"config"`
+	Plan   json.RawMessage `db:"plan" json:"plan"`
+
+	Tools     pq.StringArray `db:"tools" json:"tools,omitempty"`
+	UseAgents pq.StringArray `db:"use_agents" json:"use_agents,omitempty"`
 
 	Schedule *string    `db:"schedule" json:"schedule,omitempty"`
 	Deadline *time.Time `db:"deadline" json:"deadline,omitempty"`
@@ -44,7 +72,17 @@ type AgentTask struct {
 	LastRunAt     *time.Time `db:"last_run_at" json:"last_run_at,omitempty"`
 	CompletedAt   *time.Time `db:"completed_at" json:"completed_at,omitempty"`
 	CreatedAt     time.Time  `db:"created_at" json:"created_at"`
+
+	SessionID *string `db:"session_id" json:"session_id,omitempty"`
 }
+
+// Strategy values.
+const (
+	StrategyRecurring  = "recurring"
+	StrategyDirect     = "direct"
+	StrategyStructured = "structured"
+	StrategyDelegate   = "delegate"
+)
 
 // IterationResult is returned by AgentHandler.Run after each iteration.
 type IterationResult struct {
