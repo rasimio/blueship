@@ -56,15 +56,6 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, created_at);
 
 -- ============================================================
--- System prompts
--- ============================================================
-CREATE TABLE IF NOT EXISTS system_prompts (
-    key        TEXT PRIMARY KEY,
-    content    TEXT NOT NULL DEFAULT '',
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- ============================================================
 -- Model configuration
 -- ============================================================
 CREATE TABLE IF NOT EXISTS available_models (
@@ -83,16 +74,6 @@ CREATE TABLE IF NOT EXISTS model_config (
     max_tokens      INT DEFAULT 8192,
     temperature     FLOAT DEFAULT 0.7,
     updated_at      TIMESTAMPTZ DEFAULT NOW()
-);
-
--- ============================================================
--- Role-based tool assignment
--- ============================================================
-CREATE TABLE IF NOT EXISTS role_tools (
-    role       TEXT NOT NULL,
-    tool_name  TEXT NOT NULL,
-    sort_order INT DEFAULT 0,
-    PRIMARY KEY (role, tool_name)
 );
 
 -- ============================================================
@@ -124,26 +105,6 @@ CREATE INDEX IF NOT EXISTS idx_agent_tasks_pending ON agent_tasks(created_at) WH
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_running ON agent_tasks(last_run_at) WHERE status = 'running';
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_user ON agent_tasks(user_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tasks_recurring ON agent_tasks(user_id, handler) WHERE schedule IS NOT NULL AND status != 'failed';
-
--- ============================================================
--- Tools registry — single source of truth for tool metadata.
--- Code supplies name + schema + handler at registration time; the
--- description, execution mode, and A2A exposure flag are loaded from
--- this table at startup. Every registered tool MUST have a row here;
--- missing rows cause a startup error.
--- ============================================================
-CREATE TABLE IF NOT EXISTS tools (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name        TEXT NOT NULL UNIQUE,
-    description TEXT NOT NULL,
-    mode        TEXT NOT NULL DEFAULT 'sync',      -- 'sync' | 'async'
-    exposed     BOOLEAN NOT NULL DEFAULT false,    -- visible on /a2a/*
-    schema      JSONB,                              -- optional canonical input schema
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_tools_exposed ON tools(name) WHERE exposed = true;
 
 -- ============================================================
 -- A2A (Agent-to-Agent) protocol — universal tool bus
