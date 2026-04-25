@@ -26,7 +26,6 @@ import (
 	"github.com/rasimio/blueship/internal/fleet"
 	"github.com/rasimio/blueship/internal/gateway"
 	"github.com/rasimio/blueship/internal/gemini"
-	"github.com/rasimio/blueship/internal/goal"
 	"github.com/rasimio/blueship/internal/infrastructure/ws"
 	"github.com/rasimio/blueship/internal/ollama"
 	"github.com/rasimio/blueship/internal/openai"
@@ -67,9 +66,8 @@ func (f *fleetAuth) snapshot() (*fleet.JWKSCache, string) {
 type Ship struct {
 	cfg              Config
 	modules          []Module
-	handlers         map[string]core.AgentHandler          // recurring-task handlers, keyed by AgentTask.Handler
-	strategyHandlers map[string]core.AgentHandler          // strategy executors (direct / structured / delegate), keyed by AgentTask.Strategy
-	goalHandlers     map[core.GoalStrategy]core.GoalHandler // legacy goals path (no longer wired; kept until iter3 cleanup)
+	handlers         map[string]core.AgentHandler // recurring-task handlers, keyed by AgentTask.Handler
+	strategyHandlers map[string]core.AgentHandler // strategy executors (direct / structured / delegate), keyed by AgentTask.Strategy
 	logger           *slog.Logger
 	fleetAuth        *fleetAuth        // populated by runFleet; consumed by A2A server's JWT middleware
 	a2aRegistry      *core.ToolRegistry // shared between A2A dispatcher + Fleet identity publish
@@ -93,16 +91,9 @@ func (s *Ship) RegisterModule(m Module) {
 	s.modules = append(s.modules, m)
 }
 
-// RegisterGoalHandler registers an executor for one GoalStrategy value.
-// Agents choose which strategies their goals support by registering the
-// corresponding handlers. If no handler is registered for a goal's strategy
-// the scheduler fails that goal on first dispatch.
-func (s *Ship) RegisterGoalHandler(strategy core.GoalStrategy, h core.GoalHandler) {
-	if s.goalHandlers == nil {
-		s.goalHandlers = make(map[core.GoalStrategy]core.GoalHandler)
-	}
-	s.goalHandlers[strategy] = h
-}
+// (RegisterGoalHandler retired — agents now register strategy executors
+// via RegisterStrategyHandler. The legacy goals table + scheduler were
+// removed in Phase B iter3.)
 
 // RegisterAgentHandler registers a named handler for autonomous agent tasks.
 // Handlers are dispatched by the agent task scheduler based on the handler field in agent_tasks.
@@ -243,9 +234,6 @@ func (s *Ship) Run(ctx context.Context) error {
 		// Build a global tool registry for agent tasks.
 		globalRegistry := core.NewToolRegistry()
 		tool.RegisterBuiltinTools(globalRegistry, deps)
-		if err := tool.RegisterGoalTools(globalRegistry, deps); err != nil {
-			return fmt.Errorf("register goal tools: %w", err)
-		}
 		if err := tool.RegisterAgentTaskTools(globalRegistry, deps); err != nil {
 			return fmt.Errorf("register agent_task tools: %w", err)
 		}
@@ -301,20 +289,6 @@ func (s *Ship) Run(ctx context.Context) error {
 			scheduler.RunLoopWithTrigger(ctx, s.logger, "agent-tasks", 1*time.Minute, agentSched.Run, trigger, agentSched.WakeFromCallback)
 		}()
 
-		// Goal scheduler runs alongside agent-task scheduler. They don't share
-		// state; goals use a separate table (blueship.goals) and a separate
-		// handler registry keyed by GoalStrategy instead of handler name.
-		// Handlers are registered by the agent (e.g. StructuredGoalExecutor
-		// from blueship/handler) — the Ship itself stays agent-agnostic.
-		if len(s.goalHandlers) > 0 {
-			goalStore := core.NewGoalStore(shipDB)
-			goalSched := goal.NewScheduler(goalStore, s.goalHandlers, globalRegistry, msgStore, deps, notifyFn, s.logger)
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				scheduler.RunLoopWithTrigger(ctx, s.logger, "goals", 1*time.Minute, goalSched.Run, trigger, goalSched.WakeFromCallback)
-			}()
-		}
 	}
 
 	// 5. Start Telegram Gateway
@@ -690,9 +664,6 @@ func (s *Ship) startA2A(ctx context.Context, deps *Deps, reg *moduleRegistry) er
 	// rebuilt separately on each request, but the A2A path never sees those.
 	a2aReg := core.NewToolRegistry()
 	tool.RegisterBuiltinTools(a2aReg, deps)
-	if err := tool.RegisterGoalTools(a2aReg, deps); err != nil {
-		s.logger.Warn("a2a: register goal tools failed", "error", err)
-	}
 	if err := tool.RegisterAgentTaskTools(a2aReg, deps); err != nil {
 		s.logger.Warn("a2a: register agent_task tools failed", "error", err)
 	}
