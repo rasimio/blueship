@@ -153,8 +153,16 @@ func (b *Bootstrap) Run(ctx context.Context, tp ToolPublisher) {
 // upsertPeerCache writes one peer's full card into fleet_peer_cache. The
 // table is a pure read-through cache; Fleet remains the source of truth.
 func upsertPeerCache(ctx context.Context, db *sqlx.DB, card *PeerCard) error {
-	capsJSON, _ := json.Marshal(card.Capabilities)
-	toolsJSON, _ := json.Marshal(card.Tools)
+	caps := card.Capabilities
+	if caps == nil {
+		caps = []CapabilityOut{}
+	}
+	tools := card.Tools
+	if tools == nil {
+		tools = []ToolOut{}
+	}
+	capsJSON, _ := json.Marshal(caps)
+	toolsJSON, _ := json.Marshal(tools)
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO fleet_peer_cache
 		    (agent_id, name, display_name, description, endpoint_url,
