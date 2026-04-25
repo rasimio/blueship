@@ -230,9 +230,28 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	}
 
 	if result.Done {
+		// Acceptance criteria gate: if the task carries criteria and the
+		// handler claims done on a non-recurring strategy, ask the LLM
+		// to verify. Recurring jobs (Schedule != nil) always complete on
+		// the handler's word.
+		if task.Schedule == nil && task.AcceptanceCriteria != nil && *task.AcceptanceCriteria != "" {
+			verdict := evaluateAcceptance(ctx, agentDeps, task, result.Output)
+			if !verdict.Met {
+				s.logger.Info("agent-tasks: criteria not met, continuing",
+					"task_id", task.ID, "reason", verdict.Reason)
+				// Encode reason into progress so the next iteration
+				// sees what the reviewer flagged.
+				progressWithReason := injectFeedback(result.Progress, verdict.Reason)
+				if err := s.store.UpdateProgress(dbCtx, task.ID, progressWithReason); err != nil {
+					s.logger.Error("agent-tasks: progress update error", "error", err)
+				}
+				return
+			}
+		}
+
 		s.logger.Info("agent-tasks: completed",
 			"task_id", task.ID,
-			"handler", task.Handler,
+			"dispatch", dispatchTag,
 		)
 		if err := s.store.Complete(dbCtx, task.ID, result.Output); err != nil {
 			s.logger.Error("agent-tasks: complete update error", "error", err)
