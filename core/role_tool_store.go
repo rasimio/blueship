@@ -1,58 +1,30 @@
 package core
 
-import (
-	"context"
-	"sync"
-
-	"github.com/jmoiron/sqlx"
-)
-
-// RoleToolStore caches role→tool_name mappings from the role_tools table.
-// Roles with no rows in the table are not stored — callers should treat
-// a nil/missing entry as "use all tools" (backwards-compatible for cloud models).
+// RoleToolStore maps a role name (e.g. "cortex", "reflex", "background")
+// to the ordered list of tool names that role is allowed to use.
+//
+// Source-of-truth lives in code: agents pass a Config.RoleTools map at
+// boot, which the Ship wraps via NewRoleToolStore. Roles with no entries
+// default to "all tools available" — handlers that need a stricter
+// allowlist should declare an explicit list.
 type RoleToolStore struct {
-	db    *sqlx.DB
-	mu    sync.RWMutex
-	roles map[string][]string // role → ordered tool names
+	roles map[string][]string
 }
 
-// NewRoleToolStore creates a new store backed by the given DB connection.
-func NewRoleToolStore(db *sqlx.DB) *RoleToolStore {
-	return &RoleToolStore{db: db, roles: make(map[string][]string)}
-}
-
-// Load reads all role_tools rows from DB. Call once at startup.
-func (s *RoleToolStore) Load(ctx context.Context) error {
-	rows, err := s.db.QueryxContext(ctx, `SELECT role, tool_name FROM role_tools ORDER BY sort_order, tool_name`)
-	if err != nil {
-		return err
+// NewRoleToolStore wraps an in-memory map. The map is not copied; the
+// caller must not mutate it after construction.
+func NewRoleToolStore(roles map[string][]string) *RoleToolStore {
+	if roles == nil {
+		roles = map[string][]string{}
 	}
-	defer rows.Close()
-
-	m := make(map[string][]string)
-	for rows.Next() {
-		var role, name string
-		if err := rows.Scan(&role, &name); err != nil {
-			return err
-		}
-		m[role] = append(m[role], name)
-	}
-
-	s.mu.Lock()
-	s.roles = m
-	s.mu.Unlock()
-	return nil
+	return &RoleToolStore{roles: roles}
 }
 
-// Get returns the ordered tool names for a role, or nil if the role has no
-// entries (meaning "use all tools").
+// Get returns the ordered tool names for a role, or nil when the role
+// has no entry (meaning "no allowlist — handler decides").
 func (s *RoleToolStore) Get(role string) []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	if s == nil {
+		return nil
+	}
 	return s.roles[role]
-}
-
-// Refresh reloads from DB. Safe to call from hot path (e.g. /reset).
-func (s *RoleToolStore) Refresh(ctx context.Context) error {
-	return s.Load(ctx)
 }

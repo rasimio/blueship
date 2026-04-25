@@ -3,49 +3,110 @@ package core
 import (
 	"context"
 	"fmt"
-
-	"github.com/jmoiron/sqlx"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
 )
 
-// PromptStore provides access to system prompts stored in the ship database.
+// PromptStore returns named prompt strings to handlers that need them.
+// Implementations: file-backed (FilePromptStore) is the canonical option;
+// agents may also inject an in-memory map via NewMapPromptStore for tests.
 type PromptStore interface {
 	Get(ctx context.Context, key string) (string, error)
 	GetAll(ctx context.Context) (map[string]string, error)
 }
 
-type promptStore struct {
-	db *sqlx.DB
+// FilePromptStore reads prompts from a directory of `<key>.md` files.
+//
+// Lookups are case-sensitive on key. Missing files surface as an error
+// from Get; callers that treat absence as optional should ignore the
+// error and use a default. Reads are cached after first access.
+type FilePromptStore struct {
+	dir   string
+	mu    sync.RWMutex
+	cache map[string]string
 }
 
-// NewPromptStore creates a PromptStore backed by the system_prompts table.
-func NewPromptStore(db *sqlx.DB) PromptStore {
-	return &promptStore{db: db}
+// NewFilePromptStore returns a store rooted at dir. Empty dir returns an
+// implementation whose Get always errors — useful when the agent has no
+// prompts directory at all.
+func NewFilePromptStore(dir string) *FilePromptStore {
+	return &FilePromptStore{dir: dir, cache: map[string]string{}}
 }
 
-func (s *promptStore) Get(ctx context.Context, key string) (string, error) {
-	var content string
-	err := s.db.GetContext(ctx, &content,
-		`SELECT content FROM system_prompts WHERE key = $1 AND content <> ''`, key)
+// Dir returns the configured directory (for diagnostics).
+func (s *FilePromptStore) Dir() string { return s.dir }
+
+func (s *FilePromptStore) Get(ctx context.Context, key string) (string, error) {
+	s.mu.RLock()
+	if v, ok := s.cache[key]; ok {
+		s.mu.RUnlock()
+		return v, nil
+	}
+	s.mu.RUnlock()
+	if s.dir == "" {
+		return "", fmt.Errorf("prompt %q: no prompts directory configured", key)
+	}
+	path := filepath.Join(s.dir, key+".md")
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("prompt %q: %w", key, err)
 	}
-	return content, nil
+	v := string(data)
+	s.mu.Lock()
+	s.cache[key] = v
+	s.mu.Unlock()
+	return v, nil
 }
 
-func (s *promptStore) GetAll(ctx context.Context) (map[string]string, error) {
-	rows, err := s.db.QueryxContext(ctx, `SELECT key, content FROM system_prompts WHERE content <> ''`)
-	if err != nil {
-		return nil, fmt.Errorf("list prompts: %w", err)
+func (s *FilePromptStore) GetAll(ctx context.Context) (map[string]string, error) {
+	out := map[string]string{}
+	if s.dir == "" {
+		return out, nil
 	}
-	defer rows.Close()
-
-	result := make(map[string]string)
-	for rows.Next() {
-		var key, content string
-		if err := rows.Scan(&key, &content); err != nil {
+	entries, err := os.ReadDir(s.dir)
+	if err != nil {
+		return nil, fmt.Errorf("list prompts dir %q: %w", s.dir, err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		key := strings.TrimSuffix(e.Name(), ".md")
+		v, err := s.Get(ctx, key)
+		if err != nil {
 			return nil, err
 		}
-		result[key] = content
+		out[key] = v
 	}
-	return result, nil
+	return out, nil
+}
+
+// MapPromptStore is a small in-memory PromptStore for tests and embedded
+// builds where prompts are bundled at compile time.
+type MapPromptStore struct {
+	prompts map[string]string
+}
+
+// NewMapPromptStore wraps a key→content map. The map is not copied; the
+// caller must not mutate it after construction.
+func NewMapPromptStore(prompts map[string]string) *MapPromptStore {
+	return &MapPromptStore{prompts: prompts}
+}
+
+func (s *MapPromptStore) Get(_ context.Context, key string) (string, error) {
+	v, ok := s.prompts[key]
+	if !ok {
+		return "", fmt.Errorf("prompt %q: not found", key)
+	}
+	return v, nil
+}
+
+func (s *MapPromptStore) GetAll(_ context.Context) (map[string]string, error) {
+	out := make(map[string]string, len(s.prompts))
+	for k, v := range s.prompts {
+		out[k] = v
+	}
+	return out, nil
 }

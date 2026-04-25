@@ -70,7 +70,8 @@ type Ship struct {
 	handlers     map[string]core.AgentHandler          // scheduled-task handlers (heartbeat, etc.)
 	goalHandlers map[core.GoalStrategy]core.GoalHandler // goal strategy executors
 	logger       *slog.Logger
-	fleetAuth    *fleetAuth // populated by runFleet; consumed by A2A server's JWT middleware
+	fleetAuth    *fleetAuth        // populated by runFleet; consumed by A2A server's JWT middleware
+	a2aRegistry  *core.ToolRegistry // shared between A2A dispatcher + Fleet identity publish
 }
 
 // New creates a new BlueShip instance with the given configuration.
@@ -148,16 +149,15 @@ func (s *Ship) Run(ctx context.Context) error {
 		}
 	}
 
-	// 2c. Load role-based tool assignments from DB
-	roleToolStore := core.NewRoleToolStore(shipDB)
-	if err := roleToolStore.Load(ctx); err != nil {
-		s.logger.Warn("role_tools not loaded, all tools enabled for all roles", "error", err)
-	} else {
-		deps.RoleTools = roleToolStore
-	}
+	// 2c. Role-based tool allowlist comes from Config (code-driven). Roles
+	// without a list fall back to "no allowlist" inside the role-aware
+	// handlers.
+	deps.RoleTools = core.NewRoleToolStore(s.cfg.RoleTools)
 
-	// 2d. Initialize stores for ship DB data (prompts, users, sessions).
-	deps.Prompts = core.NewPromptStore(shipDB)
+	// 2d. Prompts: file-backed store rooted at Config.Prompts. If the
+	// directory is empty, individual Get calls error and callers fall
+	// back to their own defaults.
+	deps.Prompts = core.NewFilePromptStore(s.cfg.Prompts)
 	deps.Users = core.NewUserStore(shipDB)
 	deps.Sessions = session.NewStore(shipDB)
 
@@ -236,11 +236,6 @@ func (s *Ship) Run(ctx context.Context) error {
 			return fmt.Errorf("register goal tools: %w", err)
 		}
 		reg.RegisterAllTools(globalRegistry, deps)
-
-		// Load tool descriptions from DB.
-		if err := globalRegistry.LoadDescriptions(shipDB); err != nil {
-			s.logger.Warn("tool descriptions not loaded for agent tasks", "error", err)
-		}
 
 		taskStore := core.NewAgentTaskStore(shipDB)
 		msgStore := session.NewStore(shipDB) // MessageStore for agent loops
@@ -489,7 +484,11 @@ func (s *Ship) runFleet(ctx context.Context, deps *Deps, reg *moduleRegistry) {
 		bs.WithFederation(selfID, &fleetSinkAdapter{reg: reg, logger: s.logger}, s.fleetInvoke)
 	}
 
-	bs.Run(ctx, &fleetToolPublisher{db: shipDB})
+	if s.a2aRegistry == nil {
+		s.logger.Warn("fleet: A2A registry not built yet — running with empty exposed tools")
+		s.a2aRegistry = core.NewToolRegistry()
+	}
+	bs.Run(ctx, &fleetToolPublisher{reg: s.a2aRegistry})
 }
 
 // discoverSelfAgentID asks Fleet for the calling agent's profile, retrying
@@ -605,38 +604,27 @@ func (a *fleetSinkAdapter) ReplaceFleetTools(snapshot []fleet.FederatedTool) {
 	a.logger.Info("fleet: registered federated tools", "count", len(tools))
 }
 
-// fleetToolPublisher reads the ship's `tools` table and returns rows with
-// exposed=true. Keeps the fleet package decoupled from the unified tool
-// store schema.
-type fleetToolPublisher struct{ db sqlxDB }
-
-// sqlxDB is the narrow interface we need from *sqlx.DB so the shim is
-// testable.
-type sqlxDB interface {
-	SelectContext(ctx context.Context, dest any, query string, args ...any) error
+// fleetToolPublisher snapshots the registry's exposed tools and reshapes
+// them into the format BlueFleet expects in PutTools. Source of truth is
+// the in-memory registry — there is no DB read involved.
+type fleetToolPublisher struct {
+	reg *core.ToolRegistry
 }
 
-func (p *fleetToolPublisher) ListExposedTools(ctx context.Context) ([]fleet.Tool, error) {
-	type row struct {
-		Name        string         `db:"name"`
-		Description string         `db:"description"`
-		Mode        string         `db:"mode"`
-		Schema      []byte         `db:"schema"`
-	}
-	var rows []row
-	const q = `SELECT name, COALESCE(description, '') AS description,
-	                 mode, COALESCE(schema, '{}'::jsonb) AS schema
-	           FROM tools WHERE exposed = true ORDER BY name`
-	if err := p.db.SelectContext(ctx, &rows, q); err != nil {
-		return nil, err
-	}
-	out := make([]fleet.Tool, 0, len(rows))
-	for _, r := range rows {
+func (p *fleetToolPublisher) ListExposedTools(_ context.Context) ([]fleet.Tool, error) {
+	src := p.reg.ExposedTools()
+	out := make([]fleet.Tool, 0, len(src))
+	for _, t := range src {
+		mode, _, _, _ := p.reg.ToolMetadata(t.Name)
+		schema := t.Schema
+		if len(schema) == 0 {
+			schema = json.RawMessage(`{}`)
+		}
 		out = append(out, fleet.Tool{
-			Name:        r.Name,
-			Description: r.Description,
-			Mode:        r.Mode,
-			InputSchema: json.RawMessage(r.Schema),
+			Name:        t.Name,
+			Description: t.Description,
+			Mode:        mode,
+			InputSchema: schema,
 		})
 	}
 	return out, nil
@@ -696,14 +684,15 @@ func (s *Ship) startA2A(ctx context.Context, deps *Deps, reg *moduleRegistry) er
 			tp.RegisterTools(a2aReg, deps)
 		}
 	}
-	if err := a2aReg.LoadToolsConfig(shipDB); err != nil {
-		s.logger.Warn("a2a: tools table not loaded — agent card may be empty", "error", err)
-	}
+	// Publish to the Ship struct so runFleet can surface the same set of
+	// exposed tools to BlueFleet without rebuilding the registry.
+	s.a2aRegistry = a2aReg
 
 	store := a2astore.New(shipDB)
-	// The a2a server reads its list of exposed tools directly from the
-	// unified `tools` table (via store.ListExposedTools), so there is no
-	// per-startup mirroring step anymore — the DB row is authoritative.
+	// Exposed tools (those returned by the agent card and dispatched by
+	// /a2a/invoke) come from the registry directly. Tools mark themselves
+	// exposed at registration site via Expose(name, mode); no DB lookup
+	// is performed at startup.
 
 	dispatcher := a2a.NewRegistryDispatcher(&registryShim{inner: a2aReg})
 

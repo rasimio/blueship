@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
 
 	"github.com/rasimio/blueship/agent"
 	bs "github.com/rasimio/blueship/core"
@@ -50,11 +49,12 @@ type Gateway struct {
 
 	systemPrompt string
 
-	// Reflex pipeline prompts (loaded from system_prompts table).
+	// Reflex pipeline prompts. Loaded from <Config.Prompts>/<key>.md when
+	// the agent ships those files; missing files leave the default empty.
 	reflexSystemPrompt   string // system prompt for reflex LLM call
 	reflexPlanTemplate   string // user prompt template (has %s placeholders for rules, tools, message)
 	extractInsightPrompt    string   // system prompt for insight extraction
-	selfReflectionMarkers  []string // loaded from system_prompts, used by looksLikeSelfReflection
+	selfReflectionMarkers  []string // optional self_reflection_markers.md (JSON array)
 
 	mu sync.Mutex
 	users map[string]*UserState // keyed by canonical chatID ("telegram:123", "voice:owner")
@@ -203,102 +203,59 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 		logger.Info("telegram bot self", "id", me.ID, "username", me.Username)
 	}
 
-	// Load system prompts: DB first, filesystem second, error if neither
-	dbErr := gw.loadSystemPromptsFromDB(coreDB)
-	if dbErr != nil {
-		if cfg.Prompts != "" {
-			gw.logger.Info("DB prompts not available, loading from filesystem", "error", dbErr)
-			if err := gw.loadSystemPrompts(cfg.Prompts); err != nil {
-				return nil, fmt.Errorf("load system prompts from filesystem: %w", err)
-			}
-		} else {
-			return nil, fmt.Errorf("system prompts not configured: populate system_prompts table or set Prompts path (%w)", dbErr)
-		}
+	// Load system prompts from the agent's prompts directory (Config.Prompts).
+	// Personality lives with the agent, never in the framework.
+	if cfg.Prompts == "" {
+		return nil, fmt.Errorf("system prompts not configured: set Config.Prompts to a directory containing <key>.md files")
 	}
-
-	// Load compact prompt from filesystem (utility prompt, not personality)
-	if gw.compactor != nil && cfg.Prompts != "" {
-		compactPath := filepath.Join(cfg.Prompts, "prompts", "compact.md")
-		if data, err := os.ReadFile(compactPath); err == nil {
-			gw.compactor.SetSystemPrompt(string(data))
-		} else {
-			gw.logger.Warn("compact prompt not found", "path", compactPath)
-		}
+	if err := gw.loadSystemPrompts(cfg.Prompts); err != nil {
+		return nil, fmt.Errorf("load system prompts: %w", err)
 	}
 
 	return gw, nil
 }
 
-func (g *Gateway) loadSystemPromptsFromDB(db *sqlx.DB) error {
-	rows, err := db.Queryx("SELECT key, content FROM system_prompts WHERE content <> ''")
-	if err != nil {
-		return fmt.Errorf("query system_prompts: %w", err)
-	}
-	defer rows.Close()
-
-	prompts := make(map[string]string)
-	for rows.Next() {
-		var key, content string
-		if err := rows.Scan(&key, &content); err != nil {
-			return fmt.Errorf("scan row: %w", err)
-		}
-		prompts[key] = content
-	}
-
-	// Require all configured system prompt keys.
-	for _, required := range g.deps.Config.SystemPromptKeys {
-		if prompts[required] == "" {
-			return fmt.Errorf("missing required prompt: %s", required)
-		}
-	}
-
-	// Compose system prompt from configured keys.
+// loadSystemPrompts composes the system prompt from <key>.md files in
+// dir, ordered by Config.SystemPromptKeys. Optional pipeline prompts
+// (compact, reflex-system, reflex-plan, extract-insight,
+// self_reflection_markers) are picked up if present; missing optional
+// files fall back to in-code defaults set elsewhere on the gateway.
+func (g *Gateway) loadSystemPrompts(dir string) error {
 	var parts []string
 	for _, key := range g.deps.Config.SystemPromptKeys {
-		parts = append(parts, prompts[key])
+		data, err := os.ReadFile(filepath.Join(dir, key+".md"))
+		if err != nil {
+			return fmt.Errorf("read %s.md: %w", key, err)
+		}
+		parts = append(parts, string(data))
 	}
 	g.systemPrompt = strings.Join(parts, "\n\n")
-	if g.compactor != nil && prompts["compact"] != "" {
-		g.compactor.SetSystemPrompt(prompts["compact"])
-	}
 
-	// Reflex pipeline prompts (optional — defaults used if not in DB).
-	if prompts["reflex-system"] != "" {
-		g.reflexSystemPrompt = prompts["reflex-system"]
+	readOpt := func(key string) string {
+		data, err := os.ReadFile(filepath.Join(dir, key+".md"))
+		if err != nil {
+			return ""
+		}
+		return string(data)
 	}
-	if prompts["reflex-plan"] != "" {
-		g.reflexPlanTemplate = prompts["reflex-plan"]
+	if v := readOpt("compact"); v != "" && g.compactor != nil {
+		g.compactor.SetSystemPrompt(v)
 	}
-	if prompts["extract-insight"] != "" {
-		g.extractInsightPrompt = prompts["extract-insight"]
+	if v := readOpt("reflex-system"); v != "" {
+		g.reflexSystemPrompt = v
 	}
-	if raw := prompts["self_reflection_markers"]; raw != "" {
+	if v := readOpt("reflex-plan"); v != "" {
+		g.reflexPlanTemplate = v
+	}
+	if v := readOpt("extract-insight"); v != "" {
+		g.extractInsightPrompt = v
+	}
+	if raw := readOpt("self_reflection_markers"); raw != "" {
 		var markers []string
 		if json.Unmarshal([]byte(raw), &markers) == nil && len(markers) > 0 {
 			g.selfReflectionMarkers = markers
 		}
 	}
-
-	// Log all loaded prompts dynamically.
-	logArgs := make([]any, 0, len(prompts)*2)
-	for k, v := range prompts {
-		logArgs = append(logArgs, k, len(v))
-	}
-	g.logger.Info("system prompts loaded from DB", logArgs...)
-	return nil
-}
-
-func (g *Gateway) loadSystemPrompts(workspacePath string) error {
-	var parts []string
-	for _, key := range g.deps.Config.SystemPromptKeys {
-		filename := strings.ToUpper(key) + ".md"
-		data, err := os.ReadFile(filepath.Join(workspacePath, filename))
-		if err != nil {
-			return fmt.Errorf("read %s: %w", filename, err)
-		}
-		parts = append(parts, string(data))
-	}
-	g.systemPrompt = strings.Join(parts, "\n\n")
 	return nil
 }
 
@@ -556,13 +513,6 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 		g.logger.Warn("gateway: register goal tools failed", "error", err)
 	}
 	g.modules.RegisterAllTools(registry, userDeps)
-
-	// Load tool descriptions from DB (overrides hardcoded descriptions).
-	if shipDB, dbErr := g.deps.DB("ship"); dbErr == nil {
-		if err := registry.LoadDescriptions(shipDB); err != nil {
-			g.logger.Warn("tool descriptions not loaded", "error", err)
-		}
-	}
 
 	us := &UserState{
 		ChatID:   chatID,
@@ -1683,8 +1633,8 @@ func (g *Gateway) extractInsight(ctx context.Context, response, extractType stri
 
 // looksLikeSelfReflection detects cortex responses that contain self-referential
 // insights or reflections worth auto-saving. Markers are loaded from
-// system_prompts.self_reflection_markers (JSON array); falls back to hardcoded
-// defaults if not configured.
+// <Config.Prompts>/self_reflection_markers.md (JSON array). Empty slice
+// (file absent) makes the check a no-op.
 func (g *Gateway) looksLikeSelfReflection(text string) bool {
 	if len(g.selfReflectionMarkers) == 0 {
 		return false
@@ -1932,15 +1882,11 @@ func (g *Gateway) handleResetCommand(ctx context.Context, chatID int64) {
 		return
 	}
 
-	// Refresh model config and role tools from DB
+	// Refresh model config from DB. Role-tool allowlists come from code
+	// (Config.RoleTools); they are not refreshable at runtime.
 	if g.deps.ModelStore != nil {
 		if err := g.deps.ModelStore.Refresh(ctx); err != nil {
 			g.logger.Warn("reset: failed to refresh model config", "error", err)
-		}
-	}
-	if g.deps.RoleTools != nil {
-		if err := g.deps.RoleTools.Refresh(ctx); err != nil {
-			g.logger.Warn("reset: failed to refresh role tools", "error", err)
 		}
 	}
 

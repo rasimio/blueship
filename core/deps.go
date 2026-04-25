@@ -38,7 +38,7 @@ type Deps struct {
 	RoleTools *RoleToolStore
 
 	// Stores provide access to ship DB data without modules querying ship DB directly.
-	Prompts  PromptStore    // system_prompts table (nil = not available)
+	Prompts  PromptStore    // file-backed prompt store rooted at Config.Prompts
 	Users    UserStore      // user_profiles table (nil = not available)
 	Sessions SessionQuerier // chat_messages/chat_sessions (nil = not available)
 

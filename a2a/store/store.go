@@ -109,44 +109,9 @@ func (s *Store) SaveAgentCard(ctx context.Context, peerID string, card json.RawM
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// Exposed tools (served from the unified `tools` table)
-// ---------------------------------------------------------------------------
-
-// ListExposedTools returns every row in the tools table whose exposed
-// flag is true. These are served from /.well-known/agent so peers can
-// discover what this ship offers. The schema column may be null for
-// tools where code is the only authoritative source of the JSON schema;
-// the agent card handler falls back to the in-memory registry schema
-// when that happens.
-func (s *Store) ListExposedTools(ctx context.Context) ([]a2a.ExposedTool, error) {
-	const q = `
-		SELECT name, mode, description, COALESCE(schema, '{}'::jsonb) AS schema
-		FROM tools
-		WHERE exposed = true
-		ORDER BY name
-	`
-	type row struct {
-		Name        string          `db:"name"`
-		Mode        string          `db:"mode"`
-		Description string          `db:"description"`
-		Schema      json.RawMessage `db:"schema"`
-	}
-	var rows []row
-	if err := s.db.SelectContext(ctx, &rows, q); err != nil {
-		return nil, fmt.Errorf("ListExposedTools: %w", err)
-	}
-	out := make([]a2a.ExposedTool, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, a2a.ExposedTool{
-			Name:        r.Name,
-			Description: r.Description,
-			Mode:        a2a.ToolMode(r.Mode),
-			Schema:      r.Schema,
-		})
-	}
-	return out, nil
-}
+// (Exposed tools are served by the dispatcher from the in-memory
+// ToolRegistry — see a2a/dispatcher.go. There is no DB-side exposed-
+// tool table; the earlier ListExposedTools helper has been retired.)
 
 // ---------------------------------------------------------------------------
 // Remote tools (tools imported from peers)

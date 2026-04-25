@@ -30,13 +30,18 @@ type Config struct {
 
 	// --- Optional infrastructure ---
 	Redis    string // Redis address (default: "" = no cache)
-	Prompts  string // directory with .md prompt files (default: "" = no files)
+	Prompts  string // directory of <key>.md prompt files (required for personality)
 	Timezone string // default: "UTC"
 
 	// SystemPromptKeys defines prompt keys that compose the system prompt.
-	// Loaded from DB (system_prompts) or workspace files (KEY.md).
+	// Each key resolves to <key>.md inside Config.Prompts.
 	// Default: ["preamble", "soul", "agents"]
 	SystemPromptKeys []string
+
+	// RoleTools maps a role name (cortex / reflex / background / …) to the
+	// ordered tool allowlist for that role. Roles absent from the map fall
+	// back to "no allowlist" — every registered tool is available.
+	RoleTools map[string][]string
 
 	// --- Owner (single-user mode) ---
 	Owner OwnerConfig
