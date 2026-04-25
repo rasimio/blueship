@@ -1,9 +1,11 @@
 package blueship
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -38,6 +40,29 @@ import (
 	"github.com/rasimio/blueship/tool"
 )
 
+// fleetAuth bundles Ship-side state populated by runFleet that the A2A
+// server's JWT validator depends on. Wrapped in a struct so the A2A
+// server can hold a stable pointer at startup time, even though the JWKS
+// cache + self_agent_id only become known once Fleet is reachable.
+type fleetAuth struct {
+	mu          sync.RWMutex
+	jwks        *fleet.JWKSCache
+	selfAgentID string
+}
+
+func (f *fleetAuth) set(jwks *fleet.JWKSCache, selfAgentID string) {
+	f.mu.Lock()
+	f.jwks = jwks
+	f.selfAgentID = selfAgentID
+	f.mu.Unlock()
+}
+
+func (f *fleetAuth) snapshot() (*fleet.JWKSCache, string) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.jwks, f.selfAgentID
+}
+
 // Ship is the main BlueShip runtime instance.
 type Ship struct {
 	cfg          Config
@@ -45,6 +70,7 @@ type Ship struct {
 	handlers     map[string]core.AgentHandler          // scheduled-task handlers (heartbeat, etc.)
 	goalHandlers map[core.GoalStrategy]core.GoalHandler // goal strategy executors
 	logger       *slog.Logger
+	fleetAuth    *fleetAuth // populated by runFleet; consumed by A2A server's JWT middleware
 }
 
 // New creates a new BlueShip instance with the given configuration.
@@ -54,8 +80,9 @@ func New(cfg Config) *Ship {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	return &Ship{
-		cfg:    cfg,
-		logger: logger,
+		cfg:       cfg,
+		logger:    logger,
+		fleetAuth: &fleetAuth{},
 	}
 }
 
@@ -182,7 +209,7 @@ func (s *Ship) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.runFleet(ctx, deps)
+			s.runFleet(ctx, deps, reg)
 		}()
 	}
 
@@ -333,10 +360,13 @@ type remoteToolReg struct {
 	Mode        string
 	PeerName    string
 	Handler     core.ToolHandler
+	Source      string // "yaml" or "fleet" — used for selective replacement
 }
 
 type moduleRegistry struct {
-	modules     []Module
+	modules []Module
+
+	mu          sync.Mutex // guards remoteTools (Bootstrap mutates concurrently)
 	remoteTools []remoteToolReg
 }
 
@@ -346,9 +376,38 @@ func (r *moduleRegistry) RegisterAllTools(registry *ToolRegistry, d *Deps) {
 			tp.RegisterTools(registry, d)
 		}
 	}
-	for _, rt := range r.remoteTools {
+	r.mu.Lock()
+	tools := append([]remoteToolReg(nil), r.remoteTools...)
+	r.mu.Unlock()
+	for _, rt := range tools {
 		registry.RegisterRemote(rt.Name, rt.Description, rt.Schema, rt.Mode, rt.PeerName, rt.Handler)
 	}
+}
+
+// AppendRemoteTool is the startup-time path used by config-driven A2A peers.
+func (r *moduleRegistry) AppendRemoteTool(rt remoteToolReg) {
+	r.mu.Lock()
+	r.remoteTools = append(r.remoteTools, rt)
+	r.mu.Unlock()
+}
+
+// ReplaceFleetRemoteTools atomically swaps every Fleet-derived remote tool
+// (rows whose source matches sourceTag) with the supplied snapshot. Tools
+// from other sources (legacy yaml peers) are preserved.
+func (r *moduleRegistry) ReplaceFleetRemoteTools(sourceTag string, fresh []remoteToolReg) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	kept := r.remoteTools[:0]
+	for _, t := range r.remoteTools {
+		if t.Source != sourceTag {
+			kept = append(kept, t)
+		}
+	}
+	for _, t := range fresh {
+		t.Source = sourceTag
+		kept = append(kept, t)
+	}
+	r.remoteTools = kept
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +417,7 @@ func (r *moduleRegistry) RegisterAllTools(registry *ToolRegistry, d *Deps) {
 // runFleet boots the optional BlueFleet integration. Blocks until ctx is
 // cancelled. Transient errors (Fleet down, token expired between refreshes)
 // are logged but never take the Ship down.
-func (s *Ship) runFleet(ctx context.Context, deps *Deps) {
+func (s *Ship) runFleet(ctx context.Context, deps *Deps, reg *moduleRegistry) {
 	shipDB, err := deps.DB("ship")
 	if err != nil {
 		s.logger.Error("fleet: ship db unavailable", "error", err)
@@ -408,7 +467,142 @@ func (s *Ship) runFleet(ctx context.Context, deps *Deps) {
 		Capabilities: caps,
 	}, cfg.InterestedIn, s.logger)
 
+	// JWKS cache for inbound JWT validation. Populated before federation
+	// sink is wired so the A2A server can accept Fleet tokens immediately.
+	jwks := fleet.NewJWKSCache(cfg.BaseURL, 30*time.Minute, s.logger)
+	go jwks.Run(ctx)
+
+	// Look up our own agent_id so the JWT validator can enforce the
+	// audience claim. If GetMe fails (cold start, Fleet down) we retry on a
+	// short backoff — without it the inbound JWT path stays disabled.
+	selfID := s.discoverSelfAgentID(ctx, cli)
+	if selfID != "" {
+		s.fleetAuth.set(jwks, selfID)
+		s.logger.Info("fleet: self-id learned", "agent_id", selfID)
+	} else {
+		s.logger.Warn("fleet: self-id discovery failed; inbound JWT auth stays disabled")
+	}
+
+	// Federation: register peer-imported tools into the Ship's tool
+	// registry on every refresh tick. invokeFn does the actual HTTP POST.
+	if selfID != "" {
+		bs.WithFederation(selfID, &fleetSinkAdapter{reg: reg, logger: s.logger}, s.fleetInvoke)
+	}
+
 	bs.Run(ctx, &fleetToolPublisher{db: shipDB})
+}
+
+// discoverSelfAgentID asks Fleet for the calling agent's profile, retrying
+// briefly so a cold-start race against Fleet doesn't leave inbound JWT
+// auth permanently disabled.
+func (s *Ship) discoverSelfAgentID(ctx context.Context, cli *fleet.Client) string {
+	for attempt := 0; attempt < 5; attempt++ {
+		card, err := cli.GetMe(ctx)
+		if err == nil && card.Agent.ID != "" {
+			return card.Agent.ID
+		}
+		if attempt < 4 {
+			select {
+			case <-ctx.Done():
+				return ""
+			case <-time.After(time.Duration(2<<attempt) * time.Second):
+			}
+		}
+	}
+	return ""
+}
+
+// fleetInvoke is the dispatch closure handed to fleet.Bootstrap. It does
+// one peer-to-peer A2A call, stamping the supplied JWT bearer.
+func (s *Ship) fleetInvoke(ctx context.Context, peerName, peerAgentID, endpointURL, toolName string, input []byte, bearer string) ([]byte, error) {
+	if endpointURL == "" {
+		return nil, fmt.Errorf("fleet: peer %q has no endpoint URL", peerName)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"tool":  toolName,
+		"input": json.RawMessage(input),
+	})
+	url := strings.TrimRight(endpointURL, "/") + "/a2a/invoke"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	httpCli := &http.Client{Timeout: 60 * time.Second}
+	resp, err := httpCli.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fleet: invoke %s/%s: %w", peerName, toolName, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("fleet: invoke %s/%s: HTTP %d: %s", peerName, toolName, resp.StatusCode, string(raw))
+	}
+	return raw, nil
+}
+
+// fleetSinkAdapter bridges fleet.FederatedToolSink to moduleRegistry.
+type fleetSinkAdapter struct {
+	reg    *moduleRegistry
+	logger *slog.Logger
+}
+
+func (a *fleetSinkAdapter) ReplaceFleetTools(snapshot []fleet.FederatedTool) {
+	tools := make([]remoteToolReg, 0, len(snapshot))
+	for _, ft := range snapshot {
+		ftLocal := ft
+		handler := core.ToolHandler(func(ctx context.Context, input json.RawMessage) (any, error) {
+			raw, err := ftLocal.Handler(ctx, []byte(input))
+			if err != nil {
+				return nil, err
+			}
+			// Tool returns the full /a2a/invoke response body. Decode it
+			// and surface either the sync output or the async handle.
+			var ir struct {
+				Mode      string          `json:"mode"`
+				Output    json.RawMessage `json:"output"`
+				CallID    string          `json:"call_id"`
+				Handle    string          `json:"handle"`
+				State     string          `json:"state"`
+				EventsURL string          `json:"events_url"`
+			}
+			if err := json.Unmarshal(raw, &ir); err != nil {
+				return string(raw), nil
+			}
+			if ir.Mode == "async" {
+				return map[string]any{
+					"call_id":    ir.CallID,
+					"handle":     ir.Handle,
+					"state":      ir.State,
+					"events_url": ir.EventsURL,
+				}, nil
+			}
+			if len(ir.Output) == 0 {
+				return map[string]any{"ok": true}, nil
+			}
+			var result any
+			if err := json.Unmarshal(ir.Output, &result); err != nil {
+				return string(ir.Output), nil
+			}
+			return result, nil
+		})
+		tools = append(tools, remoteToolReg{
+			Name:        ftLocal.Name,
+			Description: ftLocal.Description,
+			Schema:      json.RawMessage(ftLocal.Schema),
+			Mode:        ftLocal.Mode,
+			PeerName:    ftLocal.PeerName,
+			Handler:     handler,
+		})
+	}
+	a.reg.ReplaceFleetRemoteTools("fleet", tools)
+	a.logger.Info("fleet: registered federated tools", "count", len(tools))
 }
 
 // fleetToolPublisher reads the ship's `tools` table and returns rows with
@@ -522,12 +716,28 @@ func (s *Ship) startA2A(ctx context.Context, deps *Deps, reg *moduleRegistry) er
 		}
 	}
 
+	// Late-bound JWT validator: returns failure until runFleet populates
+	// the JWKS cache + this agent's own ID. Once Fleet is up, every inbound
+	// JWT is verified against the cached keys + audience.
+	jwtValidator := func(ctx context.Context, raw string) (string, error) {
+		jwks, selfID := s.fleetAuth.snapshot()
+		if jwks == nil || selfID == "" {
+			return "", fmt.Errorf("fleet: jwt validator not ready")
+		}
+		claims, err := jwks.Validate(ctx, raw, selfID)
+		if err != nil {
+			return "", err
+		}
+		return claims.CallerAgentID, nil
+	}
+
 	srv := a2aserver.New(a2aserver.Config{
-		Name:        s.cfg.A2A.Name,
-		Description: "BlueShip A2A agent",
-		Version:     s.cfg.A2A.Version,
-		BaseURL:     s.cfg.A2A.BaseURL,
-		AuthToken:   s.cfg.A2A.AuthToken,
+		Name:         s.cfg.A2A.Name,
+		Description:  "BlueShip A2A agent",
+		Version:      s.cfg.A2A.Version,
+		BaseURL:      s.cfg.A2A.BaseURL,
+		AuthToken:    s.cfg.A2A.AuthToken,
+		JWTValidator: jwtValidator,
 	}, store, dispatcher, cbHandler, s.logger)
 
 	// Start HTTP listener in the background; shutdown on ctx.Done.
@@ -587,13 +797,14 @@ func (s *Ship) startA2A(ctx context.Context, deps *Deps, reg *moduleRegistry) er
 		imports := 0
 		for _, rt := range card.Tools {
 			_ = store.UpsertRemoteTool(ctx, peer.ID, rt)
-			reg.remoteTools = append(reg.remoteTools, remoteToolReg{
+			reg.AppendRemoteTool(remoteToolReg{
 				Name:        rt.Name,
 				Description: rt.Description,
 				Schema:      rt.Schema,
 				Mode:        string(rt.Mode),
 				PeerName:    pcfg.Name,
 				Handler:     makeRemoteHandler(cl, rt.Name),
+				Source:      "yaml",
 			})
 			imports++
 		}

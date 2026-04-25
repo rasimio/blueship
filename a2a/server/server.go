@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,13 +38,20 @@ type Dispatcher interface {
 	InvokeAsync(ctx context.Context, name string, input json.RawMessage, emit a2a.EventEmitter) (initial json.RawMessage, err error)
 }
 
+// JWTValidator validates an incoming bearer JWT against this Ship's
+// expected audience (its own Fleet agent_id). Returns the caller's agent
+// id (sub claim) on success. Set on Server.Config to enable Fleet-issued
+// JWT auth alongside the legacy shared bearer.
+type JWTValidator func(ctx context.Context, raw string) (callerAgentID string, err error)
+
 // Config holds server startup parameters.
 type Config struct {
 	Name        string
 	Description string
 	Version     string
 	BaseURL     string
-	AuthToken   string // shared secret; empty disables auth (dev only)
+	AuthToken   string       // shared secret; empty disables auth (dev only)
+	JWTValidator JWTValidator // optional; when set, JWT auth runs before AuthToken fallback
 }
 
 // Server is the A2A HTTP server.
@@ -93,21 +101,45 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/a2a/health", s.handleHealth)
 }
 
-// auth wraps a handler in bearer-token check. If the server has no token
-// configured, requests pass through (single-owner dev mode).
+// auth wraps a handler in bearer-token check. Two acceptable shapes:
+//
+//  1. Fleet-issued JWT: validated via cfg.JWTValidator. The caller's
+//     agent_id (sub claim) is stamped onto X-A2A-Peer for downstream
+//     audit, replacing whatever the client sent.
+//  2. Legacy shared secret matching cfg.AuthToken. Kept during the
+//     Phase 8 → Phase 9 cutover so any peer that has not yet migrated
+//     to Fleet still works.
+//
+// If neither is configured, requests pass through (single-owner dev mode).
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.AuthToken == "" {
+		if s.cfg.AuthToken == "" && s.cfg.JWTValidator == nil {
 			next(w, r)
 			return
 		}
-		got := r.Header.Get("Authorization")
-		want := "Bearer " + s.cfg.AuthToken
-		if got != want {
-			writeError(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token", "")
+		raw := r.Header.Get("Authorization")
+		bearer, ok := strings.CutPrefix(raw, "Bearer ")
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "missing bearer token", "")
 			return
 		}
-		next(w, r)
+		bearer = strings.TrimSpace(bearer)
+		// Try JWT first if configured.
+		if s.cfg.JWTValidator != nil {
+			caller, err := s.cfg.JWTValidator(r.Context(), bearer)
+			if err == nil {
+				r.Header.Set("X-A2A-Peer", caller)
+				next(w, r)
+				return
+			}
+			s.logger.Debug("a2a: jwt rejected, trying static bearer", "error", err)
+		}
+		// Fallback to legacy shared secret.
+		if s.cfg.AuthToken != "" && bearer == s.cfg.AuthToken {
+			next(w, r)
+			return
+		}
+		writeError(w, http.StatusUnauthorized, "unauthorized", "invalid bearer token", "")
 	}
 }
 

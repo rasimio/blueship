@@ -33,16 +33,26 @@ type Tracer interface {
 	TraceEvent(ctx context.Context, call a2a.Call, ev a2a.Event)
 }
 
+// TokenProvider is an optional callback that returns the bearer token to
+// stamp on each outbound request. When set it overrides the static
+// peer.AuthToken — used by the Fleet path to mint short-lived JWTs scoped
+// to this specific peer. Returning an empty string falls back to the
+// peer's static token (so callers can phase in JWT auth without breaking
+// the legacy shared-secret path).
+type TokenProvider func(ctx context.Context) (string, error)
+
 // Client is a peer-bound A2A client.
 type Client struct {
-	peer   a2a.Peer
-	http   *http.Client
-	store  *store.Store
-	tracer Tracer
-	logger *slog.Logger
+	peer     a2a.Peer
+	http     *http.Client
+	store    *store.Store
+	tracer   Tracer
+	logger   *slog.Logger
+	tokenSrc TokenProvider
 }
 
-// New constructs a Client for a known peer.
+// New constructs a Client for a known peer using the peer row's static
+// AuthToken as the bearer.
 func New(peer a2a.Peer, st *store.Store, tracer Tracer, logger *slog.Logger) *Client {
 	return &Client{
 		peer: peer,
@@ -53,6 +63,15 @@ func New(peer a2a.Peer, st *store.Store, tracer Tracer, logger *slog.Logger) *Cl
 		tracer: tracer,
 		logger: logger,
 	}
+}
+
+// NewWithTokenProvider constructs a Client whose Authorization header is
+// produced by tp on every outbound call. Used by the Fleet path so each
+// invocation carries a peer-scoped JWT.
+func NewWithTokenProvider(peer a2a.Peer, st *store.Store, tracer Tracer, logger *slog.Logger, tp TokenProvider) *Client {
+	c := New(peer, st, tracer, logger)
+	c.tokenSrc = tp
+	return c
 }
 
 // Peer returns the Peer this client is bound to.
@@ -298,10 +317,24 @@ func (c *Client) SendCallback(ctx context.Context, event string, payload any) er
 	return nil
 }
 
-// addAuth stamps the peer's bearer token on a request.
+// addAuth stamps a bearer token on a request. Prefers the configured
+// TokenProvider (Fleet-issued JWT); falls back to the static peer auth
+// token (legacy shared-secret path) on empty/error.
 func (c *Client) addAuth(req *http.Request) {
-	if c.peer.AuthToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.peer.AuthToken)
+	bearer := ""
+	if c.tokenSrc != nil {
+		if tok, err := c.tokenSrc(req.Context()); err == nil && tok != "" {
+			bearer = tok
+		} else if err != nil {
+			c.logger.Warn("a2a client: token provider failed, falling back to static",
+				"peer", c.peer.Name, "error", err)
+		}
 	}
-	req.Header.Set("X-A2A-Peer", "self") // overridden by caller if needed
+	if bearer == "" {
+		bearer = c.peer.AuthToken
+	}
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	req.Header.Set("X-A2A-Peer", "self")
 }

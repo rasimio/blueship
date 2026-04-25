@@ -113,6 +113,33 @@ func (c *Client) refreshAccessToken(ctx context.Context) (string, error) {
 	return tr.AccessToken, nil
 }
 
+// PeerToken requests an access token scoped to a specific peer. The
+// returned JWT carries claims `sub=<this agent's id>` and
+// `aud=<peerAgentID>`; the peer's JWKS verifier rejects tokens whose
+// audience does not match its own id, defending against token reuse.
+//
+// Cached separately from the self-scoped token so a long-lived peer
+// connection does not accidentally use a self-only token.
+func (c *Client) PeerToken(ctx context.Context, peerAgentID string) (string, error) {
+	body, _ := json.Marshal(map[string]string{
+		"client_id":     c.cfg.ClientID,
+		"client_secret": c.cfg.ClientSecret,
+		"scope":         "peer:" + peerAgentID,
+	})
+	resp, err := c.rawPost(ctx, "/v0/oauth/token", body, "")
+	if err != nil {
+		return "", fmt.Errorf("fleet: peer token: %w", err)
+	}
+	var tr tokenResponse
+	if err := json.Unmarshal(resp, &tr); err != nil {
+		return "", fmt.Errorf("fleet: peer token decode: %w", err)
+	}
+	if tr.AccessToken == "" {
+		return "", fmt.Errorf("fleet: empty peer token in response")
+	}
+	return tr.AccessToken, nil
+}
+
 // ---------------------------------------------------------------------------
 // Identity / profile
 // ---------------------------------------------------------------------------
@@ -131,6 +158,20 @@ func (c *Client) PatchMe(ctx context.Context, req PatchMeRequest) error {
 	body, _ := json.Marshal(req)
 	_, err := c.doAuth(ctx, http.MethodPatch, "/v0/agents/me", body)
 	return err
+}
+
+// GetMe returns the calling agent's own peer card. Used at startup so the
+// Ship can learn its own Fleet agent_id without parsing its own JWT.
+func (c *Client) GetMe(ctx context.Context) (*PeerCard, error) {
+	raw, err := c.doAuth(ctx, http.MethodGet, "/v0/agents/me", nil)
+	if err != nil {
+		return nil, err
+	}
+	var card PeerCard
+	if err := json.Unmarshal(raw, &card); err != nil {
+		return nil, fmt.Errorf("fleet: decode self card: %w", err)
+	}
+	return &card, nil
 }
 
 // Capability is the payload for PUT /v0/agents/me/capabilities.

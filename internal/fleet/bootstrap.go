@@ -10,6 +10,27 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// FederatedToolSink is the narrow interface Bootstrap calls to register
+// peer-imported tools into the Ship's tool registry. The sink batches one
+// snapshot per refresh tick — Bootstrap never inserts/deletes tools one
+// at a time, which means the registry never observes a partial state.
+type FederatedToolSink interface {
+	ReplaceFleetTools(snapshot []FederatedTool)
+}
+
+// FederatedTool is one peer-imported tool ready for registration. The
+// handler closure has the peer's endpoint URL and a token producer baked
+// in; cortex calls it the same way it calls a local tool.
+type FederatedTool struct {
+	Name        string
+	Description string
+	Mode        string
+	Schema      []byte
+	PeerName    string
+	PeerAgentID string
+	Handler     func(ctx context.Context, input []byte) ([]byte, error)
+}
+
 // Bootstrap holds the one-shot registration + periodic refresh logic for a
 // Ship's Fleet integration. On startup it publishes the Ship's identity,
 // capabilities, and exposed tool catalog. A background loop then refreshes
@@ -20,6 +41,28 @@ type Bootstrap struct {
 	logger    *slog.Logger
 	identity  Identity
 	interests []string
+
+	// optional — when set, Bootstrap derives a federated tool snapshot from
+	// each peer card and pushes it to the sink.
+	sink         FederatedToolSink
+	invokeFn     PeerInvokeFunc
+	selfAgentID  string
+}
+
+// PeerInvokeFunc dispatches one cross-agent tool call. Implementations get
+// the peer's endpoint, the tool name, the input JSON, plus a fresh
+// peer-scoped JWT to stamp on the request. Returning the raw response body
+// keeps Bootstrap free of HTTP plumbing.
+type PeerInvokeFunc func(ctx context.Context, peerName, peerAgentID, endpointURL, toolName string, input []byte, bearer string) ([]byte, error)
+
+// WithFederation enables federated tool registration. selfAgentID is this
+// Ship's own Fleet UUID — used to skip self-discovery — and invokeFn is
+// the Ship-supplied dispatch callback.
+func (b *Bootstrap) WithFederation(selfAgentID string, sink FederatedToolSink, invokeFn PeerInvokeFunc) *Bootstrap {
+	b.sink = sink
+	b.invokeFn = invokeFn
+	b.selfAgentID = selfAgentID
+	return b
 }
 
 // Identity is what this Ship publishes about itself to Fleet. Tool and
@@ -86,9 +129,11 @@ func (b *Bootstrap) PublishIdentity(ctx context.Context, tp ToolPublisher) error
 }
 
 // RefreshPeers fetches peers for each capability this Ship cares about,
-// then caches their full cards in fleet_peer_cache.
+// caches their full cards in fleet_peer_cache, and (when federation is
+// enabled) pushes a fresh tool snapshot to the registered sink.
 func (b *Bootstrap) RefreshPeers(ctx context.Context) error {
 	seen := make(map[string]bool)
+	var snapshot []FederatedTool
 	for _, tag := range b.interests {
 		agents, err := b.client.Search(ctx, tag, "", 100)
 		if err != nil {
@@ -97,6 +142,9 @@ func (b *Bootstrap) RefreshPeers(ctx context.Context) error {
 		}
 		for _, a := range agents {
 			if seen[a.ID] {
+				continue
+			}
+			if a.ID == b.selfAgentID {
 				continue
 			}
 			seen[a.ID] = true
@@ -108,11 +156,50 @@ func (b *Bootstrap) RefreshPeers(ctx context.Context) error {
 			if err := upsertPeerCache(ctx, b.db, card); err != nil {
 				b.logger.Warn("fleet: cache peer failed", "peer", a.Name, "error", err)
 			}
+			if b.sink != nil && b.invokeFn != nil {
+				for _, t := range card.Tools {
+					tCopy := t
+					peerEndpoint := card.Agent.EndpointURL
+					peerID := card.Agent.ID
+					peerName := card.Agent.Name
+					schema := []byte(tCopy.InputSchema)
+					if len(schema) == 0 {
+						schema = []byte(`{}`)
+					}
+					handler := b.federatedHandler(peerName, peerID, peerEndpoint, tCopy.Name)
+					snapshot = append(snapshot, FederatedTool{
+						Name:        tCopy.Name,
+						Description: tCopy.Description,
+						Mode:        tCopy.Mode,
+						Schema:      schema,
+						PeerName:    peerName,
+						PeerAgentID: peerID,
+						Handler:     handler,
+					})
+				}
+			}
 		}
 	}
-	b.logger.Info("fleet: peer cache refreshed", "count", len(seen))
+	if b.sink != nil {
+		b.sink.ReplaceFleetTools(snapshot)
+	}
+	b.logger.Info("fleet: peer cache refreshed", "peers", len(seen), "federated_tools", len(snapshot))
 	return nil
 }
+
+// federatedHandler builds the closure that dispatches one tool invocation
+// via the Ship-supplied invoke function, fetching a fresh peer-scoped JWT
+// on each call.
+func (b *Bootstrap) federatedHandler(peerName, peerAgentID, endpointURL, toolName string) func(ctx context.Context, input []byte) ([]byte, error) {
+	return func(ctx context.Context, input []byte) ([]byte, error) {
+		bearer, err := b.client.PeerToken(ctx, peerAgentID)
+		if err != nil {
+			return nil, fmt.Errorf("fleet: peer token: %w", err)
+		}
+		return b.invokeFn(ctx, peerName, peerAgentID, endpointURL, toolName, input, bearer)
+	}
+}
+
 
 // Run executes the startup publish + refresh loop until ctx is cancelled.
 // Returns nil when ctx fires; transient errors are logged but don't stop
