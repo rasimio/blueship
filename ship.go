@@ -238,6 +238,12 @@ func (s *Ship) Run(ctx context.Context) error {
 			return fmt.Errorf("register agent_task tools: %w", err)
 		}
 		reg.RegisterAllTools(globalRegistry, deps)
+		// Subscribe globalRegistry to future Fleet remote-tool pushes so
+		// federation discovered after boot reaches the agent-task scheduler
+		// without rebuilding the registry. RegisterRemote overwrites any
+		// local registration with the same name — federation wins for
+		// delegation flows like agent_task_accept.
+		reg.AddTargetRegistry(globalRegistry)
 
 		taskStore := core.NewAgentTaskStore(shipDB)
 		msgStore := session.NewStore(shipDB) // MessageStore for agent loops
@@ -349,8 +355,12 @@ type remoteToolReg struct {
 type moduleRegistry struct {
 	modules []Module
 
-	mu          sync.Mutex // guards remoteTools (Bootstrap mutates concurrently)
+	mu          sync.Mutex          // guards remoteTools (Bootstrap mutates concurrently)
 	remoteTools []remoteToolReg
+	// targets receive every remote-tool replace so long-lived registries
+	// (e.g. the agent-task scheduler's globalRegistry, built once at boot)
+	// stay in sync with Fleet bootstrap pushes that arrive later.
+	targets []*ToolRegistry
 }
 
 func (r *moduleRegistry) RegisterAllTools(registry *ToolRegistry, d *Deps) {
@@ -376,10 +386,11 @@ func (r *moduleRegistry) AppendRemoteTool(rt remoteToolReg) {
 
 // ReplaceFleetRemoteTools atomically swaps every Fleet-derived remote tool
 // (rows whose source matches sourceTag) with the supplied snapshot. Tools
-// from other sources (legacy yaml peers) are preserved.
+// from other sources (legacy yaml peers) are preserved. Each registered
+// target also receives a RegisterRemote pass so long-lived registries
+// see the freshly-discovered peers without rebuilding from scratch.
 func (r *moduleRegistry) ReplaceFleetRemoteTools(sourceTag string, fresh []remoteToolReg) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	kept := r.remoteTools[:0]
 	for _, t := range r.remoteTools {
 		if t.Source != sourceTag {
@@ -391,6 +402,27 @@ func (r *moduleRegistry) ReplaceFleetRemoteTools(sourceTag string, fresh []remot
 		kept = append(kept, t)
 	}
 	r.remoteTools = kept
+	targets := append([]*ToolRegistry(nil), r.targets...)
+	r.mu.Unlock()
+
+	// Push current snapshot into every target. RegisterRemote overwrites
+	// any local registration with the same name — exactly the priority we
+	// want for delegation-style flows where federation is authoritative.
+	for _, reg := range targets {
+		for _, rt := range fresh {
+			reg.RegisterRemote(rt.Name, rt.Description, rt.Schema, rt.Mode, rt.PeerName, rt.Handler)
+		}
+	}
+}
+
+// AddTargetRegistry registers an external registry that should receive
+// federated tool updates whenever Bootstrap pushes a fresh snapshot.
+// Used by the agent_task scheduler so its long-lived globalRegistry
+// picks up peers discovered after boot.
+func (r *moduleRegistry) AddTargetRegistry(reg *ToolRegistry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.targets = append(r.targets, reg)
 }
 
 // ---------------------------------------------------------------------------
