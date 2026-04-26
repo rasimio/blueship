@@ -126,6 +126,9 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 		},
 	)
 
+	// agent_task_status is exposed (federated) so origin Ships can poll
+	// delegated peer tasks. Registration body follows.
+
 	// -------------------------------------------------------------------
 	// agent_task_status
 	// -------------------------------------------------------------------
@@ -168,6 +171,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 			}, nil
 		},
 	)
+	r.Expose("agent_task_status", bs.ToolModeSync)
 
 	// -------------------------------------------------------------------
 	// agent_task_list
@@ -225,6 +229,91 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 			return map[string]any{"id": id.String(), "status": "canceled"}, nil
 		},
 	)
+
+	// -------------------------------------------------------------------
+	// agent_task_accept — peer-facing endpoint for delegate strategy.
+	// Origin Ship calls this on peer to hand off a task; peer creates a
+	// local agent_task with the supplied spec and returns the new id.
+	// Marked exposed=true (federated via Fleet) + mode=sync.
+	// -------------------------------------------------------------------
+	r.Register("agent_task_accept",
+		"Accept a delegated task from a peer agent. Creates a local agent_task with the supplied title / description / acceptance_criteria / strategy / plan / tools / use_agents and returns its id. The origin agent watches this task via agent_task_status federated calls until it reaches a terminal state.",
+		json.RawMessage(`{
+			"type":"object",
+			"properties":{
+				"title":{"type":"string"},
+				"description":{"type":"string"},
+				"acceptance_criteria":{"type":"string"},
+				"strategy":{"type":"string","enum":["direct","structured"],"default":"direct"},
+				"plan":{"type":"object"},
+				"tools":{"type":"array","items":{"type":"string"}},
+				"use_agents":{"type":"array","items":{"type":"string"}},
+				"max_iterations":{"type":"integer","default":20},
+				"origin_agent_id":{"type":"string","description":"For audit: the agent_id that delegated this task"},
+				"origin_task_id":{"type":"string","description":"For audit: the originating agent_task id"}
+			},
+			"required":["title","description"]
+		}`),
+		func(ctx context.Context, input json.RawMessage) (any, error) {
+			var p struct {
+				Title              string          `json:"title"`
+				Description        string          `json:"description"`
+				AcceptanceCriteria string          `json:"acceptance_criteria"`
+				Strategy           string          `json:"strategy"`
+				Plan               json.RawMessage `json:"plan"`
+				Tools              []string        `json:"tools"`
+				UseAgents          []string        `json:"use_agents"`
+				MaxIterations      int             `json:"max_iterations"`
+				OriginAgentID      string          `json:"origin_agent_id"`
+				OriginTaskID       string          `json:"origin_task_id"`
+			}
+			if err := json.Unmarshal(input, &p); err != nil {
+				return nil, err
+			}
+			if p.Strategy == "" {
+				p.Strategy = bs.StrategyDirect
+			}
+			if p.Strategy != bs.StrategyDirect && p.Strategy != bs.StrategyStructured {
+				return nil, fmt.Errorf("agent_task_accept supports strategy=direct|structured, got %q", p.Strategy)
+			}
+			if p.MaxIterations <= 0 {
+				p.MaxIterations = 20
+			}
+
+			origin := map[string]string{}
+			if p.OriginAgentID != "" {
+				origin["origin_agent_id"] = p.OriginAgentID
+			}
+			if p.OriginTaskID != "" {
+				origin["origin_task_id"] = p.OriginTaskID
+			}
+			progress, _ := json.Marshal(map[string]any{"delegated_from": origin})
+
+			task := bs.AgentTask{
+				UserID:        d.UserID,
+				Title:         p.Title,
+				Description:   &p.Description,
+				Strategy:      p.Strategy,
+				Plan:          p.Plan,
+				Tools:         pq.StringArray(p.Tools),
+				UseAgents:     pq.StringArray(p.UseAgents),
+				MaxIterations: p.MaxIterations,
+				Progress:      progress,
+			}
+			if p.AcceptanceCriteria != "" {
+				task.AcceptanceCriteria = &p.AcceptanceCriteria
+			}
+			created, err := store.Create(ctx, task)
+			if err != nil {
+				return nil, fmt.Errorf("create delegated task: %w", err)
+			}
+			return map[string]any{
+				"id":     created.ID.String(),
+				"status": created.Status,
+			}, nil
+		},
+	)
+	r.Expose("agent_task_accept", bs.ToolModeSync)
 
 	// -------------------------------------------------------------------
 	// agent_task_approve
