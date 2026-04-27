@@ -34,7 +34,7 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 	if d.Config.Search != nil {
 		search := d.Config.Search
 		r.Register("web_search",
-			"Run a web search and return ranked title+URL+snippet results. The handler wraps whatever SearchEngine the ship was configured with (Serper, Google CSE, etc.). Use for factual lookups, current events, or finding canonical URLs to fetch.",
+			"Search the web and return ranked URLs with title + short snippet. Snippets are navigation aids ONLY — they are 1-2 sentences extracted by the search engine and are NOT a substitute for the article. To answer any factual question, follow up with browser_fetch on 2-3 of the returned URLs to read the real content; never cite a fact you only saw as a snippet. Returns {results: [{title, url, snippet}], hint: <next-step instructions>}.",
 			json.RawMessage(`{"type":"object","properties":{
 				"query":{"type":"string","description":"Search query"},
 				"limit":{"type":"integer","default":5,"description":"Max results (1-20)"}
@@ -50,7 +50,18 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 				if p.Limit <= 0 {
 					p.Limit = 5
 				}
-				return search.Search(ctx, p.Query, p.Limit)
+				results, err := search.Search(ctx, p.Query, p.Limit)
+				if err != nil {
+					return nil, err
+				}
+				// Embed the next-step hint in the tool result itself so the
+				// agent reasons over chaining naturally — no external rule
+				// needed. Mirrors how Anthropic's WebSearch result tells
+				// the model to follow with WebFetch on selected URLs.
+				return map[string]any{
+					"results": results,
+					"hint":    "These are search snippets, not full content. To answer the user with concrete facts, call browser_fetch on 2-3 of the URLs above (parallel calls in one turn are fine), then synthesize from the fetched pages with each fact cited by its exact URL. Do NOT compose an answer from snippets alone.",
+				}, nil
 			},
 		)
 	}
