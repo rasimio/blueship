@@ -288,6 +288,15 @@ func (s *Ship) Run(ctx context.Context) error {
 
 		agentSched = agenttask.NewScheduler(taskStore, s.handlers, s.strategyHandlers, globalRegistry, msgStore, deps, notifyFn, s.logger)
 
+		// Built-in delegate callback emitter: when a task that came from
+		// a peer (progress.delegated_from set) reaches a terminal status,
+		// notify the origin via /a2a/callback so they can wake their
+		// paused delegate task immediately instead of waiting for the
+		// next polling tick or stale-wake watchdog.
+		agentSched.SetStatusCallback(func(cbCtx context.Context, t core.AgentTask) {
+			s.fireDelegateCallback(cbCtx, shipDB, t)
+		})
+
 		// Use trigger channel for instant callback wakeup (if configured).
 		var trigger <-chan string
 		if s.cfg.A2A.TaskTrigger != nil {
@@ -438,6 +447,81 @@ func (r *moduleRegistry) AddTargetRegistry(reg *ToolRegistry) {
 // as the A2A server. Pulls counts directly from Postgres on each
 // scrape — fine for low-frequency scraping (15s+ intervals).
 //
+// fireDelegateCallback notifies the originating agent that a delegated
+// task reached a terminal status. The origin's address comes from the
+// fleet_peer_cache table populated by the Fleet bootstrap.
+//
+// No-op when the task has no `progress.delegated_from.origin_agent_id`
+// (i.e. the task wasn't accepted from a peer) or when the origin isn't
+// in the local peer cache yet (e.g. before the first Fleet refresh).
+//
+// Failures are logged but never propagated — the origin's stale-wake
+// watchdog backstops a missed callback.
+func (s *Ship) fireDelegateCallback(ctx context.Context, db *sqlx.DB, task core.AgentTask) {
+	if len(task.Progress) == 0 {
+		return
+	}
+	var prog struct {
+		DelegatedFrom struct {
+			OriginAgentID string `json:"origin_agent_id"`
+			OriginTaskID  string `json:"origin_task_id"`
+		} `json:"delegated_from"`
+	}
+	if err := json.Unmarshal(task.Progress, &prog); err != nil {
+		return
+	}
+	if prog.DelegatedFrom.OriginAgentID == "" {
+		return
+	}
+
+	var endpoint string
+	if err := db.GetContext(ctx, &endpoint,
+		`SELECT endpoint_url FROM fleet_peer_cache WHERE agent_id = $1`,
+		prog.DelegatedFrom.OriginAgentID); err != nil || endpoint == "" {
+		s.logger.Warn("delegate-callback: origin not in peer cache",
+			"origin_agent_id", prog.DelegatedFrom.OriginAgentID, "task_id", task.ID, "error", err)
+		return
+	}
+
+	// Build callback envelope. The "task_id" key carries OUR (peer)
+	// task id — that's what the origin's WakePausedByPeerTask matches
+	// against progress->>'peer_task_id'.
+	resultText := ""
+	if task.Result != nil {
+		resultText = *task.Result
+	}
+	cbPayload, _ := json.Marshal(map[string]string{
+		"task_id": task.ID.String(),
+		"status":  task.Status,
+		"summary": resultText,
+	})
+	envelope, _ := json.Marshal(a2a.Callback{
+		Peer:    s.cfg.A2A.Name,
+		Event:   "task_status_changed",
+		Payload: cbPayload,
+	})
+
+	url := strings.TrimRight(endpoint, "/") + "/a2a/callback"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(envelope))
+	if err != nil {
+		s.logger.Warn("delegate-callback: build request failed", "error", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if s.cfg.A2A.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.cfg.A2A.AuthToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		s.logger.Warn("delegate-callback: send failed", "url", url, "error", err)
+		return
+	}
+	resp.Body.Close()
+	s.logger.Info("delegate-callback: sent",
+		"origin_agent_id", prog.DelegatedFrom.OriginAgentID,
+		"task_id", task.ID, "status", task.Status)
+}
+
 // Series:
 //   - blueship_agent_tasks{strategy,status}
 //   - blueship_fleet_peer_cache

@@ -114,8 +114,12 @@ func (e *DelegateStrategyExecutor) submit(ctx context.Context, task core.AgentTa
 
 	deps.Logger.Info("delegate: peer accepted task", "peer", *task.DelegateTo, "peer_task_id", peerTaskID)
 
+	// Pause until the peer fires a status callback. The scheduler's
+	// WakeStalePaused watchdog wakes us anyway after 30 min, so a lost
+	// callback degrades to slow-polling rather than getting stuck.
+	// Storing PeerTaskID in progress lets WakePausedByPeerTask find us.
 	return core.IterationResult{
-		Done:     false,
+		Pause:    true,
 		Progress: progress,
 		Notify:   "[no-op]",
 	}, nil
@@ -132,10 +136,11 @@ func (e *DelegateStrategyExecutor) poll(ctx context.Context, task core.AgentTask
 	payload, _ := json.Marshal(map[string]string{"id": prog.PeerTaskID})
 	out, err := handler(ctx, payload)
 	if err != nil {
-		// Transient — keep polling on next tick.
+		// Transient — pause and let the watchdog (or next callback) wake
+		// us; avoids busy-polling a flaky peer.
 		deps.Logger.Warn("delegate: status poll failed", "peer_task_id", prog.PeerTaskID, "error", err)
 		progress, _ := json.Marshal(prog)
-		return core.IterationResult{Done: false, Progress: progress, Notify: "[no-op]"}, nil
+		return core.IterationResult{Pause: true, Progress: progress, Notify: "[no-op]"}, nil
 	}
 
 	status, _ := extractStringField(out, "status")
@@ -143,8 +148,10 @@ func (e *DelegateStrategyExecutor) poll(ctx context.Context, task core.AgentTask
 
 	terminal := status == "done" || status == "failed" || status == "canceled"
 	if !terminal {
+		// Peer still working — pause again until next callback (or stale
+		// wake). Avoids burning iterations on each poll cycle.
 		progress, _ := json.Marshal(prog)
-		return core.IterationResult{Done: false, Progress: progress, Notify: "[no-op]"}, nil
+		return core.IterationResult{Pause: true, Progress: progress, Notify: "[no-op]"}, nil
 	}
 
 	// Terminal — surface peer's result/error to origin task.

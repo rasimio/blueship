@@ -30,11 +30,21 @@ type Scheduler struct {
 	msgStore         core.MessageStore
 	deps             *core.Deps
 	notify           func(ctx context.Context, userID uuid.UUID, text string)
+	onStatusChange   func(ctx context.Context, task core.AgentTask)
 	logger           *slog.Logger
 
 	mu     sync.Mutex
 	busy   map[string]bool // task ID → currently executing
 	taskWg sync.WaitGroup  // tracks in-flight executeTask goroutines
+}
+
+// SetStatusCallback registers a function called after a task transitions
+// to a terminal status (done/failed/canceled). Used to send A2A
+// callbacks to the originating agent for delegate-strategy tasks. The
+// callback runs in a goroutine; it must be self-contained and tolerant
+// of nil DB / missing peer cache rows.
+func (s *Scheduler) SetStatusCallback(cb func(ctx context.Context, task core.AgentTask)) {
+	s.onStatusChange = cb
 }
 
 // NewScheduler creates an agent task scheduler.
@@ -261,6 +271,13 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			if err := s.store.ResetForNextRun(dbCtx, task.ID); err != nil {
 				s.logger.Error("agent-tasks: reset for next run error", "error", err)
 			}
+		}
+		// Notify origin agent (delegate-strategy callback). Non-recurring
+		// only — recurring tasks never originate from a peer.
+		if task.Schedule == nil && s.onStatusChange != nil {
+			task.Status = "done"
+			task.Result = &result.Output
+			go s.onStatusChange(context.Background(), task)
 		}
 	} else {
 		s.logger.Info("agent-tasks: iteration done",
