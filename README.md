@@ -680,6 +680,12 @@ type CalendarProvider interface {
 
 ---
 
+## Roadmap
+
+See [TODO.md](TODO.md) for the current improvement backlog (tests, refactors, CI, docs).
+
+---
+
 ## License
 
 MIT
