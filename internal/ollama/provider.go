@@ -12,11 +12,23 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	bs "github.com/rasimio/blueship/core"
 )
+
+// dumpRequestBodyIfEnabled writes the outgoing JSON to the path in
+// OLLAMA_DUMP_REQ_PATH, when set. Diagnostic only — leave unset in
+// normal operation.
+func dumpRequestBodyIfEnabled(body []byte) {
+	path := os.Getenv("OLLAMA_DUMP_REQ_PATH")
+	if path == "" {
+		return
+	}
+	_ = os.WriteFile(path, body, 0o644)
+}
 
 const defaultBaseURL = "http://localhost:11434"
 
@@ -95,6 +107,7 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
+	dumpRequestBodyIfEnabled(body)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/api/chat", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -144,6 +157,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
+	dumpRequestBodyIfEnabled(body)
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/api/chat", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
