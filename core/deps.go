@@ -60,6 +60,11 @@ type Deps struct {
 	// Runs non-blocking in background. Implementations handle their own DB, embeddings, emotions.
 	MessageEncoder func(ctx context.Context, userID, message string)
 
+	// SelfAgentID returns the Ship's own Fleet-issued agent id, or "" if
+	// Fleet hasn't bootstrapped yet. Used by delegate-strategy handlers
+	// so the peer can route status callbacks back here.
+	SelfAgentID func() string
+
 	pool *dbPool
 }
 

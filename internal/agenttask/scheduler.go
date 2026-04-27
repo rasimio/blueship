@@ -190,6 +190,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		DB:              s.deps.DB,
 		UserID:          task.UserID,
 		Config:          s.deps.Config,
+		SelfAgentID:     s.deps.SelfAgentID,
 		ContextInjector: s.deps.ContextInjector,
 		ReflexPreparer:  s.deps.ReflexPreparer,
 		RuleEngine:      s.deps.RuleEngine,

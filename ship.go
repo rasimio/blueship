@@ -178,6 +178,10 @@ func (s *Ship) Run(ctx context.Context) error {
 		}
 	}
 	deps.UserID = uid
+	deps.SelfAgentID = func() string {
+		_, id := s.fleetAuth.snapshot()
+		return id
+	}
 	s.logger.Info("running as owner", "user_id", uid.String())
 
 	// 3. Create module registry adapter

@@ -118,6 +118,11 @@ type AgentDeps struct {
 	UserID     uuid.UUID
 	Config     *Config
 
+	// SelfAgentID is the Ship's own Fleet-issued agent id. Empty until
+	// the first Fleet bootstrap call completes; used by delegate-strategy
+	// handlers so the peer can route status callbacks back here.
+	SelfAgentID func() string
+
 	// ContextInjector builds per-request context (active notes, etc.) for the agent loop.
 	ContextInjector func(ctx context.Context, userID, message string) string
 

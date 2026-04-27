@@ -87,6 +87,11 @@ func (e *DelegateStrategyExecutor) submit(ctx context.Context, task core.AgentTa
 		plan = json.RawMessage(`{}`)
 	}
 
+	originAgentID := ""
+	if deps.SelfAgentID != nil {
+		originAgentID = deps.SelfAgentID()
+	}
+
 	payload, _ := json.Marshal(map[string]any{
 		"title":               task.Title,
 		"description":         desc,
@@ -96,6 +101,7 @@ func (e *DelegateStrategyExecutor) submit(ctx context.Context, task core.AgentTa
 		"tools":               []string(task.Tools),
 		"use_agents":          []string(task.UseAgents),
 		"max_iterations":      task.MaxIterations,
+		"origin_agent_id":     originAgentID,
 		"origin_task_id":      task.ID.String(),
 	})
 
