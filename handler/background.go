@@ -317,9 +317,12 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 // bgProgress extends TaskProgress with session management and pause state.
 type bgProgress struct {
 	core.TaskProgress
-	SessionID     string `json:"session_id"`              // shared session across iterations
-	PeerTaskID    string `json:"peer_task_id,omitempty"`   // async peer task being awaited
-	RevisionCount int    `json:"revision_count,omitempty"` // consecutive revisions for same peer task
+	SessionID     string         `json:"session_id"`                // shared session across iterations
+	PeerTaskID    string         `json:"peer_task_id,omitempty"`     // async peer task being awaited
+	RevisionCount int            `json:"revision_count,omitempty"`   // consecutive revisions for same peer task
+	DelegatedFrom map[string]any `json:"delegated_from,omitempty"`   // preserved across iterations so the
+	                                                                  // scheduler's terminal-status callback can route
+	                                                                  // back to the originating agent.
 }
 
 // isGarbageOutput detects raw tool output that shouldn't be sent to users
