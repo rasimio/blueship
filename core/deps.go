@@ -17,6 +17,28 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// chatIDCtxKey is a typed context key carrying the user's transport
+// chat id (e.g. "telegram:5452235517") through the agent loop to tool
+// handlers, so a tool can identify the originating chat without taking
+// a snapshot of Deps. Set by the gateway before dispatching cortex.
+type chatIDCtxKey struct{}
+
+// ContextWithChatID returns a copy of ctx that carries the given chat
+// id. Empty chat id is a no-op.
+func ContextWithChatID(ctx context.Context, chatID string) context.Context {
+	if chatID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, chatIDCtxKey{}, chatID)
+}
+
+// ChatIDFromContext returns the chat id stashed via ContextWithChatID,
+// or "" when the context wasn't tagged.
+func ChatIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(chatIDCtxKey{}).(string)
+	return v
+}
+
 // Deps holds runtime dependencies available to modules.
 type Deps struct {
 	Config  *Config

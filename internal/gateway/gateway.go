@@ -753,6 +753,12 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	us.LoopBusy = true
 	defer func() { us.LoopBusy = false }()
 
+	// Stash the originating chat id on the context so tool handlers can
+	// surface it (e.g. coderun stores it on the task row to notify the
+	// requester directly when status changes, instead of broadcasting
+	// through fleet peers).
+	ctx = bs.ContextWithChatID(ctx, us.ChatID)
+
 	typingCtx, stopTyping := context.WithCancel(ctx)
 	go g.keepTypingViaSink(typingCtx, sink)
 	defer stopTyping()
