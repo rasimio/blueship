@@ -34,7 +34,7 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 	if d.Config.Search != nil {
 		search := d.Config.Search
 		r.Register("web_search",
-			"Search the web and return ranked URLs with title + short snippet. Snippets are navigation aids ONLY — they are 1-2 sentences extracted by the search engine and are NOT a substitute for the article. To answer any factual question, follow up with browser_fetch on 2-3 of the returned URLs to read the real content; never cite a fact you only saw as a snippet. Returns {results: [{title, url, snippet}], hint: <next-step instructions>}.",
+			"Search the web and return ranked URLs with title + short snippet (1-2 sentences extracted by the search engine). Snippets are navigation aids — they tell you which pages might be worth reading; they are NOT the article and NOT citation material. Whenever you would cite a fact, ground it with browser_fetch on the source URL first. Use your own judgement on how many pages to fetch — direct lookups may need one, syntheses or comparisons more — and keep iterating (re-search, fetch more, refine) until you can answer confidently with sources. Returns {results: [{title, url, snippet}], hint}.",
 			json.RawMessage(`{"type":"object","properties":{
 				"query":{"type":"string","description":"Search query"},
 				"limit":{"type":"integer","default":5,"description":"Max results (1-20)"}
@@ -54,13 +54,14 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 				if err != nil {
 					return nil, err
 				}
-				// Embed the next-step hint in the tool result itself so the
+				// Embed the limitation in the tool result itself so the
 				// agent reasons over chaining naturally — no external rule
 				// needed. Mirrors how Anthropic's WebSearch result tells
-				// the model to follow with WebFetch on selected URLs.
+				// the model snippets aren't citable, leaving the iterate-
+				// vs-stop decision to the agent's own judgement.
 				return map[string]any{
 					"results": results,
-					"hint":    "These are search snippets, not full content. To answer the user with concrete facts, call browser_fetch on 2-3 of the URLs above (parallel calls in one turn are fine), then synthesize from the fetched pages with each fact cited by its exact URL. Do NOT compose an answer from snippets alone.",
+					"hint":    "Snippets above are 1-2 sentences extracted by the search engine — they tell you which pages MIGHT be worth reading, not what the article says. Whenever you intend to cite a fact, fetch that page with browser_fetch first. How many to fetch is your call: one for a direct lookup, several for synthesis or verification. Keep iterating (refine queries, fetch more) until you can answer confidently with sources. If snippets are enough to redirect the user (e.g. provide a link they asked for) without a factual claim, that's also fine.",
 				}, nil
 			},
 		)
