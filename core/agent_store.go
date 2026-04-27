@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 )
 
 // AgentTaskStore provides CRUD and polling queries for agent_tasks.
@@ -159,6 +160,26 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 	}
 	if task.Strategy == "" {
 		task.Strategy = StrategyRecurring
+	}
+	// pq.StringArray serialises nil as SQL NULL, which trips the
+	// NOT-NULL constraint on tools/use_agents even though the schema
+	// defaults to '{}'. The DEFAULT only kicks in when the column is
+	// OMITTED, not when explicit NULL is supplied — so normalise to
+	// an empty array here.
+	if task.Tools == nil {
+		task.Tools = pq.StringArray{}
+	}
+	if task.UseAgents == nil {
+		task.UseAgents = pq.StringArray{}
+	}
+	if len(task.Config) == 0 {
+		task.Config = json.RawMessage(`{}`)
+	}
+	if len(task.Plan) == 0 {
+		task.Plan = json.RawMessage(`{}`)
+	}
+	if len(task.Progress) == 0 {
+		task.Progress = json.RawMessage(`{}`)
 	}
 
 	_, err := s.db.ExecContext(ctx, `
