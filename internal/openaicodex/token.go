@@ -20,8 +20,14 @@ const (
 
 	jwtAuthClaim = "https://api.openai.com/auth"
 
-	refreshBuffer = 60 * time.Second
+	refreshBuffer  = 60 * time.Second
+	refreshTimeout = 30 * time.Second
 )
+
+// refreshHTTPClient is used for token-refresh requests so a hung OAuth
+// endpoint can't hang the whole agent loop. Uses default transport so it
+// still respects HTTPS_PROXY for geo-routed deployments.
+var refreshHTTPClient = &http.Client{Timeout: refreshTimeout}
 
 // TokenData holds persisted OAuth credentials.
 type TokenData struct {
@@ -140,9 +146,38 @@ func (s *TokenStore) AccessToken() (string, error) {
 	}
 
 	if err := s.refreshLocked(); err != nil {
+		// Rotation race: another agent that shares this refresh_token may
+		// have just rotated it server-side, leaving us with a stale value.
+		// Reload from disk in case the other agent persisted the new pair
+		// to a shared token file, then retry once.
+		if reloadErr := s.reloadFromDiskLocked(); reloadErr == nil {
+			if retryErr := s.refreshLocked(); retryErr == nil {
+				return s.data.Access, nil
+			}
+		}
 		return "", err
 	}
 	return s.data.Access, nil
+}
+
+// reloadFromDiskLocked re-reads the token file. Caller must hold s.mu.
+// Used by AccessToken to recover from cross-agent token rotation races
+// when a shared token file is configured. No-op if the file doesn't
+// exist or the on-disk refresh token matches what we already have.
+func (s *TokenStore) reloadFromDiskLocked() error {
+	raw, err := os.ReadFile(s.filePath)
+	if err != nil {
+		return err
+	}
+	var data TokenData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return err
+	}
+	if data.Refresh == "" || data.Refresh == s.data.Refresh {
+		return fmt.Errorf("on-disk token unchanged")
+	}
+	s.data = data
+	return nil
 }
 
 // SetTokens stores new token data and saves to disk.
@@ -156,11 +191,12 @@ func (s *TokenStore) SetTokens(data TokenData) error {
 func (s *TokenStore) refreshLocked() error {
 	s.logger.Info("openai-codex: refreshing access token")
 
-	resp, err := http.PostForm(tokenURL, url.Values{
+	form := url.Values{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {s.data.Refresh},
 		"client_id":     {clientID},
-	})
+	}
+	resp, err := refreshHTTPClient.PostForm(tokenURL, form)
 	if err != nil {
 		return fmt.Errorf("refresh request: %w", err)
 	}
