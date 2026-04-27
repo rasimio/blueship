@@ -33,11 +33,11 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 	// agent_task_create
 	// -------------------------------------------------------------------
 	r.Register("agent_task_create",
-		"Kick off an autonomous task. Strategy decides how it runs:\n"+
-			"  • direct — single LLM cycle with the configured tools; finishes when acceptance_criteria is met.\n"+
-			"  • structured — executor walks the supplied plan step-by-step; revises on failure; finishes when acceptance_criteria is met.\n"+
-			"  • delegate — plan is shipped to delegate_to (a peer agent_id from BlueFleet); the peer runs the lifecycle locally and reports milestones back.\n"+
-			"acceptance_criteria is plain language describing what 'done' looks like — checked after each iteration. use_agents is an optional allow-list of peer agent_ids the task may call (empty = no peers).",
+		"Kick off an autonomous task. Choose strategy carefully — wrong choice = wasted budget:\n"+
+			"  • direct — DEFAULT for almost everything. LLM runs in a loop with the configured tools (web_search, browser_fetch, memory_*, etc.), iterates freely, and finishes when acceptance_criteria is satisfied. USE FOR: research, news digests, Q&A with web sources, deep-dives, market analysis, anything that boils down to 'iterate over tools until the answer is good enough'.\n"+
+			"  • structured — ONLY when the task is a fixed multi-phase pipeline with explicit ordering, peer-task callbacks, or revision gates (e.g. delegate code work to Liya: code_task_create → wait → decide → execute → wait → decide → push → open_pr → merge). The plan field MUST contain a JSON array of step objects {action:tool|wait|decide|milestone|done, ...}. NEVER use structured for research/synthesis — direct does that better.\n"+
+			"  • delegate — hand off the WHOLE task to a peer agent (delegate_to = peer agent_id from BlueFleet). Peer runs its own lifecycle and reports terminal status back via callback.\n"+
+			"acceptance_criteria — plain language definition of done, checked by an LLM judge after each iteration. Examples: 'Report has facts cited by URL', 'Code merged to main with tests passing', 'List contains 3+ entries with reasoning'. use_agents — optional allow-list of peer agent_ids (empty = no peers).",
 		json.RawMessage(`{
 			"type":"object",
 			"properties":{
