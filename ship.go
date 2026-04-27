@@ -232,8 +232,9 @@ func (s *Ship) Run(ctx context.Context) error {
 	// 4b. Start agent task scheduler (if handlers registered).
 	var agentSched *agenttask.Scheduler
 	// Start the agent-task scheduler if EITHER recurring handlers OR
-	// strategy executors are registered. Liya has no recurring jobs but
-	// still needs the scheduler to run delegated direct/structured tasks.
+	// strategy executors are registered. An agent that exposes only
+	// strategy executors (no recurring jobs) still needs the scheduler
+	// to run delegated direct/structured tasks accepted from peers.
 	if len(s.handlers) > 0 || len(s.strategyHandlers) > 0 {
 		// Build a global tool registry for agent tasks.
 		globalRegistry := core.NewToolRegistry()
