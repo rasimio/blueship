@@ -1364,8 +1364,13 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText 
 
 	reflexResult, err := g.callReflex(ctx, reflexPrompt)
 	if err != nil {
-		g.logger.Warn("reflex failed, using full context", "error", err)
-		return rc.FullContext, "", nil, nil, 0, false
+		// Reflex LLM unavailable (e.g. provider 429 / network error).
+		// Don't bail out — keep going with full AME context and let
+		// the rule engine still inject scope=always/keyword/state
+		// guidance, otherwise tool-mandating rules silently disappear
+		// whenever the upstream is degraded.
+		g.logger.Warn("reflex failed, falling back to full context (rule engine still runs)", "error", err)
+		reflexResult = &bs.ReflexResult{Confidence: 0}
 	}
 
 	g.logger.Info("reflex plan",
