@@ -256,8 +256,16 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 
 // buildRequest constructs the Ollama /api/chat payload from the generic
 // CompletionRequest. Temperature, max_tokens, etc. go under "options".
-// "think" is always false — Gemma's thinking channel is a separate
-// content field that we don't want to surface into assistant messages.
+// "think" is gated by req.ThinkingBudget:
+//   - 0 (disabled) → think: false
+//   - -1 (provider default) or >0 → think: true
+//
+// Thinking-capable Gemma variants use a separate channel for reasoning
+// tokens that Ollama surfaces under "thinking" rather than "content".
+// We forward content-only into assistant messages so the user-facing
+// reply stays clean while the model still gets to plan its tool chain.
+// Models without a thinking head (e.g. gemma4-nothinker) ignore the
+// flag — request stays cheap.
 func (p *CompletionProvider) buildRequest(req bs.CompletionRequest, stream bool) chatRequest {
 	options := map[string]any{}
 	if req.MaxTokens > 0 {
@@ -267,12 +275,14 @@ func (p *CompletionProvider) buildRequest(req bs.CompletionRequest, stream bool)
 		options["temperature"] = req.Temperature
 	}
 
+	think := req.ThinkingBudget != 0
+
 	return chatRequest{
 		Model:    req.Model,
 		Messages: buildMessages(req.System, req.Messages),
 		Tools:    buildTools(req.Tools),
 		Stream:   stream,
-		Think:    false,
+		Think:    think,
 		Options:  options,
 	}
 }
