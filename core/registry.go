@@ -5,11 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/rasimio/blueship/telemetry"
 )
+
+// peerPrefix is the sentinel that triggers peer-wildcard expansion in
+// DefinitionsForNames / SubsetForNames. "peer:liya" means "all tools
+// whose PeerTag == liya, sorted alphabetically."
+const peerPrefix = "peer:"
 
 // toolPeerAttr is a tiny helper kept here so registry.go doesn't import
 // otel/attribute at multiple call sites. Keeps the SetAttributes line
@@ -159,13 +165,49 @@ func (r *ToolRegistry) PeerForTool(name string) string {
 	return ""
 }
 
+// toolsForPeer returns all registered tools whose PeerTag equals peer,
+// sorted alphabetically by name for a stable iteration order.
+func (r *ToolRegistry) toolsForPeer(peer string) []registeredTool {
+	var out []registeredTool
+	for _, t := range r.tools {
+		if t.PeerTag == peer {
+			out = append(out, t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Definition.Name < out[j].Definition.Name
+	})
+	return out
+}
+
 // DefinitionsForNames returns tool definitions for the given names, preserving order.
-// Unknown names are silently skipped.
+// Unknown names are silently skipped. Duplicate names are deduplicated — first
+// occurrence wins.
+//
+// Names with the prefix "peer:" expand to every tool registered from that peer
+// (sorted alphabetically). Example: "peer:liya" includes all tools BlueFleet
+// received from the liya agent without requiring them to be listed individually.
+// Expansion respects the seen-set, so an explicit name before "peer:xxx" takes
+// precedence and the peer-expanded copy is skipped.
 func (r *ToolRegistry) DefinitionsForNames(names []string) []ToolDefinition {
+	seen := make(map[string]bool, len(names))
 	defs := make([]ToolDefinition, 0, len(names))
 	for _, name := range names {
-		if t, ok := r.tools[name]; ok {
-			defs = append(defs, t.Definition)
+		if strings.HasPrefix(name, peerPrefix) {
+			peer := name[len(peerPrefix):]
+			for _, t := range r.toolsForPeer(peer) {
+				if !seen[t.Definition.Name] {
+					seen[t.Definition.Name] = true
+					defs = append(defs, t.Definition)
+				}
+			}
+			continue
+		}
+		if !seen[name] {
+			seen[name] = true
+			if t, ok := r.tools[name]; ok {
+				defs = append(defs, t.Definition)
+			}
 		}
 	}
 	return defs
@@ -208,11 +250,26 @@ func (r *ToolRegistry) Execute(ctx context.Context, name string, input json.RawM
 
 // SubsetForNames creates a new ToolRegistry containing only the named tools.
 // Both definitions and handlers are copied, so the subset is fully executable.
+// Supports the same "peer:xxx" wildcard syntax as DefinitionsForNames.
 func (r *ToolRegistry) SubsetForNames(names []string) *ToolRegistry {
+	seen := make(map[string]bool, len(names))
 	sub := NewToolRegistry()
 	for _, name := range names {
-		if t, ok := r.tools[name]; ok {
-			sub.tools[name] = t
+		if strings.HasPrefix(name, peerPrefix) {
+			peer := name[len(peerPrefix):]
+			for _, t := range r.toolsForPeer(peer) {
+				if !seen[t.Definition.Name] {
+					seen[t.Definition.Name] = true
+					sub.tools[t.Definition.Name] = t
+				}
+			}
+			continue
+		}
+		if !seen[name] {
+			seen[name] = true
+			if t, ok := r.tools[name]; ok {
+				sub.tools[name] = t
+			}
 		}
 	}
 	return sub
