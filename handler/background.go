@@ -61,13 +61,25 @@ const maxRevisions = 3
 func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.AgentDeps) (core.IterationResult, error) {
 	// 1. Load system prompt.
 	// Task config may override the instruction prompt key (default: "background-task").
+	// notify_default controls whether the final reply is auto-pushed to the
+	// user as Notify on the last iteration. Heartbeat-style tasks want true
+	// (default); inner-thought-style silent reflection wants false. With
+	// notify_default=false the LLM can still ping the user by including a
+	// [NOTIFY] marker in the reply.
 	instructionKey := "background-task"
+	notifyDefault := true
 	if task.Config != nil {
 		var cfg struct {
-			Prompt string `json:"prompt"`
+			Prompt        string `json:"prompt"`
+			NotifyDefault *bool  `json:"notify_default"`
 		}
-		if json.Unmarshal(task.Config, &cfg) == nil && cfg.Prompt != "" {
-			instructionKey = cfg.Prompt
+		if json.Unmarshal(task.Config, &cfg) == nil {
+			if cfg.Prompt != "" {
+				instructionKey = cfg.Prompt
+			}
+			if cfg.NotifyDefault != nil {
+				notifyDefault = *cfg.NotifyDefault
+			}
 		}
 	}
 
@@ -243,10 +255,12 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 	// 11. Check for [DONE].
 	if strings.Contains(reply, "[DONE]") || isLast {
+		hadNotifyMarker := strings.Contains(reply, "[NOTIFY]")
 		clean := strings.ReplaceAll(reply, "[DONE]", "")
 		clean = strings.ReplaceAll(clean, "[CONTINUE]", "")
 		clean = strings.ReplaceAll(clean, "[PAUSE]", "")
 		clean = strings.ReplaceAll(clean, "[MILESTONE]", "")
+		clean = strings.ReplaceAll(clean, "[NOTIFY]", "")
 		clean = strings.TrimSpace(clean)
 
 		// Archive session (one-shot, no reuse after task completion).
@@ -256,10 +270,14 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		if clean == "" || strings.Contains(clean, "[no-op]") || isGarbageOutput(clean) {
 			return core.IterationResult{Done: true}, nil
 		}
+		notify := clean
+		if !notifyDefault && !hadNotifyMarker {
+			notify = ""
+		}
 		return core.IterationResult{
 			Done:   true,
 			Output: clean,
-			Notify: clean,
+			Notify: notify,
 		}, nil
 	}
 
