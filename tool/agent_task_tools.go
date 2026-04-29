@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/google/uuid"
 	"github.com/lib/pq"
 
 	bs "github.com/rasimio/blueship/core"
@@ -141,22 +140,23 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 	r.Register("agent_task_status",
 		"Read the full state of a task by id: status (pending/running/paused/done/failed/canceled), strategy, iteration, plan, progress, and final result. Use to check whether an autonomous task has met its acceptance criteria.",
 		json.RawMessage(`{"type":"object","properties":{
-			"id":{"type":"string","description":"Task UUID"}
-		},"required":["id"]}`),
+			"task_id":{"type":"string","description":"Task UUID or 8-char prefix"}
+		},"required":["task_id"]}`),
 		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var p struct {
-				ID string `json:"id"`
+				TaskID string `json:"task_id"`
+				ID     string `json:"id"` // legacy alias
 			}
 			if err := json.Unmarshal(input, &p); err != nil {
 				return nil, err
 			}
-			id, err := uuid.Parse(p.ID)
-			if err != nil {
-				return nil, fmt.Errorf("invalid id: %w", err)
+			raw := p.TaskID
+			if raw == "" {
+				raw = p.ID
 			}
-			t, err := store.Get(ctx, id)
+			t, err := store.Resolve(ctx, raw)
 			if err != nil {
-				return nil, fmt.Errorf("get task: %w", err)
+				return nil, fmt.Errorf("resolve task: %w", err)
 			}
 			return map[string]any{
 				"id":                  t.ID.String(),
@@ -216,23 +216,28 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 	r.Register("agent_task_cancel",
 		"Cancel an active task (pending/running/paused). Tasks already in a terminal state (done/failed/canceled) are unchanged.",
 		json.RawMessage(`{"type":"object","properties":{
-			"id":{"type":"string","description":"Task UUID"}
-		},"required":["id"]}`),
+			"task_id":{"type":"string","description":"Task UUID or 8-char prefix"}
+		},"required":["task_id"]}`),
 		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var p struct {
-				ID string `json:"id"`
+				TaskID string `json:"task_id"`
+				ID     string `json:"id"` // legacy alias
 			}
 			if err := json.Unmarshal(input, &p); err != nil {
 				return nil, err
 			}
-			id, err := uuid.Parse(p.ID)
-			if err != nil {
-				return nil, fmt.Errorf("invalid id: %w", err)
+			raw := p.TaskID
+			if raw == "" {
+				raw = p.ID
 			}
-			if err := store.Cancel(ctx, id); err != nil {
+			t, err := store.Resolve(ctx, raw)
+			if err != nil {
+				return nil, fmt.Errorf("resolve task: %w", err)
+			}
+			if err := store.Cancel(ctx, t.ID); err != nil {
 				return nil, fmt.Errorf("cancel task: %w", err)
 			}
-			return map[string]any{"id": id.String(), "status": "canceled"}, nil
+			return map[string]any{"id": t.ID.String(), "status": "canceled"}, nil
 		},
 	)
 
@@ -327,23 +332,28 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 	r.Register("agent_task_approve",
 		"Resume a paused task — used after a manual review milestone (e.g. user approved continuing past a checkpoint). The scheduler picks the task up on its next tick.",
 		json.RawMessage(`{"type":"object","properties":{
-			"id":{"type":"string","description":"Task UUID"}
-		},"required":["id"]}`),
+			"task_id":{"type":"string","description":"Task UUID or 8-char prefix"}
+		},"required":["task_id"]}`),
 		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var p struct {
-				ID string `json:"id"`
+				TaskID string `json:"task_id"`
+				ID     string `json:"id"` // legacy alias
 			}
 			if err := json.Unmarshal(input, &p); err != nil {
 				return nil, err
 			}
-			id, err := uuid.Parse(p.ID)
-			if err != nil {
-				return nil, fmt.Errorf("invalid id: %w", err)
+			raw := p.TaskID
+			if raw == "" {
+				raw = p.ID
 			}
-			if err := store.Approve(ctx, id); err != nil {
+			t, err := store.Resolve(ctx, raw)
+			if err != nil {
+				return nil, fmt.Errorf("resolve task: %w", err)
+			}
+			if err := store.Approve(ctx, t.ID); err != nil {
 				return nil, fmt.Errorf("approve task: %w", err)
 			}
-			return map[string]any{"id": id.String(), "status": "pending"}, nil
+			return map[string]any{"id": t.ID.String(), "status": "pending"}, nil
 		},
 	)
 

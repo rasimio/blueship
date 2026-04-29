@@ -207,6 +207,36 @@ func (s *AgentTaskStore) Get(ctx context.Context, id uuid.UUID) (AgentTask, erro
 	return task, err
 }
 
+// GetByPrefix fetches a task whose UUID starts with the given hex prefix.
+// Returns sql.ErrNoRows when no task matches and an error when multiple match.
+func (s *AgentTaskStore) GetByPrefix(ctx context.Context, prefix string) (AgentTask, error) {
+	var tasks []AgentTask
+	err := s.db.SelectContext(ctx, &tasks,
+		`SELECT * FROM agent_tasks WHERE id::text LIKE $1 ORDER BY created_at DESC LIMIT 2`,
+		prefix+"%")
+	if err != nil {
+		return AgentTask{}, err
+	}
+	if len(tasks) == 0 {
+		return AgentTask{}, fmt.Errorf("no task with prefix %q", prefix)
+	}
+	if len(tasks) > 1 {
+		return AgentTask{}, fmt.Errorf("prefix %q is ambiguous (%d tasks match)", prefix, len(tasks))
+	}
+	return tasks[0], nil
+}
+
+// Resolve looks up a task by full UUID or by short prefix (≥8 hex chars).
+func (s *AgentTaskStore) Resolve(ctx context.Context, raw string) (AgentTask, error) {
+	if id, err := uuid.Parse(raw); err == nil {
+		return s.Get(ctx, id)
+	}
+	if len(raw) < 8 {
+		return AgentTask{}, fmt.Errorf("task id too short (need ≥8 chars): %q", raw)
+	}
+	return s.GetByPrefix(ctx, raw)
+}
+
 // EnsureRecurring creates a recurring task if one doesn't exist for (user_id, handler).
 // If one exists, updates the schedule. Uses the unique partial index from migration 014.
 func (s *AgentTaskStore) EnsureRecurring(ctx context.Context, userID uuid.UUID, handler, schedule, title string) error {
