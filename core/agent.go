@@ -62,6 +62,13 @@ type AgentTask struct {
 	Schedule *string    `db:"schedule" json:"schedule,omitempty"`
 	Deadline *time.Time `db:"deadline" json:"deadline,omitempty"`
 
+	// Cadence (Go duration string, e.g. "1h", "30m") gates how often a
+	// non-recurring task is allowed to tick. Scheduler skips the task if
+	// time.Since(LastRunAt) < Cadence — without burning an iteration —
+	// so periodic monitors can live on strategy=direct without a
+	// recurring schedule. NULL = no rate limit (default per-tick).
+	Cadence *string `db:"cadence" json:"cadence,omitempty"`
+
 	Status       string          `db:"status" json:"status"`
 	Progress     json.RawMessage `db:"progress" json:"progress"`
 	Result       *string         `db:"result" json:"result,omitempty"`

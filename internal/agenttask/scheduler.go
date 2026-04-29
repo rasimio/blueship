@@ -136,6 +136,13 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			continue
 		}
 
+		// Cadence guard for non-recurring tasks (e.g. periodic monitors
+		// running on strategy=direct). Skips the tick without burning
+		// an iteration if the task ran more recently than its cadence.
+		if !s.cadenceElapsed(task) {
+			continue
+		}
+
 		s.taskWg.Add(1)
 		go s.executeTask(ctx, task, handler, dispatchTag)
 	}
@@ -306,6 +313,27 @@ func (s *Scheduler) resolveHandler(task core.AgentTask) (core.AgentHandler, stri
 		return h, "strategy:" + task.Strategy, ok
 	}
 	return nil, "", false
+}
+
+// cadenceElapsed returns true when the task is allowed to tick — either
+// because no cadence is set, the cadence is unparseable (treated as
+// "fire freely" so a typo doesn't strand a task), or enough time has
+// passed since the last run. Unlike Schedule, Cadence applies to
+// non-recurring tasks: it only rate-limits ticks, doesn't drive them.
+func (s *Scheduler) cadenceElapsed(task core.AgentTask) bool {
+	if task.Cadence == nil || *task.Cadence == "" {
+		return true
+	}
+	d, err := time.ParseDuration(*task.Cadence)
+	if err != nil {
+		s.logger.Warn("agent-tasks: invalid cadence duration",
+			"cadence", *task.Cadence, "task_id", task.ID)
+		return true
+	}
+	if task.LastRunAt == nil {
+		return true
+	}
+	return time.Since(*task.LastRunAt) >= d
 }
 
 // shouldRunNow checks if a recurring task should run based on its schedule.

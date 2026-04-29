@@ -186,14 +186,14 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 		INSERT INTO agent_tasks (id, user_id, title, description, handler, config, tools,
 		                         schedule, deadline, status, progress, max_iterations,
 		                         strategy, delegate_to, plan, use_agents,
-		                         acceptance_criteria, session_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+		                         acceptance_criteria, session_id, cadence)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
 		task.ID, task.UserID, task.Title, task.Description,
 		task.Handler, task.Config, task.Tools,
 		task.Schedule, task.Deadline,
 		task.Status, task.Progress, task.MaxIterations,
 		task.Strategy, task.DelegateTo, task.Plan, task.UseAgents,
-		task.AcceptanceCriteria, task.SessionID)
+		task.AcceptanceCriteria, task.SessionID, task.Cadence)
 	if err != nil {
 		return AgentTask{}, fmt.Errorf("create agent task: %w", err)
 	}

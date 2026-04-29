@@ -37,7 +37,8 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 			"  • direct — DEFAULT for almost everything. LLM runs in a loop with the configured tools (web_search, browser_fetch, memory_*, etc.), iterates freely, and finishes when acceptance_criteria is satisfied. USE FOR: research, news digests, Q&A with web sources, deep-dives, market analysis, anything that boils down to 'iterate over tools until the answer is good enough'.\n"+
 			"  • structured — ONLY when the task is a fixed multi-phase pipeline with explicit ordering, peer-task callbacks, or revision gates (e.g. delegate code work to Liya: code_task_create → wait → decide → execute → wait → decide → push → open_pr → merge). The plan field MUST contain a JSON array of step objects {action:tool|wait|decide|milestone|done, ...}. NEVER use structured for research/synthesis — direct does that better.\n"+
 			"  • delegate — hand off the WHOLE task to a peer agent (delegate_to = peer agent_id from BlueFleet). Peer runs its own lifecycle and reports terminal status back via callback.\n"+
-			"acceptance_criteria — plain language definition of done, checked by an LLM judge after each iteration. Examples: 'Report has facts cited by URL', 'Code merged to main with tests passing', 'List contains 3+ entries with reasoning'. use_agents — optional allow-list of peer agent_ids (empty = no peers).",
+			"acceptance_criteria — plain language definition of done, checked by an LLM judge after each iteration. Examples: 'Report has facts cited by URL', 'Code merged to main with tests passing', 'List contains 3+ entries with reasoning'. use_agents — optional allow-list of peer agent_ids (empty = no peers).\n"+
+			"cadence — Go duration string (e.g. '1h', '30m', '15s'). Rate-limits how often a task is allowed to tick — scheduler skips ticks that arrive sooner without burning an iteration. USE FOR periodic monitors ('check BTC price every hour for 6 hours' = cadence: '1h', max_iterations: 6) so wall-clock duration ≈ cadence × max_iterations. Omit for tasks that should iterate as fast as the LLM allows (research, code synthesis, etc.).",
 		json.RawMessage(`{
 			"type":"object",
 			"properties":{
@@ -51,6 +52,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 				"use_agents":{"type":"array","items":{"type":"string"},"description":"Peer agent_id allow-list (omit = no peers)"},
 				"config":{"type":"object","description":"Strategy-specific config (plan_template, model overrides, etc.)"},
 				"max_iterations":{"type":"integer","default":20,"description":"Safety cap on iteration count (1-100)"},
+				"cadence":{"type":"string","description":"Min interval between ticks (Go duration: '1h', '30m', '15s'). Rate-limits monitors; omit for fast-iterating tasks."},
 				"deadline":{"type":"string","description":"Optional ISO datetime — task fails if not done by this time"}
 			},
 			"required":["title","description","acceptance_criteria"]
@@ -67,6 +69,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 				UseAgents          []string        `json:"use_agents"`
 				Config             json.RawMessage `json:"config"`
 				MaxIterations      int             `json:"max_iterations"`
+				Cadence            string          `json:"cadence"`
 				Deadline           string          `json:"deadline"`
 			}
 			if err := json.Unmarshal(input, &p); err != nil {
@@ -111,6 +114,9 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 			}
 			if p.DelegateTo != "" {
 				task.DelegateTo = &p.DelegateTo
+			}
+			if p.Cadence != "" {
+				task.Cadence = &p.Cadence
 			}
 			created, err := store.Create(ctx, task)
 			if err != nil {
