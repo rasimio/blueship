@@ -2,15 +2,22 @@ package agenttask
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/telemetry"
 )
+
+// jsonUnmarshal aliases stdlib json.Unmarshal so extractPeerTaskID can
+// stay a one-liner without importing encoding/json at the call site.
+var jsonUnmarshal = json.Unmarshal
 
 // DefaultTaskTimeout is applied to tasks without an explicit deadline.
 const DefaultTaskTimeout = 5 * time.Minute
@@ -173,7 +180,9 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	)
 
 	if err := s.store.SetRunning(ctx, task.ID); err != nil {
-		s.logger.Error("agent-tasks: set running failed", "error", err)
+		span.SetAttributes(attribute.String("agent_task.outcome", "set_running_failed"))
+		telemetry.RecordError(span, err)
+		s.logger.ErrorContext(ctx, "agent-tasks: set running failed", "task_id", task.ID, "error", err)
 		return
 	}
 
@@ -223,6 +232,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	defer dbCancel()
 
 	if err != nil {
+		span.SetAttributes(attribute.String("agent_task.outcome", "failed"))
 		telemetry.RecordError(span, err)
 		s.logger.ErrorContext(ctx, "agent-tasks: handler failed",
 			"task_id", task.ID,
@@ -235,19 +245,28 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		return
 	}
 
-	// Notify user only if handler explicitly requested it (not scheduler's decision).
-	if result.Notify != "" && s.notify != nil && !strings.Contains(result.Notify, "[no-op]") {
+	notified := result.Notify != "" && s.notify != nil && !strings.Contains(result.Notify, "[no-op]")
+	if notified {
 		s.notify(dbCtx, task.UserID, result.Notify)
 	}
 
 	if result.Pause {
-		s.logger.Info("agent-tasks: paused (waiting for callback)",
+		span.SetAttributes(
+			attribute.String("agent_task.outcome", "paused"),
+			attribute.Bool("agent_task.notified", notified),
+		)
+		peerTaskID := extractPeerTaskID(result.Progress)
+		if peerTaskID != "" {
+			span.SetAttributes(attribute.String("agent_task.peer_task_id", peerTaskID))
+		}
+		s.logger.InfoContext(ctx, "agent-tasks: paused (waiting for callback)",
 			"task_id", task.ID,
 			"handler", task.Handler,
 			"iteration", task.Iteration+1,
+			"peer_task_id", peerTaskID,
 		)
 		if err := s.store.PauseTask(dbCtx, task.ID, result.Progress); err != nil {
-			s.logger.Error("agent-tasks: pause update error", "error", err)
+			s.logger.ErrorContext(ctx, "agent-tasks: pause update error", "error", err)
 		}
 		return
 	}
@@ -260,29 +279,46 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		if task.Schedule == nil && task.AcceptanceCriteria != nil && *task.AcceptanceCriteria != "" {
 			verdict := evaluateAcceptance(ctx, agentDeps, task, result.Output)
 			if !verdict.Met {
-				s.logger.Info("agent-tasks: criteria not met, continuing",
+				span.SetAttributes(
+					attribute.String("agent_task.outcome", "criteria_not_met"),
+					attribute.Bool("agent_task.acceptance_met", false),
+					attribute.String("agent_task.acceptance_reason", verdict.Reason),
+					attribute.Int("agent_task.output_size_bytes", len(result.Output)),
+				)
+				s.logger.InfoContext(ctx, "agent-tasks: criteria not met, continuing",
 					"task_id", task.ID, "reason", verdict.Reason)
 				// Encode reason into progress so the next iteration
 				// sees what the reviewer flagged.
 				progressWithReason := injectFeedback(result.Progress, verdict.Reason)
 				if err := s.store.UpdateProgress(dbCtx, task.ID, progressWithReason); err != nil {
-					s.logger.Error("agent-tasks: progress update error", "error", err)
+					s.logger.ErrorContext(ctx, "agent-tasks: progress update error", "error", err)
 				}
 				return
 			}
 		}
 
+		span.SetAttributes(
+			attribute.String("agent_task.outcome", "done"),
+			attribute.Int("agent_task.output_size_bytes", len(result.Output)),
+			attribute.Bool("agent_task.notified", notified),
+		)
+		if task.AcceptanceCriteria != nil && *task.AcceptanceCriteria != "" {
+			span.SetAttributes(attribute.Bool("agent_task.acceptance_met", true))
+		}
 		s.logger.InfoContext(ctx, "agent-tasks: completed",
 			"task_id", task.ID,
 			"dispatch", dispatchTag,
+			"output_size_bytes", len(result.Output),
+			"output_preview", outputPreview(result.Output),
+			"notified", notified,
 		)
 		if err := s.store.Complete(dbCtx, task.ID, result.Output); err != nil {
-			s.logger.Error("agent-tasks: complete update error", "error", err)
+			s.logger.ErrorContext(ctx, "agent-tasks: complete update error", "error", err)
 		}
 		// Recurring tasks: reset for next run.
 		if task.Schedule != nil {
 			if err := s.store.ResetForNextRun(dbCtx, task.ID); err != nil {
-				s.logger.Error("agent-tasks: reset for next run error", "error", err)
+				s.logger.ErrorContext(ctx, "agent-tasks: reset for next run error", "error", err)
 			}
 		}
 		// Notify origin agent (delegate-strategy callback). Non-recurring
@@ -293,13 +329,18 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			go s.onStatusChange(context.Background(), task)
 		}
 	} else {
-		s.logger.Info("agent-tasks: iteration done",
+		span.SetAttributes(
+			attribute.String("agent_task.outcome", "iteration_done"),
+			attribute.Bool("agent_task.notified", notified),
+		)
+		s.logger.InfoContext(ctx, "agent-tasks: iteration done",
 			"task_id", task.ID,
 			"handler", task.Handler,
 			"iteration", task.Iteration+1,
+			"notified", notified,
 		)
 		if err := s.store.UpdateProgress(dbCtx, task.ID, result.Progress); err != nil {
-			s.logger.Error("agent-tasks: progress update error", "error", err)
+			s.logger.ErrorContext(ctx, "agent-tasks: progress update error", "error", err)
 		}
 	}
 }
@@ -369,4 +410,31 @@ func (s *Scheduler) setBusy(handler string, val bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.busy[handler] = val
+}
+
+// outputPreview is the short form of result.Output that lands on the
+// "agent-tasks: completed" log line. 200 chars covers a typical Telegram-
+// length reply; longer outputs get an ellipsis. The full text is in
+// agent_tasks.result for anyone who needs the rest.
+func outputPreview(s string) string {
+	const maxRunes = 200
+	r := []rune(s)
+	if len(r) <= maxRunes {
+		return s
+	}
+	return string(r[:maxRunes]) + "…"
+}
+
+// extractPeerTaskID pulls peer_task_id out of a Pause-progress payload
+// for span annotation. Returns "" on any unmarshal error — span is
+// best-effort, never fails the task.
+func extractPeerTaskID(progress []byte) string {
+	if len(progress) == 0 {
+		return ""
+	}
+	var p struct {
+		PeerTaskID string `json:"peer_task_id"`
+	}
+	_ = jsonUnmarshal(progress, &p)
+	return p.PeerTaskID
 }
