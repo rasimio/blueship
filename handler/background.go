@@ -61,6 +61,11 @@ const maxRevisions = 3
 func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.AgentDeps) (core.IterationResult, error) {
 	// 1. Load system prompt.
 	// Task config may override the instruction prompt key (default: "background-task").
+	// system_prompt_keys, if set, replaces deps.Config.SystemPromptKeys for
+	// this task — useful when chat-mode prompts (preamble/agents) are wrong
+	// for autonomous reflection (inner-thought has no user speech, no
+	// message_send confirmation, no intent detection from user input).
+	// instructionKey is appended last in either case.
 	// notify_default controls whether the final reply is auto-pushed to the
 	// user as Notify on the last iteration. Heartbeat-style tasks want true
 	// (default); inner-thought-style silent reflection wants false. With
@@ -68,10 +73,12 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// [NOTIFY] marker in the reply.
 	instructionKey := "background-task"
 	notifyDefault := true
+	var promptKeys []string
 	if task.Config != nil {
 		var cfg struct {
-			Prompt        string `json:"prompt"`
-			NotifyDefault *bool  `json:"notify_default"`
+			Prompt           string   `json:"prompt"`
+			NotifyDefault    *bool    `json:"notify_default"`
+			SystemPromptKeys []string `json:"system_prompt_keys"`
 		}
 		if json.Unmarshal(task.Config, &cfg) == nil {
 			if cfg.Prompt != "" {
@@ -80,11 +87,17 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			if cfg.NotifyDefault != nil {
 				notifyDefault = *cfg.NotifyDefault
 			}
+			if len(cfg.SystemPromptKeys) > 0 {
+				promptKeys = append(promptKeys, cfg.SystemPromptKeys...)
+			}
 		}
 	}
+	if promptKeys == nil {
+		promptKeys = append(promptKeys, deps.Config.SystemPromptKeys...)
+	}
+	promptKeys = append(promptKeys, instructionKey)
 
 	var parts []string
-	promptKeys := append(deps.Config.SystemPromptKeys, instructionKey)
 	for _, key := range promptKeys {
 		p, err := deps.Prompts.Get(ctx, key)
 		if err != nil {
