@@ -5,7 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/rasimio/blueship/telemetry"
 )
+
+// toolPeerAttr is a tiny helper kept here so registry.go doesn't import
+// otel/attribute at multiple call sites. Keeps the SetAttributes line
+// readable when remote-tool peer tagging is added.
+func toolPeerAttr(peer string) attribute.KeyValue {
+	return attribute.String("tool.peer", peer)
+}
 
 // ToolRegistry manages tool definitions and dispatches tool calls.
 type ToolRegistry struct {
@@ -167,16 +178,31 @@ func (r *ToolRegistry) Execute(ctx context.Context, name string, input json.RawM
 		return fmt.Sprintf("unknown tool: %s", name), true
 	}
 
+	ctx, span := telemetry.StartToolSpan(ctx, name, len(input))
+	defer span.End()
+	if tool.Remote {
+		span.SetAttributes(
+			toolPeerAttr(tool.PeerTag),
+		)
+	}
+
 	result, err := tool.Handler(ctx, input)
 	if err != nil {
-		return err.Error(), true
+		out := err.Error()
+		telemetry.AnnotateToolResult(span, len(out), true)
+		telemetry.RecordError(span, err)
+		return out, true
 	}
 
 	data, err := json.Marshal(result)
 	if err != nil {
-		return fmt.Sprintf("marshal result: %s", err), true
+		out := fmt.Sprintf("marshal result: %s", err)
+		telemetry.AnnotateToolResult(span, len(out), true)
+		telemetry.RecordError(span, err)
+		return out, true
 	}
 
+	telemetry.AnnotateToolResult(span, len(data), false)
 	return string(data), false
 }
 

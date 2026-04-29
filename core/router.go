@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"strings"
+
+	"github.com/rasimio/blueship/telemetry"
 )
 
 // LLMRouter routes CompletionRequest by provider name.
@@ -40,7 +42,17 @@ func (r *LLMRouter) Complete(ctx context.Context, req CompletionRequest) (*Compl
 	if provider == nil {
 		return nil, ErrProviderNotConfigured
 	}
-	return provider.Complete(ctx, req)
+
+	ctx, span := telemetry.StartLLMSpan(ctx, providerName, modelName)
+	defer span.End()
+
+	resp, err := provider.Complete(ctx, req)
+	if err != nil {
+		telemetry.RecordError(span, err)
+		return nil, err
+	}
+	telemetry.AnnotateLLMResult(span, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.StopReason)
+	return resp, nil
 }
 
 // StreamComplete implements StreamCompletionProvider by dispatching to a streaming provider.

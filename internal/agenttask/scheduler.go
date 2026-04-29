@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/telemetry"
 )
 
 // DefaultTaskTimeout is applied to tasks without an explicit deadline.
@@ -161,7 +162,10 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	s.setBusy(task.ID.String(), true)
 	defer s.setBusy(task.ID.String(), false)
 
-	s.logger.Info("agent-tasks: starting",
+	ctx, span := telemetry.StartTaskSpan(ctx, task.ID.String(), task.Handler, task.Strategy, dispatchTag, task.Iteration+1)
+	defer span.End()
+
+	s.logger.InfoContext(ctx, "agent-tasks: starting",
 		"task_id", task.ID,
 		"dispatch", dispatchTag,
 		"title", task.Title,
@@ -219,13 +223,14 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	defer dbCancel()
 
 	if err != nil {
-		s.logger.Error("agent-tasks: handler failed",
+		telemetry.RecordError(span, err)
+		s.logger.ErrorContext(ctx, "agent-tasks: handler failed",
 			"task_id", task.ID,
 			"handler", task.Handler,
 			"error", err,
 		)
 		if fErr := s.store.SetPending(dbCtx, task.ID); fErr != nil {
-			s.logger.Error("agent-tasks: reset after fail error", "error", fErr)
+			s.logger.ErrorContext(ctx, "agent-tasks: reset after fail error", "error", fErr)
 		}
 		return
 	}
@@ -267,7 +272,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			}
 		}
 
-		s.logger.Info("agent-tasks: completed",
+		s.logger.InfoContext(ctx, "agent-tasks: completed",
 			"task_id", task.ID,
 			"dispatch", dispatchTag,
 		)
