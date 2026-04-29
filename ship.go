@@ -78,7 +78,10 @@ type Ship struct {
 func New(cfg Config) *Ship {
 	cfg.ApplyDefaults()
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
 
 	return &Ship{
 		cfg:       cfg,

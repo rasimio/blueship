@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 )
 
@@ -32,6 +33,12 @@ type Config struct {
 	Redis    string // Redis address (default: "" = no cache)
 	Prompts  string // directory of <key>.md prompt files (required for personality)
 	Timezone string // default: "UTC"
+
+	// Logger lets the host pass in a pre-configured *slog.Logger so the
+	// framework can join the host's log chain (JSON output, telemetry
+	// alerter, trace_id correlation). Nil = blueship builds a TextHandler
+	// to stderr — fine for examples, never for production.
+	Logger *slog.Logger
 
 	// SystemPromptKeys defines prompt keys that compose the system prompt.
 	// Each key resolves to <key>.md inside Config.Prompts.
