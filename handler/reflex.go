@@ -326,7 +326,7 @@ func parseReflexResult(text string) (*core.ReflexResult, error) {
 		Intent               string                     `json:"intent"`
 		Confidence           float64                    `json:"confidence"`
 		PreActions           []core.ToolAction          `json:"pre_actions"`
-		PostActions          []core.PostAction          `json:"post_actions"`
+		PostActions          json.RawMessage            `json:"post_actions"`
 		Tools                json.RawMessage            `json:"tools"`
 		Guidance             string                     `json:"guidance"`
 		ClarificationOptions []core.ClarificationOption `json:"clarification_options"`
@@ -340,9 +340,23 @@ func parseReflexResult(text string) (*core.ReflexResult, error) {
 		Intent:               raw.Intent,
 		Confidence:           raw.Confidence,
 		PreActions:           raw.PreActions,
-		PostActions:          raw.PostActions,
 		Guidance:             raw.Guidance,
 		ClarificationOptions: raw.ClarificationOptions,
+	}
+
+	// post_actions: accept both [{"type":"save_reflection"}] and ["save_reflection"]
+	if len(raw.PostActions) > 0 {
+		var postObjects []core.PostAction
+		if err := json.Unmarshal(raw.PostActions, &postObjects); err == nil {
+			result.PostActions = postObjects
+		} else {
+			var postStrings []string
+			if err := json.Unmarshal(raw.PostActions, &postStrings); err == nil {
+				for _, s := range postStrings {
+					result.PostActions = append(result.PostActions, core.PostAction{Type: s})
+				}
+			}
+		}
 	}
 
 	if len(raw.Tools) > 0 {

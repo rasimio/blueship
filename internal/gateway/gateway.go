@@ -1586,8 +1586,8 @@ func (g *Gateway) executePostActions(ctx context.Context, us *UserState, actions
 				g.logger.Warn("post-action save_reflection: extraction returned empty")
 				continue
 			}
-			input := fmt.Sprintf(`{"type":"observation","content":%q}`, insight)
-			result, isError := us.Registry.Execute(ctx, "memory_self_save", json.RawMessage(input))
+			input := fmt.Sprintf(`{"kind":"reflection","content":%q}`, insight)
+			result, isError := us.Registry.Execute(ctx, "memory_save", json.RawMessage(input))
 			if isError {
 				g.logger.Warn("post-action save_reflection failed", "error", result)
 			} else {
