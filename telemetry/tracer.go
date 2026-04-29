@@ -39,13 +39,14 @@ func NewTracer(cfg Config) (trace.Tracer, Shutdown, error) {
 		return nil, nil, fmt.Errorf("telemetry: build exporter: %w", err)
 	}
 
-	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
+	// resource.Default() pins one OTel schema URL, semconv pins another;
+	// merging them refuses with "conflicting Schema URL". Skip the merge —
+	// we only need service.name for routing/filtering, and the SDK-default
+	// attrs (runtime, host) still come through via the SDK regardless.
+	res := resource.NewWithAttributes(
 		semconv.SchemaURL,
 		semconv.ServiceName(cfg.ServiceName),
-	))
-	if err != nil {
-		return nil, nil, fmt.Errorf("telemetry: build resource: %w", err)
-	}
+	)
 
 	sampleRate := cfg.Tracing.SampleRate
 	if sampleRate <= 0 {
