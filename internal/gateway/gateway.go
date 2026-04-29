@@ -959,7 +959,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			}
 		}
 
-		reply, err := loop.RunStream(ctx, runCfg, content, onText, nil)
+		reply, _, err := loop.RunStream(ctx, runCfg, content, onText, nil)
 		if err != nil {
 			g.logger.Error("agent loop error", "chat_id", us.ChatID, "error", err)
 			g.sendDebugError(ctx, sink, "agent", err)
@@ -1003,6 +1003,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 				g.executePostActions(ctx, us, postActions, reply)
 			}
 			sink.SendText(ctx, reply)
+		}
+		if us.DebugMode || g.deps.Config.Gateway.Debug {
+			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, result.ToolTraces, engineRuleCount)
 		}
 		return
 	}
@@ -1072,7 +1075,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		flushEdit()
 	}
 
-	reply, err := loop.RunStream(ctx, runCfg, content, onText, onToolUse)
+	reply, cortexTraces, err := loop.RunStream(ctx, runCfg, content, onText, onToolUse)
 	if err != nil {
 		g.logger.Error("agent loop error", "chat_id", us.ChatID, "error", err)
 		g.sendDebugError(ctx, sink, "agent", err)
@@ -1111,7 +1114,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	if us.DebugMode || g.deps.Config.Gateway.Debug {
-		go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, nil, engineRuleCount)
+		go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, cortexTraces, engineRuleCount)
 	}
 	if g.deps.Config.TTS != nil && g.shouldSendVoice(ctx, us, sink) {
 		go g.synthesizeAndSendVoice(ctx, sink, us, reply)

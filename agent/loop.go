@@ -286,11 +286,13 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 // for progressive message editing. onText fires for each text chunk from the
 // LLM. onToolUse fires before each tool is executed (nil = ignore).
 // Tool call turns use batch mode; only the final text response is streamed.
-func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, onText func(string), onToolUse func(name string)) (string, error) {
+// Returns the reply text, tool traces (for debug/audit), and any error.
+func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, onText func(string), onToolUse func(name string)) (string, []ToolTrace, error) {
 	streamProvider, ok := a.provider.(bs.StreamCompletionProvider)
 	if !ok {
 		// Fallback to batch if provider doesn't support streaming
-		return a.Run(ctx, cfg, userMessage)
+		text, err := a.Run(ctx, cfg, userMessage)
+		return text, nil, err
 	}
 
 	if cfg.MaxTurns <= 0 {
@@ -305,7 +307,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 
 	err := a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: userMessage})
 	if err != nil {
-		return "", fmt.Errorf("append user message: %w", err)
+		return "", nil, fmt.Errorf("append user message: %w", err)
 	}
 
 	var tools []bs.ToolDefinition
@@ -324,6 +326,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 	compactSummary := cfg.CompactSummary
 
 	var accumulated strings.Builder
+	var traces []ToolTrace
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		effectiveSystem := cfg.SystemPrompt
@@ -333,7 +336,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 
 		messages, err := a.store.MessagesForAPI(ctx, cfg.SessionID, tokenBudget)
 		if err != nil {
-			return "", fmt.Errorf("load messages: %w", err)
+			return "", nil, fmt.Errorf("load messages: %w", err)
 		}
 
 		if turn == 0 && cfg.ReflexGuidance != "" && cfg.InjectedContext != "" {
@@ -365,7 +368,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 		// Stream the LLM call — onText fires for each text chunk
 		resp, err := streamProvider.StreamComplete(ctx, req, onText)
 		if err != nil {
-			return "", fmt.Errorf("LLM API: %w", err)
+			return "", nil, fmt.Errorf("LLM API: %w", err)
 		}
 
 		a.logger.Info("LLM response",
@@ -380,7 +383,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 			Content: resp.Content,
 		}, resp.Usage.OutputTokens)
 		if err != nil {
-			return "", fmt.Errorf("append assistant message: %w", err)
+			return "", nil, fmt.Errorf("append assistant message: %w", err)
 		}
 
 		if turnText := bs.ExtractText(resp.Content); turnText != "" {
@@ -392,7 +395,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 
 		switch resp.StopReason {
 		case "end_turn", "max_tokens":
-			return accumulated.String(), nil
+			return accumulated.String(), traces, nil
 
 		case "tool_use":
 			var toolResults []bs.ContentBlock
@@ -405,6 +408,15 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 					onToolUse(block.Name)
 				}
 				result, isError := a.registry.Execute(ctx, block.Name, block.Input)
+				inputStr := string(block.Input)
+				if len(inputStr) > 200 {
+					inputStr = inputStr[:200] + "..."
+				}
+				outputStr := result
+				if len(outputStr) > 500 {
+					outputStr = outputStr[:500] + "..."
+				}
+				traces = append(traces, ToolTrace{Name: block.Name, Input: inputStr, Output: outputStr, Error: isError})
 				toolResults = append(toolResults, bs.ContentBlock{
 					Type:      "tool_result",
 					ToolUseID: block.ID,
@@ -416,21 +428,19 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 
 			err = a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: toolResults})
 			if err != nil {
-				return "", fmt.Errorf("append tool results: %w", err)
+				return "", nil, fmt.Errorf("append tool results: %w", err)
 			}
-			// Tool call turns: onText was called but chunks were tool JSON, not user text.
-			// Next turn may produce the real text response.
 			continue
 
 		default:
-			return accumulated.String(), nil
+			return accumulated.String(), traces, nil
 		}
 	}
 
 	if text := accumulated.String(); text != "" {
-		return text, nil
+		return text, traces, nil
 	}
-	return "", fmt.Errorf("agent loop exceeded %d turns with no text output", cfg.MaxTurns)
+	return "", traces, fmt.Errorf("agent loop exceeded %d turns with no text output", cfg.MaxTurns)
 }
 
 // calculateBudget computes the token budget for message retrieval.
