@@ -73,12 +73,14 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// [NOTIFY] marker in the reply.
 	instructionKey := "background-task"
 	notifyDefault := true
+	skipReflex := false
 	var promptKeys []string
 	if task.Config != nil {
 		var cfg struct {
 			Prompt           string   `json:"prompt"`
 			NotifyDefault    *bool    `json:"notify_default"`
 			SystemPromptKeys []string `json:"system_prompt_keys"`
+			SkipReflex       bool     `json:"skip_reflex"`
 		}
 		if json.Unmarshal(task.Config, &cfg) == nil {
 			if cfg.Prompt != "" {
@@ -90,6 +92,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			if len(cfg.SystemPromptKeys) > 0 {
 				promptKeys = append(promptKeys, cfg.SystemPromptKeys...)
 			}
+			skipReflex = cfg.SkipReflex
 		}
 	}
 	if promptKeys == nil {
@@ -204,13 +207,21 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	}
 
 	// 6. Run reflex pipeline (same System 1/2 architecture as cortex gateway).
-	reflex := runReflexPipeline(ctx, deps, b.tz, msg)
-	injectedCtx := reflex.InjectedCtx
-	if reflex.Guidance != "" {
-		if injectedCtx != "" {
-			injectedCtx += "\n\n" + reflex.Guidance
-		} else {
-			injectedCtx = reflex.Guidance
+	// Skipped when task config sets skip_reflex=true. Tasks like inner-thought
+	// have no user message — reflex was designed to interpret one — and the
+	// shared AME engine surfaces past reflections that just feed back into the
+	// next reflection. With skip_reflex the agent gets a clean prompt and
+	// tools; any context it needs it must pull through the tools itself.
+	var injectedCtx string
+	if !skipReflex {
+		reflex := runReflexPipeline(ctx, deps, b.tz, msg)
+		injectedCtx = reflex.InjectedCtx
+		if reflex.Guidance != "" {
+			if injectedCtx != "" {
+				injectedCtx += "\n\n" + reflex.Guidance
+			} else {
+				injectedCtx = reflex.Guidance
+			}
 		}
 	}
 
