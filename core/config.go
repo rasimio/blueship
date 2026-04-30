@@ -34,6 +34,12 @@ type Config struct {
 	Prompts  string // directory of <key>.md prompt files (required for personality)
 	Timezone string // default: "UTC"
 
+	// TraceFilePath, when set, enables the trace_recall tool. Points to the
+	// jsonl file written by the OTel "file" exporter. Empty disables the
+	// tool — there is no other source for self-observation, so omitting the
+	// path means the agent literally cannot see its own work.
+	TraceFilePath string
+
 	// Logger lets the host pass in a pre-configured *slog.Logger so the
 	// framework can join the host's log chain (JSON output, telemetry
 	// alerter, trace_id correlation). Nil = blueship builds a TextHandler

@@ -67,6 +67,8 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 		)
 	}
 
+	RegisterTraceRecall(r, d.Config.TraceFilePath)
+
 	if d.Config.Sender != nil {
 		// message_send routes through the configured MessageSender. For
 		// channel-style targets (no leading digit, '-', or '@') prepend '@'
