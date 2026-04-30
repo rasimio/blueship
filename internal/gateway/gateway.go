@@ -587,7 +587,12 @@ func formatRulesAsGuidance(rules []bs.ActiveRule) string {
 }
 
 // sendDebugDump builds a full debug dump and sends as txt file via Telegram.
+// No-op for non-Telegram transports (WS-only, etc.) — Telegram is the only
+// sink that supports document attachments today.
 func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx, reflexGuidance string, preTraces, cortexTraces []agent.ToolTrace, engineRuleCount int) {
+	if g.tg == nil || !g.tg.IsConfigured() {
+		return
+	}
 	var b strings.Builder
 	b.WriteString("\xEF\xBB\xBF") // UTF-8 BOM
 	b.WriteString("=== DEBUG DUMP ===\n")
