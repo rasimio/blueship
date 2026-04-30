@@ -1651,6 +1651,13 @@ func (g *Gateway) extractInsight(ctx context.Context, response, extractType stri
 	}
 
 	text := strings.TrimSpace(bs.ExtractText(resp.Content))
+	// `[skip]` is the extract-insight prompt's signal that the response was
+	// only an unverified temporal claim — don't persist as reflection/fact.
+	// Treating it as empty short-circuits the executePostActions write.
+	if text == "[skip]" || strings.HasPrefix(text, "[skip]") {
+		g.logger.Info("extractInsight skipped", "type", extractType, "reason", "unverified temporal claim")
+		return ""
+	}
 	g.logger.Info("extractInsight done", "type", extractType, "result", truncateStr(text, 100))
 	return text
 }
