@@ -318,15 +318,23 @@ func (s *Ship) Run(ctx context.Context) error {
 
 	}
 
-	// 5. Start Telegram Gateway
+	// 5. Start Gateway. The gateway is the inbound-message router for every
+	// transport (Telegram, WebSocket, future ones). It's needed whenever any
+	// transport is configured — Telegram polling and WS are independent
+	// downstream consumers.
 	var gw *gateway.Gateway
-	if s.cfg.Transport.Type == "telegram" && s.cfg.Transport.BotToken != "" {
+	telegramConfigured := s.cfg.Transport.Type == "telegram" && s.cfg.Transport.BotToken != ""
+	wsConfigured := s.cfg.Transport.WebSocket.Port > 0
+	if telegramConfigured || wsConfigured {
 		var err error
 		gw, err = gateway.NewGateway(deps, reg, s.logger)
 		if err != nil {
 			return fmt.Errorf("create gateway: %w", err)
 		}
+	}
 
+	// 5a. Telegram polling — only when bot_token is set.
+	if gw != nil && telegramConfigured {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

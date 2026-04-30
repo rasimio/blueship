@@ -150,12 +150,12 @@ type ModuleRegistry interface {
 	RegisterAllTools(registry *bs.ToolRegistry, d *bs.Deps)
 }
 
-// NewGateway creates a new gateway.
+// NewGateway creates a new gateway. Telegram-specific fields (poller, tg
+// client, bot identity) are only initialized when a bot_token is
+// configured; otherwise the gateway runs in transport-agnostic mode and
+// only serves non-Telegram sinks (WebSocket, future).
 func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Gateway, error) {
 	cfg := deps.Config
-	if cfg.Transport.BotToken == "" {
-		return nil, fmt.Errorf("telegram bot_token not configured")
-	}
 
 	tz, err := time.LoadLocation(cfg.Timezone)
 	if err != nil {
@@ -177,8 +177,6 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 	gw := &Gateway{
 		deps:      deps,
 		modules:   modules,
-		poller:    telegram.NewPoller(cfg.Transport.BotToken, cfg.Timeouts.TelegramPoll),
-		tg:        telegram.NewClient(cfg.Transport.BotToken, cfg.Timeouts.TelegramClient),
 		store:     session.NewStore(coreDB),
 		provider:  cfg.LLM,
 		compactor: agent.NewCompactor(cfg.LLM, cfg, logger),
@@ -188,19 +186,26 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 		users:     make(map[string]*UserState),
 	}
 
-	// Fetch bot identity (id + username) so targeted commands like
-	// "/reset@LiyaDeusBot" and reply-based addressing work in group chats
-	// where multiple bots share the same Telegram group. Failure to resolve
-	// is non-fatal — group routing just degrades to legacy "respond to
-	// everything" behaviour.
-	meCtx, meCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer meCancel()
-	if me, err := gw.tg.GetMe(meCtx); err != nil {
-		logger.Warn("telegram getMe failed; group command targeting disabled", "error", err)
+	if cfg.Transport.BotToken != "" {
+		gw.poller = telegram.NewPoller(cfg.Transport.BotToken, cfg.Timeouts.TelegramPoll)
+		gw.tg = telegram.NewClient(cfg.Transport.BotToken, cfg.Timeouts.TelegramClient)
+
+		// Fetch bot identity (id + username) so targeted commands like
+		// "/reset@LiyaDeusBot" and reply-based addressing work in group chats
+		// where multiple bots share the same Telegram group. Failure to resolve
+		// is non-fatal — group routing just degrades to legacy "respond to
+		// everything" behaviour.
+		meCtx, meCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer meCancel()
+		if me, err := gw.tg.GetMe(meCtx); err != nil {
+			logger.Warn("telegram getMe failed; group command targeting disabled", "error", err)
+		} else {
+			gw.botID = me.ID
+			gw.botUsername = me.Username
+			logger.Info("telegram bot self", "id", me.ID, "username", me.Username)
+		}
 	} else {
-		gw.botID = me.ID
-		gw.botUsername = me.Username
-		logger.Info("telegram bot self", "id", me.ID, "username", me.Username)
+		logger.Info("gateway initialised without telegram transport (WS-only)")
 	}
 
 	// Load system prompts from the agent's prompts directory (Config.Prompts).
