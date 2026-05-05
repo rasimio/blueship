@@ -994,6 +994,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		if reply != "" && len(postActions) > 0 {
 			g.executePostActions(ctx, us, postActions, reply)
 		}
+		if reply != "" {
+			g.emitTurnCompleted(us, sess)
+		}
 		return
 	}
 
@@ -1013,6 +1016,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 				g.executePostActions(ctx, us, postActions, reply)
 			}
 			sink.SendText(ctx, reply)
+			g.emitTurnCompleted(us, sess)
 		}
 		if us.DebugMode || g.deps.Config.Gateway.Debug {
 			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, result.ToolTraces, engineRuleCount)
@@ -1123,12 +1127,33 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		g.executePostActions(ctx, us, postActions, reply)
 	}
 
+	g.emitTurnCompleted(us, sess)
+
 	if us.DebugMode || g.deps.Config.Gateway.Debug {
 		go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, cortexTraces, engineRuleCount)
 	}
 	if g.deps.Config.TTS != nil && g.shouldSendVoice(ctx, us, sink) {
 		go g.synthesizeAndSendVoice(ctx, sink, us, reply)
 	}
+}
+
+// emitTurnCompleted fires the configured TurnCompletedHook (if any) for this
+// session, in a non-blocking goroutine. Called from each of the three turn-
+// completion exit paths in processMessages: voice streaming, non-Telegram
+// batch, and Telegram streaming. The actor (or whatever consumer is wired)
+// runs its memory state machine asynchronously without blocking the response
+// loop. Sessions whose ID isn't a valid UUID are skipped with a warning —
+// shouldn't happen in production but defensive against future schema drift.
+func (g *Gateway) emitTurnCompleted(us *UserState, sess *session.Session) {
+	if g.deps.TurnCompletedHook == nil || sess == nil {
+		return
+	}
+	sid, err := uuid.Parse(sess.ID)
+	if err != nil {
+		g.logger.Warn("turn_completed: invalid session id", "session_id", sess.ID, "error", err)
+		return
+	}
+	go g.deps.TurnCompletedHook(context.Background(), us.UserID, sid)
 }
 
 // isVoiceEnabled checks if the user has voice mode on.

@@ -82,6 +82,15 @@ type Deps struct {
 	// Runs non-blocking in background. Implementations handle their own DB, embeddings, emotions.
 	MessageEncoder func(ctx context.Context, userID, message string)
 
+	// TurnCompletedHook is called after the gateway finishes sending an
+	// assistant reply for a turn (both batch and streaming paths). The
+	// implementation receives the user UUID and session UUID and is
+	// expected to dispatch the event to a per-user memory state machine
+	// actor (or whatever consumer the embedding application provides).
+	// Called in a goroutine so a slow consumer can't stall the response
+	// loop. Nil = no consumer registered, hook is skipped.
+	TurnCompletedHook func(ctx context.Context, userID, sessionID uuid.UUID)
+
 	// SelfAgentID returns the Ship's own Fleet-issued agent id, or "" if
 	// Fleet hasn't bootstrapped yet. Used by delegate-strategy handlers
 	// so the peer can route status callbacks back here.
@@ -114,10 +123,12 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		Prompts:         d.Prompts,
 		Users:           d.Users,
 		Sessions:        d.Sessions,
-		ContextInjector: d.ContextInjector,
-		ReflexPreparer:  d.ReflexPreparer,
-		RuleEngine:      d.RuleEngine,
-		pool:            d.pool,
+		ContextInjector:   d.ContextInjector,
+		ReflexPreparer:    d.ReflexPreparer,
+		RuleEngine:        d.RuleEngine,
+		MessageEncoder:    d.MessageEncoder,
+		TurnCompletedHook: d.TurnCompletedHook,
+		pool:              d.pool,
 	}
 }
 
