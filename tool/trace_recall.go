@@ -12,6 +12,10 @@ import (
 	bs "github.com/rasimio/blueship/core"
 )
 
+// ToolTraceRecall is the canonical tool name. See builtin.go for the
+// rationale on per-package constants vs free-form strings.
+const ToolTraceRecall = "trace_recall"
+
 // trace_recall lets an agent look at its own recent execution. The OTel
 // file exporter has been writing every span to disk for a while; until
 // now nothing on the agent side could read it back, so the agent had no
@@ -326,7 +330,7 @@ func RegisterTraceRecall(r *bs.ToolRegistry, tracePath string) {
 		return
 	}
 
-	r.Register("trace_recall",
+	r.Register(ToolTraceRecall,
 		"Покажи свою собственную работу за последние N минут — какие тулы ты вызывала, к каким моделям обращалась, что упало, что было медленным. Это твой единственный канал самонаблюдения. Используй когда хочешь понять 'что я делала только что', найти узкие места ('почему долго думала?') или заметить ошибки которые сама не помнишь. Возвращает агрегаты: tool_calls (по имени), llm_calls (по модели), agent_tasks_by_handler, errors, slow_spans (top-5 по длительности).",
 		json.RawMessage(`{
 			"type":"object",

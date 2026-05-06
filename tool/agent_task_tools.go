@@ -10,6 +10,16 @@ import (
 	bs "github.com/rasimio/blueship/core"
 )
 
+// Tool name constants — see builtin.go for the rationale.
+const (
+	ToolAgentTaskCreate  = "agent_task_create"
+	ToolAgentTaskStatus  = "agent_task_status"
+	ToolAgentTaskList    = "agent_task_list"
+	ToolAgentTaskCancel  = "agent_task_cancel"
+	ToolAgentTaskAccept  = "agent_task_accept"
+	ToolAgentTaskApprove = "agent_task_approve"
+)
+
 // RegisterAgentTaskTools adds the BlueShip-primitive task tools
 // (agent_task_create / status / list / cancel / approve) to the registry.
 //
@@ -31,7 +41,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 	// -------------------------------------------------------------------
 	// agent_task_create
 	// -------------------------------------------------------------------
-	r.Register("agent_task_create",
+	r.Register(ToolAgentTaskCreate,
 		"Kick off an autonomous task. Choose strategy carefully — wrong choice = wasted budget:\n"+
 			"  • direct — DEFAULT for almost everything. LLM runs in a loop with the configured tools (web_search, browser_fetch, memory_*, etc.), iterates freely, and finishes when acceptance_criteria is satisfied. USE FOR: research, news digests, Q&A with web sources, deep-dives, market analysis, anything that boils down to 'iterate over tools until the answer is good enough'.\n"+
 			"  • structured — ONLY when the task is a fixed multi-phase pipeline with explicit ordering, peer-task callbacks, or revision gates (e.g. delegate code work to Liya: code_task_create → wait → decide → execute → wait → decide → push → open_pr → merge). The plan field MUST contain a JSON array of step objects {action:tool|wait|decide|milestone|done, ...}. NEVER use structured for research/synthesis — direct does that better.\n"+
@@ -137,7 +147,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 	// -------------------------------------------------------------------
 	// agent_task_status
 	// -------------------------------------------------------------------
-	r.Register("agent_task_status",
+	r.Register(ToolAgentTaskStatus,
 		"Read the full state of a task by id: status (pending/running/paused/done/failed/canceled), strategy, iteration, plan, progress, and final result. Use to check whether an autonomous task has met its acceptance criteria.",
 		json.RawMessage(`{"type":"object","properties":{
 			"task_id":{"type":"string","description":"Task UUID or 8-char prefix"}
@@ -182,7 +192,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 	// -------------------------------------------------------------------
 	// agent_task_list
 	// -------------------------------------------------------------------
-	r.Register("agent_task_list",
+	r.Register(ToolAgentTaskList,
 		"List the agent's tasks, optionally filtered by status. Without a filter, returns every task across every state.",
 		json.RawMessage(`{"type":"object","properties":{
 			"status":{"type":"string","description":"Optional status filter (pending|running|paused|done|failed|canceled)"}
@@ -213,7 +223,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 	// -------------------------------------------------------------------
 	// agent_task_cancel
 	// -------------------------------------------------------------------
-	r.Register("agent_task_cancel",
+	r.Register(ToolAgentTaskCancel,
 		"Cancel an active task (pending/running/paused). Tasks already in a terminal state (done/failed/canceled) are unchanged.",
 		json.RawMessage(`{"type":"object","properties":{
 			"task_id":{"type":"string","description":"Task UUID or 8-char prefix"}
@@ -247,7 +257,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 	// local agent_task with the supplied spec and returns the new id.
 	// Marked exposed=true (federated via Fleet) + mode=sync.
 	// -------------------------------------------------------------------
-	r.Register("agent_task_accept",
+	r.Register(ToolAgentTaskAccept,
 		"Accept a delegated task from a peer agent. Creates a local agent_task with the supplied title / description / acceptance_criteria / strategy / plan / tools / use_agents and returns its id. The origin agent watches this task via agent_task_status federated calls until it reaches a terminal state.",
 		json.RawMessage(`{
 			"type":"object",
@@ -329,7 +339,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 	// -------------------------------------------------------------------
 	// agent_task_approve
 	// -------------------------------------------------------------------
-	r.Register("agent_task_approve",
+	r.Register(ToolAgentTaskApprove,
 		"Resume a paused task — used after a manual review milestone (e.g. user approved continuing past a checkpoint). The scheduler picks the task up on its next tick.",
 		json.RawMessage(`{"type":"object","properties":{
 			"task_id":{"type":"string","description":"Task UUID or 8-char prefix"}

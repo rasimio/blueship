@@ -9,6 +9,17 @@ import (
 	bs "github.com/rasimio/blueship/core"
 )
 
+// Tool name constants. Each tool registered in this package exports the
+// canonical name as a constant so role allowlists in host code can refer
+// to tools by symbol rather than free-form string. Find-references on a
+// constant tells you everywhere a tool is exposed; a typo at the role
+// site fails the build.
+const (
+	ToolCurrentTime = "current_time"
+	ToolWebSearch   = "web_search"
+	ToolMessageSend = "message_send"
+)
+
 // RegisterBuiltinTools registers framework-level tools that any agent
 // running on BlueShip can use. Descriptions live inline next to the
 // handler — code is the source of truth.
@@ -18,7 +29,7 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 		tz = time.UTC
 	}
 
-	r.Register("current_time",
+	r.Register(ToolCurrentTime,
 		"Returns the current local datetime, weekday, and configured timezone. Use to ground time-sensitive reasoning ('today is X', 'it is now N o'clock') or to compare against stored timestamps.",
 		json.RawMessage(`{"type":"object","properties":{}}`),
 		func(ctx context.Context, input json.RawMessage) (any, error) {
@@ -33,7 +44,7 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 
 	if d.Config.Search != nil {
 		search := d.Config.Search
-		r.Register("web_search",
+		r.Register(ToolWebSearch,
 			"Search the web and return ranked URLs with title + short snippet (1-2 sentences extracted by the search engine). Snippets are navigation aids — they tell you which pages might be worth reading; they are NOT the article and NOT citation material. Whenever you would cite a fact, ground it with browser_fetch on the source URL first. Use your own judgement on how many pages to fetch — direct lookups may need one, syntheses or comparisons more — and keep iterating (re-search, fetch more, refine) until you can answer confidently with sources. Returns {results: [{title, url, snippet}], hint}.",
 			json.RawMessage(`{"type":"object","properties":{
 				"query":{"type":"string","description":"Search query"},
@@ -74,7 +85,7 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 		// channel-style targets (no leading digit, '-', or '@') prepend '@'
 		// so providers like Telegram resolve them correctly.
 		sender := d.Config.Sender
-		r.Register("message_send",
+		r.Register(ToolMessageSend,
 			"Send a message to a chat or channel through the agent's configured transport (Telegram, etc.). Use 'to' for a chat id and set is_channel=true for public channel handles.",
 			json.RawMessage(`{"type":"object","properties":{
 				"to":{"type":"string","description":"Recipient chat ID or channel name"},
