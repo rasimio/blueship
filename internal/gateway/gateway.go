@@ -826,6 +826,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		}
 	}
 
+	// Pull a few prior chat turns so AME can embed the multi-turn theme,
+	// not just the (often short, vague) current message. Without this,
+	// "как ты" right after a heavy disclosure has no signal — cosine
+	// search lands on whatever generic emotional record matches "как
+	// ты" best, and the model anchors on the wrong event.
+	priorContext := g.buildPriorContext(ctx, sess.ID, 6)
+
 	// Build context and run reflex/cortex pipeline.
 	var injectedCtx, reflexGuidance string
 	var postActions []bs.PostAction // executed after cortex response
@@ -875,7 +882,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			g.logger.Info("disambiguation: resolved", "tool", chosen.Tool, "label", chosen.Label)
 			// Still run context injection for AME traces.
 			if us.Deps != nil && us.Deps.ContextInjector != nil {
-				injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText)
+				injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText, priorContext)
 			}
 		} else {
 			// Not a resolution — clear pending and proceed normally.
@@ -886,7 +893,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	if reflexGuidance == "" && msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil && g.reflexModel() != "" {
 		// Reflex/Cortex pipeline: structured context → reflex plan → pre-actions → filtered cortex input.
 		var silent bool
-		injectedCtx, reflexGuidance, postActions, preTraces, engineRuleCount, silent = g.runReflexPipeline(ctx, us, msgText)
+		injectedCtx, reflexGuidance, postActions, preTraces, engineRuleCount, silent = g.runReflexPipeline(ctx, us, msgText, priorContext)
 		if silent {
 			// Hard rule said "do not respond". Abort the whole turn — no
 			// cortex call, no message sent, no post-actions, no debug dump.
@@ -894,7 +901,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		}
 	} else if msgText != "" && us.Deps != nil && us.Deps.ContextInjector != nil {
 		// Fallback: legacy ContextInjector (no reflex).
-		injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText)
+		injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText, priorContext)
 	}
 
 	loop := agent.NewLoop(g.provider, g.store, us.Registry, g.deps.RoleTools, g.deps.Config, g.logger)
@@ -1332,8 +1339,8 @@ const maxPreActions = 2
 // Returns (injectedContext, reflexGuidance, postActions, preTraces, engineRuleCount, silent).
 // When silent=true the caller MUST abort the turn without calling cortex or
 // sending any output — a structured rule with Silent=true matched.
-func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText string) (string, string, []bs.PostAction, []agent.ToolTrace, int, bool) {
-	rc := us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText)
+func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText, priorContext string) (string, string, []bs.PostAction, []agent.ToolTrace, int, bool) {
+	rc := us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText, priorContext)
 	if rc == nil {
 		return "", "", nil, nil, 0, false
 	}
@@ -1918,6 +1925,80 @@ func (g *Gateway) cortexModel() string {
 func (g *Gateway) reflexModel() string {
 	if g.deps.ModelStore != nil {
 		return g.deps.ModelStore.ForRouter("reflex")
+	}
+	return ""
+}
+
+// buildPriorContext pulls the last `n` chat messages from the current
+// session and renders them as a compact "user: ... / assistant: ..."
+// thread excerpt for AME embedding. Each message is truncated so the
+// concatenated output stays small (embedding is not cheap and long
+// context drowns the embed signal). Empty when the session has no
+// prior messages or when the store is unavailable.
+func (g *Gateway) buildPriorContext(ctx context.Context, sessionID string, n int) string {
+	if g.store == nil || sessionID == "" || n <= 0 {
+		return ""
+	}
+	msgs, err := g.store.MessagesForAPI(ctx, sessionID, 0)
+	if err != nil || len(msgs) == 0 {
+		return ""
+	}
+	if len(msgs) > n {
+		msgs = msgs[len(msgs)-n:]
+	}
+	const perTurnCap = 280
+	var sb strings.Builder
+	for _, m := range msgs {
+		text := stringifyMessageContent(m.Content)
+		text = strings.TrimSpace(text)
+		if text == "" {
+			continue
+		}
+		if len([]rune(text)) > perTurnCap {
+			r := []rune(text)
+			text = string(r[:perTurnCap]) + "…"
+		}
+		role := m.Role
+		if role == "user" {
+			role = "user"
+		} else if role == "assistant" {
+			role = "assistant"
+		} else {
+			continue // skip tool messages — they're noise for embed
+		}
+		fmt.Fprintf(&sb, "%s: %s\n", role, text)
+	}
+	return strings.TrimRight(sb.String(), "\n")
+}
+
+// stringifyMessageContent flattens a message Content (which can be a
+// string or a slice of content blocks) into a plain-text fragment for
+// embedding. Tool-use / tool-result blocks are skipped — only text
+// blocks contribute.
+func stringifyMessageContent(content any) string {
+	switch v := content.(type) {
+	case string:
+		return v
+	case []bs.ContentBlock:
+		var parts []string
+		for _, b := range v {
+			if b.Type == "text" && b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		return strings.Join(parts, " ")
+	case []any:
+		var parts []string
+		for _, raw := range v {
+			if m, ok := raw.(map[string]any); ok {
+				if t, _ := m["type"].(string); t == "text" {
+					if s, _ := m["text"].(string); s != "" {
+						parts = append(parts, s)
+					}
+				}
+			}
+		}
+		return strings.Join(parts, " ")
 	}
 	return ""
 }

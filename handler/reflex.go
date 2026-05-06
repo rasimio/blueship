@@ -30,7 +30,7 @@ func runReflexPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Locati
 		return runFallbackPipeline(ctx, deps, tz, msg)
 	}
 
-	rc := deps.ReflexPreparer(ctx, deps.UserID.String(), msg)
+	rc := deps.ReflexPreparer(ctx, deps.UserID.String(), msg, "")
 	if rc == nil {
 		return runFallbackPipeline(ctx, deps, tz, msg)
 	}
@@ -233,7 +233,7 @@ func runReflexPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Locati
 func runFallbackPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Location, msg string) reflexResult {
 	var injectedCtx string
 	if deps.ContextInjector != nil {
-		injectedCtx = deps.ContextInjector(ctx, deps.UserID.String(), msg)
+		injectedCtx = deps.ContextInjector(ctx, deps.UserID.String(), msg, "")
 	}
 	guidance := buildRuleEngineGuidance(ctx, deps, tz, msg)
 	if guidance != "" {

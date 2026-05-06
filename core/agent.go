@@ -131,10 +131,13 @@ type AgentDeps struct {
 	SelfAgentID func() string
 
 	// ContextInjector builds per-request context (active notes, etc.) for the agent loop.
-	ContextInjector func(ctx context.Context, userID, message string) string
+	// priorContext is the recent chat-thread excerpt; agent paths usually pass "".
+	ContextInjector func(ctx context.Context, userID, message, priorContext string) string
 
 	// ReflexPreparer returns structured context for the reflex pipeline.
-	ReflexPreparer func(ctx context.Context, userID, message string) *ReflexContext
+	// priorContext is unused in agent paths (pass "") — only the chat gateway
+	// has multi-turn thread state to forward.
+	ReflexPreparer func(ctx context.Context, userID, message, priorContext string) *ReflexContext
 
 	// RuleEngine evaluates structured rules against context.
 	// Returns matched rules with guidance, pre-actions, and tool restrictions.

@@ -66,12 +66,21 @@ type Deps struct {
 
 	// ContextInjector is called before the first LLM turn to inject per-request context
 	// (e.g. memory traces). Returns empty string to skip injection.
-	ContextInjector func(ctx context.Context, userID, message string) string
+	//
+	// `priorContext` carries a few preceding chat turns (concatenated, truncated)
+	// so the AME query embedding picks up the multi-turn theme, not just the
+	// current short message. Pass "" when no prior turns exist.
+	ContextInjector func(ctx context.Context, userID, message, priorContext string) string
 
 	// ReflexPreparer returns structured context for the reflex/cortex pipeline.
 	// If set and reflex model is configured, gateway uses this instead of ContextInjector.
 	// Falls back to ContextInjector if not set.
-	ReflexPreparer func(ctx context.Context, userID, message string) *ReflexContext
+	//
+	// `priorContext` is the same as in ContextInjector: prior-turns thread
+	// digest used to enrich the AME embedding query. Reflex LLM still
+	// classifies intent against `message` alone; priorContext only affects
+	// memory retrieval.
+	ReflexPreparer func(ctx context.Context, userID, message, priorContext string) *ReflexContext
 
 	// RuleEngine evaluates structured rule conditions (scope, intent, state, time, user)
 	// and returns rules that should be active for the current context.
