@@ -162,10 +162,15 @@ func (s *Ship) Run(ctx context.Context) error {
 		}
 	}
 
-	// 2c. Role-based tool allowlist comes from Config (code-driven). Roles
-	// without a list fall back to "no allowlist" inside the role-aware
-	// handlers.
-	deps.RoleTools = core.NewRoleToolStore(s.cfg.RoleTools)
+	// 2c. Role-based tool allowlist comes from the `role_tools` table
+	// (migration 007). Tunable per-role without redeploy. Roles without
+	// a row fall back to "no allowlist" inside the role-aware handlers.
+	if rt, rtErr := core.LoadRoleToolStore(ctx, shipDB); rtErr != nil {
+		s.logger.Warn("role_tools not loaded, all-tools-available fallback", "error", rtErr)
+		deps.RoleTools = core.NewRoleToolStore(nil)
+	} else {
+		deps.RoleTools = rt
+	}
 
 	// 2d. Prompts: file-backed store rooted at Config.Prompts. If the
 	// directory is empty, individual Get calls error and callers fall
