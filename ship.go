@@ -130,6 +130,13 @@ func (s *Ship) Run(ctx context.Context) error {
 	}
 	defer deps.Close()
 
+	// Propagate Config-level callbacks into the freshly-initialised deps.
+	// The host wires these onto cfg before calling blueship.New (e.g.
+	// Arlene's Layer 2 actor manager exposes EmitTurnCompleted as the
+	// hook). Done here rather than in InitDeps so InitDeps stays a pure
+	// constructor of stores/clients.
+	deps.TurnCompletedHook = s.cfg.Gateway.TurnCompletedHook
+
 	// 2. Auto-migrate runtime tables
 	shipDB, err := deps.DB("ship")
 	if err != nil {

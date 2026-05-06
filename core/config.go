@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Config controls BlueShip runtime behavior.
@@ -226,6 +228,15 @@ type GatewayConfig struct {
 	// Per-user /debug toggles still work on top of this (they only matter
 	// when the config flag is off).
 	Debug bool
+
+	// TurnCompletedHook fires after the gateway successfully sends an
+	// assistant reply to the user (across Telegram batch, Telegram
+	// streaming, voice streaming, and WebSocket batch transports). The
+	// host (e.g. Arlene's Layer 2 sleep-time agent) uses this signal to
+	// drive per-user state machines without polling. The hook runs in a
+	// goroutine inside the gateway, so a slow callback doesn't add
+	// latency to the response path. Nil = no-op.
+	TurnCompletedHook func(ctx context.Context, userID, sessionID uuid.UUID) `yaml:"-" json:"-"`
 }
 
 // applyDefaults fills in zero values with sensible defaults.
