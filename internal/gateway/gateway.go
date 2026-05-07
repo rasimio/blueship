@@ -589,7 +589,7 @@ func formatRulesAsGuidance(rules []bs.ActiveRule) string {
 // sendDebugDump builds a full debug dump and sends as txt file via Telegram.
 // No-op for non-Telegram transports (WS-only, etc.) — Telegram is the only
 // sink that supports document attachments today.
-func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx, reflexGuidance string, preTraces, cortexTraces []agent.ToolTrace, engineRuleCount int) {
+func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx, reflexGuidance, msgText string, preTraces, cortexTraces []agent.ToolTrace, engineRuleCount int) {
 	if g.tg == nil || !g.tg.IsConfigured() {
 		return
 	}
@@ -598,6 +598,19 @@ func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx,
 	b.WriteString("=== DEBUG DUMP ===\n")
 	b.WriteString(fmt.Sprintf("Time: %s\n", time.Now().In(g.tz).Format("2006-01-02 15:04:05")))
 	b.WriteString(fmt.Sprintf("User: %s\n\n", us.ChatID))
+
+	// Full Cortex SYSTEM PROMPT — the complete plain text that lands in
+	// the LLM's `system` channel before any conversation history. Includes
+	// PREAMBLE / SOUL / AGENTS / behavioral rules that the model loaded
+	// from .md files. Shown verbatim (no truncation) so we can answer
+	// "what does the model actually see?".
+	b.WriteString("=== SYSTEM PROMPT (full plain text) ===\n")
+	if g.systemPrompt != "" {
+		b.WriteString(g.systemPrompt)
+	} else {
+		b.WriteString("(empty)")
+	}
+	b.WriteString("\n\n")
 
 	// AME Traces (injected context)
 	b.WriteString("=== AME TRACES (injected context) ===\n")
@@ -679,6 +692,42 @@ func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx,
 			fmt.Fprintf(&b, "  → %s\n", t.Output)
 		}
 	}
+
+	// Final layout: how Cortex actually sees the input. The gateway
+	// composes prompt = (system) g.systemPrompt | (messages) chat history
+	// where the LAST user message gets the [context]<reflexGuidance>\n\n<injectedCtx>[/context]
+	// prefix glued to the actual user text. AME traces are NOT in the
+	// system channel — they ride in as a prefix to the user message.
+	// This is the single most useful section if you want to know "what
+	// does the model see and where".
+	b.WriteString("=== FINAL CORTEX INPUT LAYOUT ===\n")
+	b.WriteString("system:\n")
+	b.WriteString("  [current_datetime: ...] + <SYSTEM PROMPT shown above>\n\n")
+	b.WriteString("messages: ...прошлая история чата...\n\n")
+	b.WriteString("LAST user message (что Cortex реально видит как user input в этот turn):\n")
+	b.WriteString("---BEGIN---\n")
+	combinedCtx := ""
+	if reflexGuidance != "" && injectedCtx != "" {
+		combinedCtx = reflexGuidance + "\n\n" + injectedCtx
+	} else if reflexGuidance != "" {
+		combinedCtx = reflexGuidance
+	} else {
+		combinedCtx = injectedCtx
+	}
+	if combinedCtx != "" {
+		b.WriteString("[context]\n")
+		b.WriteString(combinedCtx)
+		if !strings.HasSuffix(combinedCtx, "\n") {
+			b.WriteString("\n")
+		}
+		b.WriteString("[/context]\n\n")
+	}
+	if msgText != "" {
+		b.WriteString(msgText)
+	} else {
+		b.WriteString("(empty)")
+	}
+	b.WriteString("\n---END---\n\n")
 
 	// Send as file
 	chatID := us.ChatID
@@ -1026,7 +1075,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			g.emitTurnCompleted(us, sess)
 		}
 		if us.DebugMode || g.deps.Config.Gateway.Debug {
-			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, result.ToolTraces, engineRuleCount)
+			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, msgText, preTraces, result.ToolTraces, engineRuleCount)
 		}
 		return
 	}
@@ -1137,7 +1186,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	g.emitTurnCompleted(us, sess)
 
 	if us.DebugMode || g.deps.Config.Gateway.Debug {
-		go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, preTraces, cortexTraces, engineRuleCount)
+		go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, msgText, preTraces, cortexTraces, engineRuleCount)
 	}
 	if g.deps.Config.TTS != nil && g.shouldSendVoice(ctx, us, sink) {
 		go g.synthesizeAndSendVoice(ctx, sink, us, reply)
