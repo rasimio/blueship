@@ -237,6 +237,18 @@ type GatewayConfig struct {
 	// goroutine inside the gateway, so a slow callback doesn't add
 	// latency to the response path. Nil = no-op.
 	TurnCompletedHook func(ctx context.Context, userID, sessionID uuid.UUID) `yaml:"-" json:"-"`
+
+	// AgentIterationCompletedHook is the agent_task analogue of
+	// TurnCompletedHook: it fires after every successful (non-error)
+	// iteration of an agent_task, regardless of strategy or terminal
+	// state (Pause / Done / continue). Hosts use this to attach a
+	// write-time pipeline (e.g. Arlene's AgentSaver) so research
+	// artifacts produced inside background iterations land in the same
+	// obligatory memory pipeline as chat-turn findings — without asking
+	// the LLM to call memory_save inside the agent loop. Runs in a
+	// goroutine; receiver is responsible for its own DB/embedding work.
+	// Nil = no-op.
+	AgentIterationCompletedHook func(ctx context.Context, task AgentTask, result IterationResult) `yaml:"-" json:"-"`
 }
 
 // applyDefaults fills in zero values with sensible defaults.

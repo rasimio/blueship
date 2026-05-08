@@ -100,6 +100,16 @@ type Deps struct {
 	// loop. Nil = no consumer registered, hook is skipped.
 	TurnCompletedHook func(ctx context.Context, userID, sessionID uuid.UUID)
 
+	// AgentIterationCompletedHook fires after each successful iteration
+	// of an agent_task (any strategy: recurring / direct / structured /
+	// delegate). Receiver gets the task as-was at handler entry plus the
+	// IterationResult (Pause / Done / continue + Output / Progress).
+	// Used by hosts to drive per-iteration memory writes (research
+	// artifacts → AME) so background loops persist findings without the
+	// LLM having to call memory_save itself. Runs in a goroutine. Nil =
+	// no consumer registered.
+	AgentIterationCompletedHook func(ctx context.Context, task AgentTask, result IterationResult)
+
 	// SelfAgentID returns the Ship's own Fleet-issued agent id, or "" if
 	// Fleet hasn't bootstrapped yet. Used by delegate-strategy handlers
 	// so the peer can route status callbacks back here.
@@ -137,6 +147,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		RuleEngine:        d.RuleEngine,
 		MessageEncoder:    d.MessageEncoder,
 		TurnCompletedHook: d.TurnCompletedHook,
+		AgentIterationCompletedHook: d.AgentIterationCompletedHook,
 		pool:              d.pool,
 	}
 }

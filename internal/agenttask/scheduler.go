@@ -245,6 +245,14 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		return
 	}
 
+	// Fire iteration-completed hook (e.g. Arlene's AgentSaver). Goroutine
+	// so a slow consumer can't stall the scheduler tick. Receiver gets
+	// task as-was at handler entry plus IterationResult — terminal state
+	// is encoded in result.Done / result.Pause, not on the task itself.
+	if s.deps.AgentIterationCompletedHook != nil {
+		go s.deps.AgentIterationCompletedHook(context.Background(), task, result)
+	}
+
 	notified := result.Notify != "" && s.notify != nil && !strings.Contains(result.Notify, "[no-op]")
 	if notified {
 		s.notify(dbCtx, task.UserID, result.Notify)

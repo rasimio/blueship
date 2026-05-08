@@ -136,6 +136,7 @@ func (s *Ship) Run(ctx context.Context) error {
 	// hook). Done here rather than in InitDeps so InitDeps stays a pure
 	// constructor of stores/clients.
 	deps.TurnCompletedHook = s.cfg.Gateway.TurnCompletedHook
+	deps.AgentIterationCompletedHook = s.cfg.Gateway.AgentIterationCompletedHook
 
 	// 2. Auto-migrate runtime tables
 	shipDB, err := deps.DB("ship")
