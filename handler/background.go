@@ -26,9 +26,10 @@ import (
 // until an external callback wakes the task. The list of pause-triggering
 // tool names is agent-configurable; it is NOT hardcoded here.
 type Background struct {
-	tz          *time.Location
-	pauseTools  map[string]bool // tool names that trigger pause when invoked
-	reviseTools map[string]bool // tool names that count as a "revision" (escalation guard)
+	tz           *time.Location
+	pauseTools   map[string]bool // tool names that trigger pause when invoked
+	reviseTools  map[string]bool // tool names that count as a "revision" (escalation guard)
+	defaultTools []string        // role-level tool allowlist enforced at registry-execute level
 }
 
 // NewBackground constructs a scheduled-task handler.
@@ -42,18 +43,30 @@ type Background struct {
 // same peer task the handler pauses and notifies the owner. Prevents
 // inner-thought-style agent loops from getting stuck revising a peer
 // forever. Pass nil/empty to disable the guard.
-func NewBackground(tz *time.Location, pauseTools, reviseTools map[string]bool) *Background {
+//
+// defaultTools — the role-level tool allowlist returned by DefaultTools().
+// Empty/nil means "every registered tool is callable" (full registry),
+// which is what generic agents want when they trust their model not to
+// invent tool names. Hosts that need a hard ceiling (e.g. Arlene's
+// background role MUST NOT be able to call agent_task_create no matter
+// what the model decides to spit out) pass an explicit allowlist here.
+// This is enforced at the scheduler's registry-subset step, so the
+// downstream Loop can't Execute() anything outside the list — even if
+// the model emits a tool_use the schema didn't advertise (e.g. Gemma's
+// occasional plain-text-tool-call habit, or providers that don't strictly
+// validate against the schema).
+func NewBackground(tz *time.Location, pauseTools, reviseTools map[string]bool, defaultTools []string) *Background {
 	if pauseTools == nil {
 		pauseTools = map[string]bool{}
 	}
 	if reviseTools == nil {
 		reviseTools = map[string]bool{}
 	}
-	return &Background{tz: tz, pauseTools: pauseTools, reviseTools: reviseTools}
+	return &Background{tz: tz, pauseTools: pauseTools, reviseTools: reviseTools, defaultTools: defaultTools}
 }
 
 func (b *Background) DefaultTools() []string {
-	return nil
+	return b.defaultTools
 }
 
 const maxRevisions = 3
