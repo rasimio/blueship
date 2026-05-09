@@ -254,6 +254,9 @@ func (s *Ship) Run(ctx context.Context) error {
 		// Build a global tool registry for agent tasks.
 		globalRegistry := core.NewToolRegistry()
 		tool.RegisterBuiltinTools(globalRegistry, deps)
+		if err := tool.RegisterBrowserTools(globalRegistry, deps); err != nil {
+			return fmt.Errorf("register browser tools: %w", err)
+		}
 		if err := tool.RegisterAgentTaskTools(globalRegistry, deps); err != nil {
 			return fmt.Errorf("register agent_task tools: %w", err)
 		}
@@ -869,6 +872,9 @@ func (s *Ship) startA2A(ctx context.Context, deps *Deps, reg *moduleRegistry) er
 	// rebuilt separately on each request, but the A2A path never sees those.
 	a2aReg := core.NewToolRegistry()
 	tool.RegisterBuiltinTools(a2aReg, deps)
+	if err := tool.RegisterBrowserTools(a2aReg, deps); err != nil {
+		s.logger.Warn("a2a: register browser tools failed", "error", err)
+	}
 	if err := tool.RegisterAgentTaskTools(a2aReg, deps); err != nil {
 		s.logger.Warn("a2a: register agent_task tools failed", "error", err)
 	}

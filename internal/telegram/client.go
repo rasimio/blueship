@@ -430,9 +430,67 @@ var (
 	reCodeBlock = regexp.MustCompile("(?s)```(?:\\w*\n)?(.*?)```")
 	reInline    = regexp.MustCompile("`([^`]+)`")
 	reBold      = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	// LaTeX-style math leaks from streaming providers (Codex / Gemini
+	// occasionally emit `$\rightarrow$`, `$\alpha$`, `$x^2$` instead of
+	// using Unicode). Telegram doesn't render LaTeX, so the raw form
+	// shows up as `$\rightarrow$` in the chat. Strip the wrappers and
+	// substitute the most common arrow / inequality symbols. We don't
+	// try to be a full LaTeX parser — just a few high-frequency offenders
+	// that show up when models pretend they're writing for arxiv.
+	reLatexInline = regexp.MustCompile(`\$([^$\n]{1,80})\$`)
+	// Subword tokenization glitches: a model occasionally emits
+	// `Princ\_iple` (escaped underscore mid-word) when it streams a long
+	// English word — we strip that escape so the word reads cleanly.
+	// Only mid-word `\_`, leave standalone `\_` alone.
+	reEscapedUnderscoreMidWord = regexp.MustCompile(`(\w)\\_(\w)`)
+)
+
+// latexToUnicode maps the LaTeX commands that show up most often in
+// model output to their Unicode equivalents. Anything not in the map
+// is dropped along with the surrounding `$…$` — it would render as
+// raw LaTeX otherwise. Extend this list when new offenders surface;
+// no need for full LaTeX coverage.
+var latexToUnicode = strings.NewReplacer(
+	`\rightarrow`, `→`,
+	`\Rightarrow`, `⇒`,
+	`\leftarrow`, `←`,
+	`\Leftarrow`, `⇐`,
+	`\leftrightarrow`, `↔`,
+	`\to`, `→`,
+	`\gets`, `←`,
+	`\geq`, `≥`,
+	`\leq`, `≤`,
+	`\neq`, `≠`,
+	`\approx`, `≈`,
+	`\times`, `×`,
+	`\cdot`, `·`,
+	`\pm`, `±`,
+	`\infty`, `∞`,
+	`\alpha`, `α`,
+	`\beta`, `β`,
+	`\gamma`, `γ`,
+	`\delta`, `δ`,
+	`\lambda`, `λ`,
+	`\mu`, `μ`,
+	`\sigma`, `σ`,
+	`\pi`, `π`,
+	`\theta`, `θ`,
+	`\Delta`, `Δ`,
+	`\Sigma`, `Σ`,
+	`\Omega`, `Ω`,
 )
 
 func markdownToHTML(text string) string {
+	// Pre-pass 1: substitute LaTeX symbols inside `$...$` wrappers, then
+	// drop the wrappers themselves. Done BEFORE HTML escaping so the
+	// substituted Unicode (→, ≥, etc.) survives untouched.
+	text = reLatexInline.ReplaceAllStringFunc(text, func(match string) string {
+		inner := match[1 : len(match)-1]
+		return latexToUnicode.Replace(inner)
+	})
+	// Pre-pass 2: heal mid-word escaped underscores ("Princ\_iple" → "Principle").
+	text = reEscapedUnderscoreMidWord.ReplaceAllString(text, `$1$2`)
+
 	text = strings.ReplaceAll(text, "&", "&amp;")
 	text = strings.ReplaceAll(text, "<", "&lt;")
 	text = strings.ReplaceAll(text, ">", "&gt;")

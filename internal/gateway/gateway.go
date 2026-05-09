@@ -17,6 +17,7 @@ import (
 
 	"github.com/rasimio/blueship/agent"
 	bs "github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/internal/browser"
 	"github.com/rasimio/blueship/internal/openai"
 	"github.com/rasimio/blueship/internal/telegram"
 	"github.com/rasimio/blueship/internal/user"
@@ -315,6 +316,35 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 		}
 	}
 
+	// PDF attachments — extract text via the same pure-Go decoder
+	// browser_fetch uses for web-found PDFs. The file lands in the
+	// turn as `[pdf: filename.pdf]\n--- Page 1 ---\n…` so cortex can
+	// reason over the contents and cite by page. Limit matches
+	// browser.PDFMaxBytes so a giant scan can't blow memory.
+	if msg.Document != nil && isPDFDocument(msg.Document) {
+		content, err := g.tg.DownloadFile(ctx, msg.Document.FileID, browser.PDFMaxBytes)
+		if err != nil {
+			g.logger.Warn("failed to download pdf", "error", err, "file", msg.Document.FileName)
+		} else if pdfText, pages, err := browser.ExtractPDFText(content); err != nil {
+			g.logger.Warn("failed to extract pdf text", "error", err, "file", msg.Document.FileName, "size", len(content))
+			// Surface the failure to cortex so it can ask the user for a
+			// different file rather than silently "reading" nothing.
+			fileText := fmt.Sprintf("[pdf: %s — extraction failed: %v]", msg.Document.FileName, err)
+			if text != "" {
+				text = text + "\n\n" + fileText
+			} else {
+				text = fileText
+			}
+		} else {
+			fileText := fmt.Sprintf("[pdf: %s — %d pages]%s", msg.Document.FileName, pages, pdfText)
+			if text != "" {
+				text = text + "\n\n" + fileText
+			} else {
+				text = fileText
+			}
+		}
+	}
+
 	if msg.Voice != nil && g.whisper != nil && g.whisper.IsConfigured() {
 		audio, err := g.tg.DownloadFile(ctx, msg.Voice.FileID, 10*1024*1024)
 		if err != nil {
@@ -451,6 +481,23 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 	})
 }
 
+// isPDFDocument identifies Telegram document attachments that should
+// be routed through the PDF text extractor. Trusts mime type when set
+// to application/pdf; falls back to filename extension because Telegram
+// clients don't always populate mime_type for forwarded files.
+func isPDFDocument(doc *telegram.Document) bool {
+	if doc == nil || doc.FileID == "" {
+		return false
+	}
+	if strings.HasPrefix(strings.ToLower(doc.MimeType), "application/pdf") {
+		return true
+	}
+	if strings.HasSuffix(strings.ToLower(doc.FileName), ".pdf") {
+		return true
+	}
+	return false
+}
+
 func isTextFile(doc *telegram.Document) bool {
 	if doc == nil || doc.FileID == "" {
 		return false
@@ -514,6 +561,9 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 	userDeps := g.deps.ForUser(userID, chatID, isOwner)
 	registry := bs.NewToolRegistry()
 	tool.RegisterBuiltinTools(registry, userDeps)
+	if err := tool.RegisterBrowserTools(registry, userDeps); err != nil {
+		g.logger.Warn("gateway: register browser tools failed", "error", err)
+	}
 	if err := tool.RegisterAgentTaskTools(registry, userDeps); err != nil {
 		g.logger.Warn("gateway: register agent_task tools failed", "error", err)
 	}

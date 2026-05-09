@@ -4,10 +4,40 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/rasimio/blueship/core"
 )
+
+// reURLRequirement matches evidentiary requirements written into the
+// acceptance_criteria itself, e.g. "at least 3 URL citations",
+// "≥5 sources", "minimum of 3 URLs". Generic pattern: an integer
+// followed by a noun that's clearly source-shaped. Stays language-
+// neutral by parsing structure, not vocabulary — host agents that
+// want this gate enforced just include the phrasing in the criteria
+// they themselves author. Captures the count.
+var reURLRequirement = regexp.MustCompile(`(?i)\b(\d{1,3})\s*\+?\s*(?:url|urls|source|sources|citation|citations|reference|references|link|links)\b`)
+
+// extractURLRequirement returns the largest integer N from any
+// "N urls / sources / citations / refs / links" phrase in criteria,
+// or 0 if none is found. Largest wins so a criteria saying both
+// "list 3 sources" and "minimum 5 citations" enforces the stricter 5.
+func extractURLRequirement(criteria string) int {
+	matches := reURLRequirement.FindAllStringSubmatch(criteria, -1)
+	max := 0
+	for _, m := range matches {
+		n, err := strconv.Atoi(m[1])
+		if err != nil {
+			continue
+		}
+		if n > max {
+			max = n
+		}
+	}
+	return max
+}
 
 // AcceptanceVerdict is the parsed JSON the evaluator LLM returns.
 type AcceptanceVerdict struct {
@@ -37,17 +67,37 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 		desc = *task.Description
 	}
 
+	// Evidentiary gate is opt-in via the acceptance_criteria itself.
+	// If the host's criteria contains an explicit "N URLs / sources /
+	// citations" phrase, the evaluator counts URLs in the result and
+	// surfaces the gap to the LLM reviewer as a structured note. No
+	// language-specific keyword detection — host agents that want this
+	// gate write the requirement into the criteria they author. Keeps
+	// blueship language-neutral; the persona layer (Arlene cortex) is
+	// where "research" semantics live and where the criteria is shaped.
+	requiredURLs := extractURLRequirement(*task.AcceptanceCriteria)
+	urlCount := 0
+	if requiredURLs > 0 {
+		urlCount = strings.Count(result, "http://") + strings.Count(result, "https://")
+	}
+
 	system := `You are a strict acceptance-criteria reviewer. Given a task description, an acceptance_criteria string, and a result, decide whether the result demonstrably meets every part of the criteria.
 
 Reply with JSON only, no prose:
   {"met": true, "reason": "<one sentence why>"}
   {"met": false, "reason": "<one sentence naming what's missing>"}
 
-Be strict: half-done work is not done. Criteria like "code is reviewed" require evidence the review happened, not just that code exists.`
+Be strict: half-done work is not done. Criteria like "code is reviewed" require evidence the review happened, not just that code exists. If the criteria specifies a minimum number of URL citations / sources, the result must contain at least that many distinct source URLs — a polished write-up with zero or too-few URLs is a synthesis from training data, not evidence-grounded work.`
+
+	extraHint := ""
+	if requiredURLs > 0 {
+		extraHint = fmt.Sprintf("\n\nEVIDENTIARY GATE (parsed from criteria): the criteria asks for at least %d URL citations; the result currently contains %d distinct URL strings (http:// or https://). If %d < %d, fail with reason naming the gap.",
+			requiredURLs, urlCount, urlCount, requiredURLs)
+	}
 
 	user := fmt.Sprintf(
-		"TASK: %s\n\nDESCRIPTION:\n%s\n\nACCEPTANCE CRITERIA:\n%s\n\nRESULT:\n%s\n\nDoes the result meet the acceptance criteria?",
-		task.Title, desc, *task.AcceptanceCriteria, result,
+		"TASK: %s\n\nDESCRIPTION:\n%s\n\nACCEPTANCE CRITERIA:\n%s\n\nRESULT:\n%s%s\n\nDoes the result meet the acceptance criteria?",
+		task.Title, desc, *task.AcceptanceCriteria, result, extraHint,
 	)
 
 	model := deps.Config.Models.Primary.ForRouter()
