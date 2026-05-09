@@ -98,6 +98,17 @@ type IterationResult struct {
 	Progress json.RawMessage // saved to DB between iterations
 	Output   string          // final text (when Done=true)
 	Notify   string          // send to user immediately (milestone, blocker)
+
+	// IsFinal is set by the scheduler (NOT the handler) after the
+	// acceptance-criteria gate decides whether a Done-claim is the real
+	// terminal state. Recurring tasks: handler's Done is authoritative,
+	// IsFinal mirrors Done. Non-recurring with criteria: IsFinal is true
+	// only when the criteria evaluator agreed; rejected drafts get
+	// Done=true / IsFinal=false so AgentIterationCompletedHook receivers
+	// (Saver) can avoid persisting "final" reports the gate hasn't
+	// approved yet. Non-recurring without criteria: IsFinal mirrors Done.
+	// Pause / continue iterations: IsFinal=false.
+	IsFinal bool
 }
 
 // TaskProgress is structured progress for multi-iteration background tasks.

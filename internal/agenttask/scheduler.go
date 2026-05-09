@@ -245,13 +245,20 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		return
 	}
 
-	// Fire iteration-completed hook (e.g. Arlene's AgentSaver). Goroutine
-	// so a slow consumer can't stall the scheduler tick. Receiver gets
-	// task as-was at handler entry plus IterationResult — terminal state
-	// is encoded in result.Done / result.Pause, not on the task itself.
-	if s.deps.AgentIterationCompletedHook != nil {
-		go s.deps.AgentIterationCompletedHook(context.Background(), task, result)
-	}
+	// Defer the iteration-completed hook so it fires at function return,
+	// AFTER every branch has had a chance to mutate result.IsFinal.
+	// Closure captures `result` by reference (it's a named return-style
+	// local), so the hook sees the final state — IsFinal=true only when
+	// the acceptance gate has actually approved a Done-claim, not on
+	// every Done-from-handler intermediate. Without this delay, a Saver
+	// that gates on result.IsFinal would still fire on rejected drafts
+	// because Done was already true at hook time. Goroutine inside so a
+	// slow consumer doesn't stall executeTask completion.
+	defer func() {
+		if s.deps.AgentIterationCompletedHook != nil {
+			go s.deps.AgentIterationCompletedHook(context.Background(), task, result)
+		}
+	}()
 
 	notified := result.Notify != "" && s.notify != nil && !strings.Contains(result.Notify, "[no-op]")
 	if notified {
@@ -305,6 +312,11 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			}
 		}
 
+		// Acceptance passed (or no criteria) → this Done-claim IS the
+		// final terminal state. Mark the result so the deferred
+		// AgentIterationCompletedHook can persist a single research_report
+		// instead of one per rejected draft.
+		result.IsFinal = true
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "done"),
 			attribute.Int("agent_task.output_size_bytes", len(result.Output)),
