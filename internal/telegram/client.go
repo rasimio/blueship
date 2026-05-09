@@ -148,7 +148,7 @@ func (c *Client) SendMessageWithKeyboard(ctx context.Context, chatID int64, text
 	}
 	payload := map[string]any{
 		"chat_id":    chatID,
-		"text":       text,
+		"text":       markdownToHTML(text),
 		"parse_mode": "HTML",
 		"reply_markup": map[string]any{
 			"inline_keyboard": rows,
@@ -158,6 +158,16 @@ func (c *Client) SendMessageWithKeyboard(ctx context.Context, chatID int64, text
 }
 
 // EditMessageText edits an existing message's text and keyboard.
+//
+// Streaming reply paths (Codex / Gemini SSE) update one message in
+// place via this method as new chunks arrive — so the same Markdown→HTML
+// pre-processing the SendMessage path applies must apply here too,
+// otherwise models that emit `**bold**` end up rendered as literal
+// asterisks inside a parse_mode=HTML message (Telegram doesn't strip
+// unrecognised markup, it shows it). Without this, formatting
+// "intermittently broke depending on the model" — non-streaming
+// providers used SendMessage and got conversion; streaming providers
+// hit EditMessageText and didn't.
 func (c *Client) EditMessageText(ctx context.Context, chatID int64, messageID int, text string, rows [][]InlineKeyboardButton) error {
 	if !c.IsConfigured() {
 		return fmt.Errorf("telegram bot not configured")
@@ -165,7 +175,7 @@ func (c *Client) EditMessageText(ctx context.Context, chatID int64, messageID in
 	payload := map[string]any{
 		"chat_id":    chatID,
 		"message_id": messageID,
-		"text":       text,
+		"text":       markdownToHTML(text),
 		"parse_mode": "HTML",
 	}
 	if rows != nil {
