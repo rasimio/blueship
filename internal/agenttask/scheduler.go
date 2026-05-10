@@ -260,12 +260,25 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		}
 	}()
 
-	notified := result.Notify != "" && s.notify != nil && !strings.Contains(result.Notify, "[no-op]")
-	if notified {
-		s.notify(dbCtx, task.UserID, result.Notify)
-	}
+	// Don't fire s.notify here — gate it on each branch's outcome below.
+	// shouldNotify computes the predicate once; each branch decides
+	// whether to actually push to the user. Critical for research-style
+	// agent_tasks with strict acceptance criteria: handler returns Done
+	// with a long Output, evaluator rejects (0 URLs, etc.), and we used
+	// to push the rejected draft to chat anyway because notify ran above
+	// the gate. On 2026-05-10 task 988183c5 leaked a 6.5K-char fake
+	// "AWM final report" to Telegram on iter 15 right before the gate
+	// failed it for missing citations — exactly this bug.
+	shouldNotify := result.Notify != "" && s.notify != nil && !strings.Contains(result.Notify, "[no-op]")
+	notified := false
 
 	if result.Pause {
+		// Pause carries explicit milestone notifications (handler sets
+		// Notify only when there's something user-actionable). Push.
+		if shouldNotify {
+			s.notify(dbCtx, task.UserID, result.Notify)
+			notified = true
+		}
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "paused"),
 			attribute.Bool("agent_task.notified", notified),
@@ -315,8 +328,14 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		// Acceptance passed (or no criteria) → this Done-claim IS the
 		// final terminal state. Mark the result so the deferred
 		// AgentIterationCompletedHook can persist a single research_report
-		// instead of one per rejected draft.
+		// instead of one per rejected draft. Also: only NOW push the
+		// finished output to the user; pre-acceptance notify would leak
+		// rejected drafts.
 		result.IsFinal = true
+		if shouldNotify {
+			s.notify(dbCtx, task.UserID, result.Notify)
+			notified = true
+		}
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "done"),
 			attribute.Int("agent_task.output_size_bytes", len(result.Output)),
@@ -349,6 +368,13 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			go s.onStatusChange(context.Background(), task)
 		}
 	} else {
+		// Mid-task iteration. Push only when the handler explicitly
+		// flagged something user-relevant via Notify (milestone, blocker)
+		// — random in-progress output is noise, not a message.
+		if shouldNotify {
+			s.notify(dbCtx, task.UserID, result.Notify)
+			notified = true
+		}
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "iteration_done"),
 			attribute.Bool("agent_task.notified", notified),

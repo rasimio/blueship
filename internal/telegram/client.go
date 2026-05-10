@@ -437,7 +437,27 @@ var (
 	// substitute the most common arrow / inequality symbols. We don't
 	// try to be a full LaTeX parser — just a few high-frequency offenders
 	// that show up when models pretend they're writing for arxiv.
-	reLatexInline = regexp.MustCompile(`\$([^$\n]{1,80})\$`)
+	reLatexInline = regexp.MustCompile(`\$([^$\n]{1,400})\$`)
+	// Inside `$...$`: rewrite the most common LaTeX structural commands
+	// to a readable plain-text form. Handled in this order:
+	//   \frac{a}{b}  →  (a/b)
+	//   \text{xyz} / \mathrm{xyz} / \mathbf{xyz} / \mathit{xyz} →  xyz
+	//   _{xyz}        →  _xyz   (subscript without braces)
+	//   ^{xyz}        →  ^xyz   (superscript without braces)
+	// Everything else (single-token commands like \sigma, \rightarrow)
+	// goes through latexToUnicode below. What stays as `\foo` after both
+	// passes is a long-tail command we don't render — better than
+	// leaving the whole `$…$` block intact.
+	reLatexFrac        = regexp.MustCompile(`\\frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}`)
+	reLatexBraced      = regexp.MustCompile(`\\(?:text|mathrm|mathbf|mathit|operatorname)\s*\{([^{}]+)\}`)
+	reLatexSubscript   = regexp.MustCompile(`_\{([^{}]+)\}`)
+	reLatexSuperscript = regexp.MustCompile(`\^\{([^{}]+)\}`)
+	// Strip residual single-token LaTeX commands the unicode map didn't
+	// catch (e.g. `\textbf` mid-string after \text already ran). Without
+	// this they'd render verbatim. Conservative: only strips commands
+	// followed by space/punct/end so we don't eat backslash-escaped
+	// regex content elsewhere.
+	reLatexResidual = regexp.MustCompile(`\\[a-zA-Z]+\b`)
 	// Subword tokenization glitches: a model occasionally emits
 	// `Princ\_iple` (escaped underscore mid-word) when it streams a long
 	// English word — we strip that escape so the word reads cleanly.
@@ -481,12 +501,21 @@ var latexToUnicode = strings.NewReplacer(
 )
 
 func markdownToHTML(text string) string {
-	// Pre-pass 1: substitute LaTeX symbols inside `$...$` wrappers, then
-	// drop the wrappers themselves. Done BEFORE HTML escaping so the
-	// substituted Unicode (→, ≥, etc.) survives untouched.
+	// Pre-pass 1: rewrite LaTeX inside `$...$` wrappers to a plain-text
+	// approximation, then drop the wrappers themselves. Done BEFORE HTML
+	// escaping so substituted Unicode (→, ≥, σ, etc.) survives untouched.
+	// Order matters: structural commands (\frac, \text) first, then
+	// subscript/superscript braces, then unicode token map, then strip
+	// residual long-tail commands.
 	text = reLatexInline.ReplaceAllStringFunc(text, func(match string) string {
 		inner := match[1 : len(match)-1]
-		return latexToUnicode.Replace(inner)
+		inner = reLatexFrac.ReplaceAllString(inner, "($1/$2)")
+		inner = reLatexBraced.ReplaceAllString(inner, "$1")
+		inner = reLatexSubscript.ReplaceAllString(inner, "_$1")
+		inner = reLatexSuperscript.ReplaceAllString(inner, "^$1")
+		inner = latexToUnicode.Replace(inner)
+		inner = reLatexResidual.ReplaceAllString(inner, "")
+		return inner
 	})
 	// Pre-pass 2: heal mid-word escaped underscores ("Princ\_iple" → "Principle").
 	text = reEscapedUnderscoreMidWord.ReplaceAllString(text, `$1$2`)
