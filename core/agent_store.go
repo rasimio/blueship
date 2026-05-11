@@ -239,6 +239,12 @@ func (s *AgentTaskStore) RecordIteration(ctx context.Context, rec IterationRecor
 	if tc == "" || tc == "null" {
 		rec.ToolCalls = json.RawMessage("[]")
 	}
+	// Same for progress — empty bytes cast to jsonb raise 22P02
+	// (invalid_text_representation). Default to an empty object.
+	pg := strings.TrimSpace(string(rec.Progress))
+	if pg == "" {
+		rec.Progress = json.RawMessage("{}")
+	}
 	var accMet any
 	if rec.AcceptanceMet != nil {
 		accMet = *rec.AcceptanceMet

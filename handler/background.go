@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,6 +13,61 @@ import (
 	"github.com/rasimio/blueship/agent"
 	"github.com/rasimio/blueship/core"
 )
+
+// recentSearchResultURLs pulls URLs out of browser_search outputs in
+// the last N iterations of a task. Returns deduplicated URLs in the
+// order they appeared (most recent first), capped at the limit so the
+// injected prompt block doesn't bloat. Used by the fetch-rhythm
+// dictation in Background.Run — the agent gets a concrete list of
+// "open one of THESE" instead of an abstract "fetch something".
+func recentSearchResultURLs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID, limit int) []string {
+	if deps.DB == nil {
+		return nil
+	}
+	db, err := deps.DB("ship")
+	if err != nil {
+		return nil
+	}
+	rows, err := db.QueryContext(ctx, `
+		WITH recent AS (
+		  SELECT tool_calls FROM blueship.agent_task_iterations
+		  WHERE task_id = $1 ORDER BY iteration DESC LIMIT 3
+		)
+		SELECT tc->>'output' FROM recent, jsonb_array_elements(tool_calls) AS tc
+		WHERE tc->>'name' = 'browser_search'`, taskID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	urlRe := reBrowserSearchURL
+	seen := map[string]struct{}{}
+	out := []string{}
+	for rows.Next() {
+		var output string
+		if err := rows.Scan(&output); err != nil {
+			continue
+		}
+		for _, m := range urlRe.FindAllStringSubmatch(output, -1) {
+			u := m[1]
+			if _, ok := seen[u]; ok {
+				continue
+			}
+			seen[u] = struct{}{}
+			out = append(out, u)
+			if len(out) >= limit {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+// reBrowserSearchURL pulls "url":"…" pairs out of a browser_search
+// tool result. The result JSON looks like
+//   {"results":[{"title":"…","url":"https://…","snippet":"…"}, …]}
+// and a regex over the serialised form is cheaper than parsing the
+// whole nested JSON when we just want the URLs.
+var reBrowserSearchURL = regexp.MustCompile(`"url"\s*:\s*"(https?://[^"]+)"`)
 
 // recentBrowserToolUsage counts browser_search vs browser_fetch calls
 // across the last `lastN` iterations of a task by reading the
@@ -266,33 +322,46 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// browser_fetch after every 2-3 browser_search; on 2026-05-11 task
 	// 24b8ac16 the model ignored that for 6 iterations straight (1
 	// search + 0 fetch per iter). Prompts alone don't enforce ratios.
-	// Read the recent iteration audit log and, if the model has been
-	// searching without reading, prepend a HARD warning to msg. The
-	// downstream acceptance gate already rejects results that cite
-	// URLs the task never fetched; this just surfaces the consequence
-	// earlier so the model corrects mid-task instead of burning the
-	// whole iteration budget.
+	//
+	// Earlier version of this guard issued a PROHIBITION ("don't run
+	// another browser_search until you fetch") and the model went
+	// completely passive — iter 9-10 of 24b8ac16 returned empty output
+	// with zero tool calls. Negative rule with no alternative paralysed
+	// the agent. Replaced with a POSITIVE DICTATION: pull URLs from the
+	// task's prior search results and instruct the model to fetch one
+	// specific URL right now. Concrete next action beats abstract
+	// prohibition.
 	if instructionKey == "background-task" && task.Iteration >= 2 {
 		searches, fetches := recentBrowserToolUsage(ctx, deps, task.ID, 3)
 		if searches >= 3 && fetches == 0 {
+			urls := recentSearchResultURLs(ctx, deps, task.ID, 5)
+			var urlsBlock string
+			if len(urls) > 0 {
+				urlsBlock = "\nURLs your recent browser_search calls surfaced:\n"
+				for i, u := range urls {
+					urlsBlock += fmt.Sprintf("  %d. %s\n", i+1, u)
+				}
+				urlsBlock += "Pick the most relevant URL and call browser_fetch on it as your VERY FIRST action this iteration.\n"
+			} else {
+				urlsBlock = "Re-issue a focused browser_search and then immediately browser_fetch the top result.\n"
+			}
 			msg += fmt.Sprintf(
-				"\n\n[SYSTEM ENFORCEMENT — read this before doing ANYTHING else]\n"+
-					"Last 3 iterations: %d browser_search calls, 0 browser_fetch calls.\n"+
-					"This is the pattern that fails the acceptance gate — only URLs you\n"+
-					"actually fetch via browser_fetch count as citations. Substring\n"+
-					"`https://` in your output is NOT a citation; the gate cross-references\n"+
-					"your `tool_calls` history. Do NOT run another browser_search this\n"+
-					"iteration until you have called browser_fetch on at least one URL\n"+
-					"from your prior search results. Pick the most promising URL and read\n"+
-					"the page in full.",
-				searches)
+				"\n\n[SYSTEM ENFORCEMENT — read before any tool call]\n"+
+					"Last 3 iterations: %d browser_search, 0 browser_fetch. This pattern\n"+
+					"WILL fail the acceptance gate — only URLs you actually fetch via\n"+
+					"browser_fetch count as citations. Substring `https://` in output is\n"+
+					"NOT a citation; the gate cross-references your tool_calls history.\n"+
+					"%s"+
+					"Do NOT skip the fetch. Do NOT just describe what you would fetch.\n"+
+					"CALL browser_fetch RIGHT NOW.",
+				searches, urlsBlock)
 		} else if searches >= 6 && fetches < searches/3 {
 			msg += fmt.Sprintf(
 				"\n\n[SYSTEM ENFORCEMENT]\n"+
-					"Last 3 iterations: %d searches, %d fetches — ratio is too low.\n"+
-					"Target is ≈2:1, you are at %d:%d. Slow down on search, read more pages\n"+
-					"in full this iteration before producing any synthesis.",
-				searches, fetches, searches, fetches)
+					"Recent ratio is search=%d fetch=%d — too low. Target ≈2:1.\n"+
+					"Pick an unread URL from your prior search results and call\n"+
+					"browser_fetch on it this iteration before any further synthesis.",
+				searches, fetches)
 		}
 	}
 
