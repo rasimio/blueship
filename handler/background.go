@@ -7,9 +7,52 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/rasimio/blueship/agent"
 	"github.com/rasimio/blueship/core"
 )
+
+// recentBrowserToolUsage counts browser_search vs browser_fetch calls
+// across the last `lastN` iterations of a task by reading the
+// agent_task_iterations audit log. Returns (searches, fetches). Used
+// by the fetch-rhythm enforcement to inject a hard warning into the
+// next iteration's user message when the model is searching without
+// reading. Both zero on DB errors — caller treats absence of data as
+// "no enforcement needed", which is the safe fallback.
+func recentBrowserToolUsage(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID, lastN int) (searches, fetches int) {
+	if deps.DB == nil {
+		return 0, 0
+	}
+	db, err := deps.DB("ship")
+	if err != nil {
+		return 0, 0
+	}
+	rows, err := db.QueryContext(ctx, `
+		WITH recent AS (
+		  SELECT tool_calls FROM blueship.agent_task_iterations
+		  WHERE task_id = $1 ORDER BY iteration DESC LIMIT $2
+		)
+		SELECT tc->>'name' FROM recent, jsonb_array_elements(tool_calls) AS tc`,
+		taskID, lastN)
+	if err != nil {
+		return 0, 0
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			continue
+		}
+		switch name {
+		case "browser_search":
+			searches++
+		case "browser_fetch":
+			fetches++
+		}
+	}
+	return searches, fetches
+}
 
 // Background implements core.AgentHandler for recurring scheduled tasks
 // (heartbeat, inner-thought, session-summary, etc.). Long-running goals
@@ -217,6 +260,40 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	remaining := task.MaxIterations - (task.Iteration + 1)
 	if remaining <= 3 && remaining > 0 {
 		msg += fmt.Sprintf("\n\nLow iteration budget: %d remaining.", remaining)
+	}
+
+	// Fetch-rhythm enforcement. Background-task.md tells the model to
+	// browser_fetch after every 2-3 browser_search; on 2026-05-11 task
+	// 24b8ac16 the model ignored that for 6 iterations straight (1
+	// search + 0 fetch per iter). Prompts alone don't enforce ratios.
+	// Read the recent iteration audit log and, if the model has been
+	// searching without reading, prepend a HARD warning to msg. The
+	// downstream acceptance gate already rejects results that cite
+	// URLs the task never fetched; this just surfaces the consequence
+	// earlier so the model corrects mid-task instead of burning the
+	// whole iteration budget.
+	if instructionKey == "background-task" && task.Iteration >= 2 {
+		searches, fetches := recentBrowserToolUsage(ctx, deps, task.ID, 3)
+		if searches >= 3 && fetches == 0 {
+			msg += fmt.Sprintf(
+				"\n\n[SYSTEM ENFORCEMENT — read this before doing ANYTHING else]\n"+
+					"Last 3 iterations: %d browser_search calls, 0 browser_fetch calls.\n"+
+					"This is the pattern that fails the acceptance gate — only URLs you\n"+
+					"actually fetch via browser_fetch count as citations. Substring\n"+
+					"`https://` in your output is NOT a citation; the gate cross-references\n"+
+					"your `tool_calls` history. Do NOT run another browser_search this\n"+
+					"iteration until you have called browser_fetch on at least one URL\n"+
+					"from your prior search results. Pick the most promising URL and read\n"+
+					"the page in full.",
+				searches)
+		} else if searches >= 6 && fetches < searches/3 {
+			msg += fmt.Sprintf(
+				"\n\n[SYSTEM ENFORCEMENT]\n"+
+					"Last 3 iterations: %d searches, %d fetches — ratio is too low.\n"+
+					"Target is ≈2:1, you are at %d:%d. Slow down on search, read more pages\n"+
+					"in full this iteration before producing any synthesis.",
+				searches, fetches, searches, fetches)
+		}
 	}
 
 	// 6. Run reflex pipeline (same System 1/2 architecture as cortex gateway).
