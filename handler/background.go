@@ -333,7 +333,16 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// prohibition.
 	if instructionKey == "background-task" && task.Iteration >= 2 {
 		searches, fetches := recentBrowserToolUsage(ctx, deps, task.ID, 3)
-		if searches >= 3 && fetches == 0 {
+		totalSearches, totalFetches := recentBrowserToolUsage(ctx, deps, task.ID, 100)
+		// Trigger when EITHER:
+		// (a) recent 3 iters look bad (≥2 search, 0 fetch — covers "stuck"),
+		// (b) running total ratio is unacceptable (≥4 search, fetch < searches/3).
+		// Earlier "≥3 in last 3" never fired because the model spreads
+		// searches across iterations with empty / synthesis iters between
+		// them, so the sliding window never accumulates that count.
+		hardTrigger := (searches >= 2 && fetches == 0) ||
+			(totalSearches >= 4 && totalFetches < totalSearches/3)
+		if hardTrigger {
 			urls := recentSearchResultURLs(ctx, deps, task.ID, 5)
 			var urlsBlock string
 			if len(urls) > 0 {
@@ -347,14 +356,14 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			}
 			msg += fmt.Sprintf(
 				"\n\n[SYSTEM ENFORCEMENT — read before any tool call]\n"+
-					"Last 3 iterations: %d browser_search, 0 browser_fetch. This pattern\n"+
-					"WILL fail the acceptance gate — only URLs you actually fetch via\n"+
-					"browser_fetch count as citations. Substring `https://` in output is\n"+
-					"NOT a citation; the gate cross-references your tool_calls history.\n"+
+					"Search/fetch ratio is failing. Recent 3 iters: %d search / %d fetch.\n"+
+					"Task total: %d search / %d fetch. The acceptance gate will reject\n"+
+					"a result that cites URLs you never fetched — only URLs in your\n"+
+					"actual browser_fetch tool_calls count; substring `https://` in\n"+
+					"output is NOT a citation.\n"+
 					"%s"+
-					"Do NOT skip the fetch. Do NOT just describe what you would fetch.\n"+
-					"CALL browser_fetch RIGHT NOW.",
-				searches, urlsBlock)
+					"Do NOT just describe what you would fetch. CALL browser_fetch RIGHT NOW.",
+				searches, fetches, totalSearches, totalFetches, urlsBlock)
 		} else if searches >= 6 && fetches < searches/3 {
 			msg += fmt.Sprintf(
 				"\n\n[SYSTEM ENFORCEMENT]\n"+
