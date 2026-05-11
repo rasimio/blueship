@@ -201,6 +201,43 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 	return s.Get(ctx, task.ID)
 }
 
+// FetchedDocRecord is one row written into agent_task_fetched_docs by
+// browser_fetch when it runs inside an agent_task iteration. Captures
+// both the URL the agent asked for and the URL we actually opened —
+// preprint /abs/ URLs get rewritten to /pdf/ before fetch, and the
+// grounding evaluator must normalise on either side when cross-
+// referencing cited URLs in the report against fetched docs.
+type FetchedDocRecord struct {
+	TaskID       uuid.UUID
+	Iteration    int
+	RequestedURL string
+	FinalURL     string
+	Title        string
+	Text         string
+	SourceKind   string
+	PageCount    int
+}
+
+// RecordFetchedDoc appends a fetched-document row for an agent_task
+// iteration. Called from the browser_fetch tool handler immediately
+// after a successful fetch. Bypasses agent_task_iterations.tool_calls
+// because that column is fed through the 500-char ToolTrace truncation
+// in agent.Loop — the text Gate C needs is the FULL page body.
+//
+// Fire-and-forget from the caller's perspective: any error is the
+// caller's to log; we don't want a transient DB hiccup to fail an
+// otherwise-good fetch.
+func (s *AgentTaskStore) RecordFetchedDoc(ctx context.Context, rec FetchedDocRecord) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO agent_task_fetched_docs (
+			task_id, iteration, requested_url, final_url,
+			title, text, source_kind, page_count
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		rec.TaskID, rec.Iteration, rec.RequestedURL, rec.FinalURL,
+		rec.Title, rec.Text, rec.SourceKind, rec.PageCount)
+	return err
+}
+
 // IterationRecord is the payload the scheduler hands AgentTaskStore.RecordIteration
 // after every executeTask call. One row per iteration; never updated.
 //
@@ -224,6 +261,16 @@ type IterationRecord struct {
 	Error            string
 	TraceID          string
 	SpanID           string
+
+	// Gate C (claim-level grounding) audit fields. Nil/empty when Gate C
+	// didn't run this iteration (no acceptance criteria, no fetched
+	// documents, LLM error, malformed verdict). Persisted into
+	// agent_task_iterations so calibration queries can pick a threshold
+	// from real data and so post-mortems on missed hallucinations have
+	// the full claim breakdown to inspect.
+	GroundedCount    *int
+	UngroundedCount  *int
+	GroundingVerdict json.RawMessage
 }
 
 // RecordIteration appends an audit row for one completed iteration of
@@ -249,22 +296,40 @@ func (s *AgentTaskStore) RecordIteration(ctx context.Context, rec IterationRecor
 	if rec.AcceptanceMet != nil {
 		accMet = *rec.AcceptanceMet
 	}
+	// nil-aware coercion: writing a typed *int that's nil through
+	// database/sql ends up as 0 instead of NULL because the int gets
+	// dereferenced lossily. Stash into `any` so a nil pointer reaches
+	// the driver as untyped nil → NULL.
+	var grounded, ungrounded any
+	if rec.GroundedCount != nil {
+		grounded = *rec.GroundedCount
+	}
+	if rec.UngroundedCount != nil {
+		ungrounded = *rec.UngroundedCount
+	}
+	var groundingVerdict any
+	if len(rec.GroundingVerdict) > 0 {
+		groundingVerdict = string(rec.GroundingVerdict)
+	}
 	durationMs := int(rec.CompletedAt.Sub(rec.StartedAt).Milliseconds())
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_task_iterations (
 			task_id, iteration, started_at, completed_at, duration_ms,
 			outcome, is_final, acceptance_met, acceptance_reason,
 			output, notify, tool_calls, progress, error,
-			trace_id, span_id
+			trace_id, span_id,
+			grounded_count, ungrounded_count, grounding_verdict
 		) VALUES ($1, $2, $3, $4, $5,
 		          $6, $7, $8, $9,
 		          $10, $11, $12::jsonb, $13::jsonb, $14,
-		          $15, $16)
+		          $15, $16,
+		          $17, $18, $19::jsonb)
 		ON CONFLICT (task_id, iteration, started_at) DO NOTHING`,
 		rec.TaskID, rec.Iteration, rec.StartedAt, rec.CompletedAt, durationMs,
 		rec.Outcome, rec.IsFinal, accMet, rec.AcceptanceReason,
 		rec.Output, rec.Notify, string(rec.ToolCalls), string(rec.Progress), rec.Error,
 		rec.TraceID, rec.SpanID,
+		grounded, ungrounded, groundingVerdict,
 	)
 	return err
 }

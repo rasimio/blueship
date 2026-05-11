@@ -42,6 +42,14 @@ type FetchOptions struct {
 
 // FetchResult is the structured return value for Fetch.
 type FetchResult struct {
+	// RequestedURL is exactly what the caller passed in — preserved
+	// separately from URL because we rewrite preprint /abs/ URLs to
+	// /pdf/ before fetch (so the PDF decoder gets the full paper instead
+	// of the 200-word abstract page). The grounding evaluator persists
+	// both: cited URLs in a report may use the abstract form, while the
+	// fetched-docs index uses the resolved form, and the cross-reference
+	// must normalise on either side. Equal to URL when no rewrite fires.
+	RequestedURL string `json:"requested_url,omitempty"`
 	URL          string `json:"url"`
 	Title        string `json:"title"`
 	Text         string `json:"text"`
@@ -77,10 +85,21 @@ type SearchOptions struct {
 //
 // Domain is computed code-side from URL so the model can rank source
 // authority without us shipping a free-form snippet field.
+//
+// Tier is a 1-5 source-quality signal:
+//   - 1: primary peer-reviewed / official venues (arxiv, nature, NeurIPS)
+//   - 2: official lab / company research blogs (anthropic, deepmind)
+//   - 3: docs / official repositories (github docs, stackoverflow)
+//   - 4: default for everything not in the map — assume neutral
+//   - 5: known low-trust SEO / content-farm domains to explicitly avoid
+//
+// The prompt asks the cortex to prefer 1-2 and to cross-check 4-5 hits
+// against a 1-2 source before citing.
 type SearchResultItem struct {
 	Title  string `json:"title"`
 	URL    string `json:"url"`
 	Domain string `json:"domain"`
+	Tier   int    `json:"tier"`
 }
 
 // SearchResult is the full payload returned to the caller.
@@ -158,6 +177,16 @@ func Fetch(ctx context.Context, opts FetchOptions) (*FetchResult, error) {
 	if opts.URL == "" {
 		return nil, fmt.Errorf("browser.Fetch: empty URL")
 	}
+	// Track what the caller asked for, separately from what we actually
+	// open. Preprint hosts (arxiv et al) serve a 200-word abstract page
+	// at /abs/X and the full paper at /pdf/X.pdf — we always want the
+	// latter so the grounding evaluator has the real content to audit
+	// against. The rewrite is idempotent and only fires for hosts with
+	// a known abstract↔pdf mapping; everything else passes through.
+	requestedURL := opts.URL
+	opts.URL = RewriteAbstractToPDF(opts.URL)
+	hasRewrite := opts.URL != requestedURL
+
 	proxy := resolveProxy(opts.Proxy)
 
 	// Fast path: the URL is obviously a PDF (extension, query). Skip
@@ -165,18 +194,51 @@ func Fetch(ctx context.Context, opts FetchOptions) (*FetchResult, error) {
 	// document text to document.body.innerText, so chromedp would
 	// return chrome page chrome instead of the article.
 	if looksLikePDFURL(opts.URL) {
-		if res, err := fetchPDF(ctx, opts.URL, proxy); err == nil {
-			return &FetchResult{
-				URL:        res.URL,
-				Title:      res.Title,
-				Text:       res.Text,
-				PageCount:  res.PageCount,
-				SourceKind: "pdf",
-			}, nil
+		res, err := fetchPDF(ctx, opts.URL, proxy)
+		if err == nil {
+			// Solid extraction: full paper text. Common path for arxiv
+			// after rewrite. Threshold 1000 chars catches corrupted
+			// files / OCR-only scanned papers / paywall stubs that
+			// decode to a few hundred bytes of noise.
+			if len(res.Text) >= 1000 {
+				return &FetchResult{
+					RequestedURL: requestedURL,
+					URL:          res.URL,
+					Title:        res.Title,
+					Text:         res.Text,
+					PageCount:    res.PageCount,
+					SourceKind:   "pdf",
+				}, nil
+			}
+			// Thin extraction. If the rewrite swapped /abs/ → /pdf/,
+			// fall back to the abstract page via chromedp — abstract
+			// is better than a few hundred chars of decoded garbage.
+			// If we had no rewrite (caller passed a raw .pdf URL),
+			// return what we have — chromedp on a .pdf renders the
+			// viewer chrome, not the article, so falling through
+			// would make it worse.
+			if hasRewrite {
+				opts.URL = requestedURL
+				// fall through to chromedp on original URL
+			} else {
+				return &FetchResult{
+					RequestedURL: requestedURL,
+					URL:          res.URL,
+					Title:        res.Title,
+					Text:         res.Text,
+					PageCount:    res.PageCount,
+					SourceKind:   "pdf",
+				}, nil
+			}
+		} else if hasRewrite {
+			// fetchPDF errored on the rewritten URL. Reset to original
+			// so chromedp gets the abstract page rather than the broken
+			// /pdf/ URL that just failed.
+			opts.URL = requestedURL
 		}
-		// fetchPDF returned errNotPDF or a real error. Fall through to
-		// chromedp; for the errNotPDF case the URL might be misnamed
-		// (CDN serving HTML at .pdf), and chromedp will handle that.
+		// else: original URL was already PDF-like, fetchPDF failed →
+		// fall through to chromedp on it (errNotPDF case: CDN serving
+		// HTML at .pdf, chromedp will handle).
 	}
 
 	wait := opts.WaitMS
@@ -194,7 +256,7 @@ func Fetch(ctx context.Context, opts FetchOptions) (*FetchResult, error) {
 	browserCtx, hardCancel := context.WithTimeout(browserCtx, 45*time.Second)
 	defer hardCancel()
 
-	out := &FetchResult{URL: opts.URL, SourceKind: "html"}
+	out := &FetchResult{RequestedURL: requestedURL, URL: opts.URL, SourceKind: "html"}
 
 	// Anti-bot: drop the navigator.webdriver flag before any page
 	// script runs. Cheap, doesn't beat real fingerprinting, but bypasses
@@ -329,6 +391,7 @@ func runGoogle(ctx context.Context, query string, limit int) ([]SearchResultItem
 		_ = json.Unmarshal(raw, &items)
 	}
 	fillDomain(items)
+	fillTier(items)
 	return items, nil
 }
 
@@ -350,6 +413,81 @@ func fillDomain(items []SearchResultItem) {
 	}
 }
 
+// domainTiers maps a known domain to a 1-5 quality tier. Unknown domains
+// fall back to tier 4 (neutral) — explicit 5s are the SEO/content-farm
+// hosts we want the cortex to actively avoid. Tier 1 should be earned
+// by a peer-review process or an institution with editorial oversight;
+// tier 2 by being the canonical primary source for a lab's own work;
+// tier 5 by a track record of factually-shaky AI-generated listicles.
+//
+// Hardcoded map deliberately — MVP. After 6 months of new venues popping
+// up this should lift into a config table; until then a one-line code
+// addition is cheaper than a migration per source.
+var domainTiers = map[string]int{
+	// Tier 1 — primary / peer-reviewed
+	"arxiv.org":       1,
+	"biorxiv.org":     1,
+	"medrxiv.org":     1,
+	"openreview.net":  1,
+	"nature.com":      1,
+	"science.org":     1,
+	"frontiersin.org": 1,
+	"plos.org":        1,
+	"ieee.org":        1,
+	"ieeexplore.ieee.org": 1,
+	"acm.org":         1,
+	"dl.acm.org":      1,
+	"neurips.cc":      1,
+	"aclweb.org":      1,
+	"aclanthology.org": 1,
+	"jmlr.org":        1,
+	"proceedings.mlr.press": 1,
+
+	// Tier 2 — official lab / company research blogs and papers
+	"anthropic.com":     2,
+	"openai.com":        2,
+	"deepmind.google":   2,
+	"deepmind.com":      2,
+	"ai.meta.com":       2,
+	"research.google":   2,
+	"research.facebook.com": 2,
+	"microsoft.com":     2,
+	"huggingface.co":    2,
+
+	// Tier 3 — docs / code / Q&A
+	"github.com":          3,
+	"docs.python.org":     3,
+	"stackoverflow.com":   3,
+	"pytorch.org":         3,
+	"tensorflow.org":      3,
+	"wikipedia.org":       3,
+	"en.wikipedia.org":    3,
+
+	// Tier 5 — known low-trust SEO / AI-generated content farms.
+	// Conservative list; expand from postmortems, not from gut.
+	"medium.com":      5,
+	"dev.to":          5,
+	"billionhopes.ai": 5,
+	"towardsai.net":   5,
+}
+
+// fillTier populates the Tier field on each result from its Domain.
+// fillDomain MUST be called first — fillTier relies on Domain already
+// being normalised (www. stripped, lowercase host).
+func fillTier(items []SearchResultItem) {
+	for i := range items {
+		if items[i].Domain == "" {
+			items[i].Tier = 4
+			continue
+		}
+		if t, ok := domainTiers[items[i].Domain]; ok {
+			items[i].Tier = t
+			continue
+		}
+		items[i].Tier = 4
+	}
+}
+
 func runDDG(ctx context.Context, query string, limit int) ([]SearchResultItem, error) {
 	target := "https://html.duckduckgo.com/html/?q=" + url.QueryEscape(query)
 	var raw json.RawMessage
@@ -366,6 +504,7 @@ func runDDG(ctx context.Context, query string, limit int) ([]SearchResultItem, e
 		_ = json.Unmarshal(raw, &items)
 	}
 	fillDomain(items)
+	fillTier(items)
 	return items, nil
 }
 
@@ -430,4 +569,83 @@ func ddgExtractJS(limit int) string {
   });
   return out;
 })()`, limit)
+}
+
+// RewriteAbstractToPDF turns preprint-server abstract URLs into their
+// PDF equivalents so the PDF decoder gets the full paper instead of
+// the ~200-word abstract page — which the model cannot reconstruct
+// paper internals from but tries, and confabulates the rest. The 2026-
+// 05-11 DP-TA incident traces directly to this: arxiv abstract opened,
+// then "Zhang et al." invented because the abstract didn't name an
+// author the model could remember.
+//
+// Idempotent: URLs that already point at the PDF pass through. Unknown
+// hosts pass through. Only fires on a small whitelist of preprint hosts
+// where the /abs/ ↔ /pdf/ mapping is canonical and documented; this is
+// not a generic web-page-to-PDF converter.
+//
+// Supported hosts (MVP):
+//
+//	arxiv.org/abs/<id>            → arxiv.org/pdf/<id>.pdf
+//	biorxiv.org/content/<...>     → biorxiv.org/content/<...>.full.pdf
+//	medrxiv.org/content/<...>     → medrxiv.org/content/<...>.full.pdf
+//	openreview.net/forum?id=X     → openreview.net/pdf?id=X
+//
+// Adding a host is a one-line change in the switch; document hosts as
+// they get tested. SSRN intentionally omitted (no PDF without auth).
+//
+// Exported so agent_task evaluator can normalise URLs symmetrically: a
+// report citing `/abs/X` and a fetched_docs row recorded at `/pdf/X.pdf`
+// must match through the same canonicaliser.
+func RewriteAbstractToPDF(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return rawURL
+	}
+	host := strings.TrimPrefix(strings.ToLower(u.Host), "www.")
+
+	switch host {
+	case "arxiv.org":
+		// /abs/<id> → /pdf/<id>.pdf. The ".pdf" suffix is what arxiv's
+		// CDN uses; without it the request still works but redirects,
+		// which costs us a round-trip.
+		if !strings.HasPrefix(u.Path, "/abs/") {
+			return rawURL
+		}
+		id := strings.TrimPrefix(u.Path, "/abs/")
+		id = strings.TrimSuffix(id, "/")
+		if id == "" {
+			return rawURL
+		}
+		u.Path = "/pdf/" + id + ".pdf"
+		return u.String()
+
+	case "biorxiv.org", "medrxiv.org":
+		// /content/.../vN → /content/.../vN.full.pdf. Path may or may
+		// not already end .full.pdf depending on how the link was
+		// shared; idempotent.
+		if !strings.HasPrefix(u.Path, "/content/") {
+			return rawURL
+		}
+		if strings.HasSuffix(u.Path, ".full.pdf") {
+			return rawURL
+		}
+		p := strings.TrimSuffix(u.Path, "/")
+		p = strings.TrimSuffix(p, ".full")
+		u.Path = p + ".full.pdf"
+		return u.String()
+
+	case "openreview.net":
+		// /forum?id=X → /pdf?id=X. Keep the query so the id passes
+		// through; only the path changes.
+		if u.Path != "/forum" {
+			return rawURL
+		}
+		if u.Query().Get("id") == "" {
+			return rawURL
+		}
+		u.Path = "/pdf"
+		return u.String()
+	}
+	return rawURL
 }

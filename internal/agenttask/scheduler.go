@@ -225,6 +225,14 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	}
 	defer cancel()
 
+	// Tag the ctx with task id + iteration so per-task tool side-effects
+	// (e.g. browser_fetch persisting to agent_task_fetched_docs) can
+	// attribute themselves correctly. Chat-mode tool invocations don't
+	// get this tag and skip persistence — non-task callers MUST remain
+	// no-ops.
+	ctx = core.ContextWithTaskID(ctx, task.ID)
+	ctx = core.ContextWithIteration(ctx, task.Iteration+1)
+
 	// Iteration-audit state: captured by the deferred RecordIteration
 	// call below. Each branch (failed / pause / rejected / done / continue)
 	// sets iterationOutcome and the relevant fields before returning, then
@@ -237,6 +245,13 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	var iterationAcceptanceMet *bool
 	var iterationAcceptanceReason string
 	var iterationError string
+	// Gate C audit state. Stays nil/empty when the iteration didn't run
+	// grounding (recurring task / no criteria / no fetched docs / LLM
+	// error during eval). When populated, RecordIteration writes the
+	// triplet into agent_task_iterations for calibration + forensics.
+	var iterationGroundedCount *int
+	var iterationUngroundedCount *int
+	var iterationGroundingVerdict json.RawMessage
 	traceCtx := span.SpanContext()
 
 	result, err := handler.Run(ctx, task, agentDeps)
@@ -265,6 +280,9 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			Error:            iterationError,
 			TraceID:          traceCtx.TraceID().String(),
 			SpanID:           traceCtx.SpanID().String(),
+			GroundedCount:    iterationGroundedCount,
+			UngroundedCount:  iterationUngroundedCount,
+			GroundingVerdict: iterationGroundingVerdict,
 		}
 		go func() {
 			recCtx, recCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -357,6 +375,17 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			met := verdict.Met
 			iterationAcceptanceMet = &met
 			iterationAcceptanceReason = verdict.Reason
+			// Capture Gate C output (always — shadow mode runs even on
+			// pass paths so calibration sees the full distribution).
+			if verdict.Grounding != nil {
+				g := verdict.Grounding.GroundedCount
+				u := verdict.Grounding.UngroundedCount
+				iterationGroundedCount = &g
+				iterationUngroundedCount = &u
+				if blob, err := json.Marshal(verdict.Grounding); err == nil {
+					iterationGroundingVerdict = blob
+				}
+			}
 			if !verdict.Met {
 				iterationOutcome = "rejected"
 				span.SetAttributes(

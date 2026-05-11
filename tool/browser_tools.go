@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
+
 	bs "github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/browser"
 )
@@ -27,9 +29,15 @@ const (
 // renders; PDF URLs (and PDFs found at HTML-named URLs) are decoded
 // pure-Go via ledongthuc/pdf so there's no system dependency on
 // poppler / pdftotext on the host machine.
-func RegisterBrowserTools(r *bs.ToolRegistry, _ *bs.Deps) error {
+//
+// deps is captured by the browser_fetch closure so we can write a row
+// into agent_task_fetched_docs every time a fetch happens during an
+// agent_task iteration. Persisting the full body lets the grounding
+// evaluator (Gate C) audit claims against real page text rather than
+// the 500-char truncated tool trace.
+func RegisterBrowserTools(r *bs.ToolRegistry, deps *bs.Deps) error {
 	r.Register(ToolBrowserSearch,
-		"Web search via headless Chrome (Google with automatic DuckDuckGo fallback on CAPTCHA). Returns {results:[{title,url,domain}], engine_used} — URLs and titles ONLY, no snippets, no descriptions. This is deliberate: search results are a navigation index, not a source of facts. You CANNOT cite anything based on search results alone. The next required step after search is browser_fetch on the most promising URLs; cite facts only from the rendered/extracted text browser_fetch returns. Use the domain field to assess source authority (arxiv.org, official docs, peer-reviewed venues rank higher than blog/SEO content). Runs through VPN (xray), no external API dependency.",
+		"Web search via headless Chrome (Google with automatic DuckDuckGo fallback on CAPTCHA). Returns {results:[{title,url,domain,tier}], engine_used} — URLs, titles, domain, and quality tier ONLY, no snippets, no descriptions. This is deliberate: search results are a navigation index, not a source of facts. You CANNOT cite anything based on search results alone. The next required step after search is browser_fetch on the most promising URLs; cite facts only from the rendered/extracted text browser_fetch returns. `tier` is a 1-5 source-quality signal: 1=peer-reviewed/official (arxiv, NeurIPS, nature), 2=official lab blog (anthropic.com, deepmind.com), 3=docs/Q&A (github docs, stackoverflow), 4=neutral default, 5=low-trust SEO/content-farm — prefer tier 1-2 and cross-check tier 4-5 against a tier 1-2 source before citing. Runs through VPN (xray), no external API dependency.",
 		json.RawMessage(`{
 			"type":"object",
 			"properties":{
@@ -94,9 +102,56 @@ func RegisterBrowserTools(r *bs.ToolRegistry, _ *bs.Deps) error {
 			if err != nil {
 				return nil, fmt.Errorf("browser_fetch: %w", err)
 			}
+			persistFetchedDoc(ctx, deps, res)
 			return res, nil
 		},
 	)
 
 	return nil
+}
+
+// persistFetchedDoc writes a row into agent_task_fetched_docs when a
+// browser_fetch runs inside an agent_task iteration. Chat-mode fetches
+// (no task id in ctx) skip persistence — the doc table is sized for
+// background research, not every assistant turn. Errors are logged,
+// not returned: a transient DB hiccup must not fail an otherwise-good
+// fetch the model already paid for.
+func persistFetchedDoc(ctx context.Context, deps *bs.Deps, res *browser.FetchResult) {
+	if deps == nil || res == nil {
+		return
+	}
+	taskID, ok := bs.TaskIDFromContext(ctx)
+	if !ok || taskID == uuid.Nil {
+		return // chat-mode call, nothing to attribute
+	}
+	iteration, _ := bs.IterationFromContext(ctx)
+
+	db, err := deps.DB("ship")
+	if err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("browser_fetch: persist skipped, ship DB unavailable",
+				"task_id", taskID, "error", err)
+		}
+		return
+	}
+	requested := res.RequestedURL
+	if requested == "" {
+		requested = res.URL
+	}
+	store := bs.NewAgentTaskStore(db)
+	err = store.RecordFetchedDoc(ctx, bs.FetchedDocRecord{
+		TaskID:       taskID,
+		Iteration:    iteration,
+		RequestedURL: requested,
+		FinalURL:     res.URL,
+		Title:        res.Title,
+		Text:         res.Text,
+		SourceKind:   res.SourceKind,
+		PageCount:    res.PageCount,
+	})
+	if err != nil && deps.Logger != nil {
+		deps.Logger.Warn("browser_fetch: persist failed",
+			"task_id", taskID, "iteration", iteration,
+			"url", res.URL, "error", err)
+	}
 }

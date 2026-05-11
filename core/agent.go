@@ -169,3 +169,49 @@ type SessionManager interface {
 	GetOrCreate(ctx context.Context, userID, model string) (sessionID string, compactSummary string, err error)
 	Create(ctx context.Context, userID, model string) (sessionID string, err error)
 }
+
+// ctxKey is a private type for keys stored in request contexts so external
+// packages can't collide with us. Used by ContextWithTaskID / ContextWith
+// Iteration and read by tool handlers (e.g. browser_fetch) that need to
+// know which agent_task iteration they're running on so they can persist
+// fetched documents alongside the task instead of dropping the body
+// through the 500-char ToolTrace.
+type ctxKey int
+
+const (
+	ctxKeyTaskID ctxKey = iota
+	ctxKeyIteration
+)
+
+// ContextWithTaskID returns ctx tagged with the running agent_task id.
+// Scheduler stamps this before invoking handler.Run; tool handlers read
+// it to attribute fetched documents and other per-task side-effects.
+func ContextWithTaskID(ctx context.Context, id uuid.UUID) context.Context {
+	return context.WithValue(ctx, ctxKeyTaskID, id)
+}
+
+// TaskIDFromContext extracts the agent_task id stamped by the scheduler.
+// Returns (uuid.Nil, false) when ctx has no task id — chat-mode tools and
+// other non-task callers run this way; persistence side-effects should
+// be a no-op in that case, not an error.
+func TaskIDFromContext(ctx context.Context) (uuid.UUID, bool) {
+	v, ok := ctx.Value(ctxKeyTaskID).(uuid.UUID)
+	return v, ok
+}
+
+// ContextWithIteration returns ctx tagged with the current iteration
+// counter. Together with the task id this lets per-iteration audit
+// records (e.g. agent_task_fetched_docs) be grouped by iteration so
+// the evaluator can distinguish "fetched this iter" from "fetched
+// three iters ago" — load-bearing for the recheck loop in Gate B'.
+func ContextWithIteration(ctx context.Context, iter int) context.Context {
+	return context.WithValue(ctx, ctxKeyIteration, iter)
+}
+
+// IterationFromContext extracts the iteration counter, defaulting to 0
+// when absent. 0 is a real iteration value (the first one), so callers
+// who care MUST check the boolean.
+func IterationFromContext(ctx context.Context) (int, bool) {
+	v, ok := ctx.Value(ctxKeyIteration).(int)
+	return v, ok
+}
