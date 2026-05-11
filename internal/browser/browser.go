@@ -65,10 +65,22 @@ type SearchOptions struct {
 }
 
 // SearchResultItem is one search hit.
+//
+// Snippet is intentionally omitted from the tool-facing JSON. We learned
+// the hard way (2026-05-11 task a4329624: 6 searches, 1 fetch, fake URLs
+// in the "References" section) that returning snippets gives the model
+// enough material to synthesise a "report" without ever calling fetch —
+// the snippet IS the answer, from the model's perspective. Anthropic's
+// "Building effective agents" makes the point explicitly: tool ergonomics
+// shape behaviour more than prompt instructions. Strip the synthesis
+// surface, model has to fetch for content.
+//
+// Domain is computed code-side from URL so the model can rank source
+// authority without us shipping a free-form snippet field.
 type SearchResultItem struct {
-	Title   string `json:"title"`
-	URL     string `json:"url"`
-	Snippet string `json:"snippet"`
+	Title  string `json:"title"`
+	URL    string `json:"url"`
+	Domain string `json:"domain"`
 }
 
 // SearchResult is the full payload returned to the caller.
@@ -316,7 +328,26 @@ func runGoogle(ctx context.Context, query string, limit int) ([]SearchResultItem
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &items)
 	}
+	fillDomain(items)
 	return items, nil
+}
+
+// fillDomain populates the Domain field on each result from its URL,
+// stripping the leading www. so the model sees authoritative-looking
+// names ("arxiv.org", not "www.arxiv.org") and can rank source quality
+// without us shipping a free-form snippet to confabulate from.
+func fillDomain(items []SearchResultItem) {
+	for i := range items {
+		u, err := url.Parse(items[i].URL)
+		if err != nil || u.Host == "" {
+			continue
+		}
+		host := u.Host
+		if strings.HasPrefix(host, "www.") {
+			host = host[4:]
+		}
+		items[i].Domain = host
+	}
 }
 
 func runDDG(ctx context.Context, query string, limit int) ([]SearchResultItem, error) {
@@ -334,6 +365,7 @@ func runDDG(ctx context.Context, query string, limit int) ([]SearchResultItem, e
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &items)
 	}
+	fillDomain(items)
 	return items, nil
 }
 

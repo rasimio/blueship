@@ -29,7 +29,7 @@ const (
 // poppler / pdftotext on the host machine.
 func RegisterBrowserTools(r *bs.ToolRegistry, _ *bs.Deps) error {
 	r.Register(ToolBrowserSearch,
-		"Поиск в вебе через headless Chrome (Google с автоматическим fallback на DuckDuckGo при CAPTCHA). Возвращает {results:[{title,url,snippet}], engine_used}. Snippets — это навигационные подсказки от поисковика, НЕ содержание страницы; чтобы цитировать факты — следом дёргай browser_fetch на конкретный URL. Работает через VPN (xray), не зависит от внешних API. Используй сколько нужно итераций (refine query, fetch more) до уверенного ответа со ссылками.",
+		"Web search via headless Chrome (Google with automatic DuckDuckGo fallback on CAPTCHA). Returns {results:[{title,url,domain}], engine_used} — URLs and titles ONLY, no snippets, no descriptions. This is deliberate: search results are a navigation index, not a source of facts. You CANNOT cite anything based on search results alone. The next required step after search is browser_fetch on the most promising URLs; cite facts only from the rendered/extracted text browser_fetch returns. Use the domain field to assess source authority (arxiv.org, official docs, peer-reviewed venues rank higher than blog/SEO content). Runs through VPN (xray), no external API dependency.",
 		json.RawMessage(`{
 			"type":"object",
 			"properties":{

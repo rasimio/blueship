@@ -208,7 +208,23 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		}
 	}
 	if promptKeys == nil {
-		promptKeys = append(promptKeys, deps.Config.SystemPromptKeys...)
+		// Research workers (direct strategy with the default
+		// "background-task" prompt) must NOT see chat-cortex prompts:
+		// SOUL.md and AGENTS.md ship persona / chat-tool semantics
+		// (caomoji, note_close, message_send markers, +_+ feedback)
+		// that are noise for a research role and actively pull the
+		// model toward chat-style hedging instead of grounded citation.
+		// Background-task.md is self-contained — it tells the model
+		// exactly what shape its work takes. Anything else is bloat.
+		//
+		// Recurring handlers (heartbeat, inner-thought) still get the
+		// chat persona stack because their replies go straight back to
+		// the user in chat voice.
+		if task.Strategy == core.StrategyDirect && instructionKey == "background-task" {
+			// minimal: only the background-task instruction below
+		} else {
+			promptKeys = append(promptKeys, deps.Config.SystemPromptKeys...)
+		}
 	}
 	promptKeys = append(promptKeys, instructionKey)
 
