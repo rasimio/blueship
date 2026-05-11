@@ -200,6 +200,63 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 	return s.Get(ctx, task.ID)
 }
 
+// IterationRecord is the payload the scheduler hands AgentTaskStore.RecordIteration
+// after every executeTask call. One row per iteration; never updated.
+//
+// Outcome is the scheduler's classification of what happened, not a raw
+// IterationResult flag (Done can mean both "passed acceptance" and
+// "rejected by acceptance", which are different outcomes for an
+// operator reading the audit log).
+type IterationRecord struct {
+	TaskID           uuid.UUID
+	Iteration        int
+	StartedAt        time.Time
+	CompletedAt      time.Time
+	Outcome          string          // "done" | "rejected" | "pause" | "continue" | "failed"
+	IsFinal          bool
+	AcceptanceMet    *bool           // nil = not evaluated this iteration
+	AcceptanceReason string          // evaluator's text when met=false
+	Output           string
+	Notify           string
+	ToolCalls        json.RawMessage // jsonb [{name, input, output, error}, ...]
+	Progress         json.RawMessage
+	Error            string
+	TraceID          string
+	SpanID           string
+}
+
+// RecordIteration appends an audit row for one completed iteration of
+// an agent_task. Fire-and-forget from the scheduler — never blocks the
+// main path. Failures are logged but never propagated; the audit log
+// is best-effort, not a correctness barrier.
+func (s *AgentTaskStore) RecordIteration(ctx context.Context, rec IterationRecord) error {
+	if rec.ToolCalls == nil {
+		rec.ToolCalls = json.RawMessage("[]")
+	}
+	var accMet any
+	if rec.AcceptanceMet != nil {
+		accMet = *rec.AcceptanceMet
+	}
+	durationMs := int(rec.CompletedAt.Sub(rec.StartedAt).Milliseconds())
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO agent_task_iterations (
+			task_id, iteration, started_at, completed_at, duration_ms,
+			outcome, is_final, acceptance_met, acceptance_reason,
+			output, notify, tool_calls, progress, error,
+			trace_id, span_id
+		) VALUES ($1, $2, $3, $4, $5,
+		          $6, $7, $8, $9,
+		          $10, $11, $12::jsonb, $13::jsonb, $14,
+		          $15, $16)
+		ON CONFLICT (task_id, iteration, started_at) DO NOTHING`,
+		rec.TaskID, rec.Iteration, rec.StartedAt, rec.CompletedAt, durationMs,
+		rec.Outcome, rec.IsFinal, accMet, rec.AcceptanceReason,
+		rec.Output, rec.Notify, string(rec.ToolCalls), string(rec.Progress), rec.Error,
+		rec.TraceID, rec.SpanID,
+	)
+	return err
+}
+
 // Get fetches a task by ID.
 func (s *AgentTaskStore) Get(ctx context.Context, id uuid.UUID) (AgentTask, error) {
 	var task AgentTask

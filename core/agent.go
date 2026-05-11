@@ -109,6 +109,14 @@ type IterationResult struct {
 	// approved yet. Non-recurring without criteria: IsFinal mirrors Done.
 	// Pause / continue iterations: IsFinal=false.
 	IsFinal bool
+
+	// ToolCallsJSON is the marshalled tool-trace array for this iteration
+	// (`[{name, input, output, error, ...}, ...]`), serialised by the
+	// handler from whatever its inner agent.Loop returned. The scheduler
+	// writes it verbatim into the agent_task_iterations.tool_calls jsonb
+	// column when it records the iteration. Empty/nil means the handler
+	// either didn't use tools or didn't bother to expose the trace.
+	ToolCallsJSON json.RawMessage
 }
 
 // TaskProgress is structured progress for multi-iteration background tasks.

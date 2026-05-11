@@ -225,13 +225,60 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	}
 	defer cancel()
 
+	// Iteration-audit state: captured by the deferred RecordIteration
+	// call below. Each branch (failed / pause / rejected / done / continue)
+	// sets iterationOutcome and the relevant fields before returning, then
+	// the deferred goroutine writes one row to agent_task_iterations. This
+	// is the single source of truth for "what did this iteration do" — the
+	// chat_messages session is destructive (compactor DELETE's), and
+	// agent_tasks.progress is summarised to 500 chars.
+	iterationStartedAt := time.Now()
+	iterationOutcome := "continue"
+	var iterationAcceptanceMet *bool
+	var iterationAcceptanceReason string
+	var iterationError string
+	traceCtx := span.SpanContext()
+
 	result, err := handler.Run(ctx, task, agentDeps)
 
 	// Use background context for all post-handler DB ops — parent ctx may be cancelled on shutdown.
 	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer dbCancel()
 
+	// Audit-log writer fires last, after every branch above has had a
+	// chance to set iterationOutcome / acceptance / error. Goroutine so
+	// the DB write never blocks the scheduler tick.
+	defer func() {
+		rec := core.IterationRecord{
+			TaskID:           task.ID,
+			Iteration:        task.Iteration + 1,
+			StartedAt:        iterationStartedAt,
+			CompletedAt:      time.Now(),
+			Outcome:          iterationOutcome,
+			IsFinal:          result.IsFinal,
+			AcceptanceMet:    iterationAcceptanceMet,
+			AcceptanceReason: iterationAcceptanceReason,
+			Output:           result.Output,
+			Notify:           result.Notify,
+			ToolCalls:        result.ToolCallsJSON,
+			Progress:         result.Progress,
+			Error:            iterationError,
+			TraceID:          traceCtx.TraceID().String(),
+			SpanID:           traceCtx.SpanID().String(),
+		}
+		go func() {
+			recCtx, recCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer recCancel()
+			if err := s.store.RecordIteration(recCtx, rec); err != nil {
+				s.logger.WarnContext(recCtx, "agent-tasks: record iteration failed",
+					"task_id", task.ID, "iteration", rec.Iteration, "error", err)
+			}
+		}()
+	}()
+
 	if err != nil {
+		iterationOutcome = "failed"
+		iterationError = err.Error()
 		span.SetAttributes(attribute.String("agent_task.outcome", "failed"))
 		telemetry.RecordError(span, err)
 		s.logger.ErrorContext(ctx, "agent-tasks: handler failed",
@@ -273,6 +320,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	notified := false
 
 	if result.Pause {
+		iterationOutcome = "pause"
 		// Pause carries explicit milestone notifications (handler sets
 		// Notify only when there's something user-actionable). Push.
 		if shouldNotify {
@@ -306,7 +354,11 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		// the handler's word.
 		if task.Schedule == nil && task.AcceptanceCriteria != nil && *task.AcceptanceCriteria != "" {
 			verdict := evaluateAcceptance(ctx, agentDeps, task, result.Output)
+			met := verdict.Met
+			iterationAcceptanceMet = &met
+			iterationAcceptanceReason = verdict.Reason
 			if !verdict.Met {
+				iterationOutcome = "rejected"
 				span.SetAttributes(
 					attribute.String("agent_task.outcome", "criteria_not_met"),
 					attribute.Bool("agent_task.acceptance_met", false),
@@ -331,6 +383,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		// instead of one per rejected draft. Also: only NOW push the
 		// finished output to the user; pre-acceptance notify would leak
 		// rejected drafts.
+		iterationOutcome = "done"
 		result.IsFinal = true
 		if shouldNotify {
 			s.notify(dbCtx, task.UserID, result.Notify)

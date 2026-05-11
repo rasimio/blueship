@@ -257,6 +257,15 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 	reply := result.Text
 
+	// Serialise tool traces once; every return path passes them through
+	// IterationResult so the scheduler can persist them into the
+	// agent_task_iterations.tool_calls jsonb column. Empty trace yields
+	// `[]` so the column always has a valid JSON array.
+	toolCallsJSON, _ := json.Marshal(result.ToolTraces)
+	if len(toolCallsJSON) == 0 {
+		toolCallsJSON = json.RawMessage("[]")
+	}
+
 	// 8. Scan tool traces for async peer tools and revision tracking.
 	var peerTaskID string
 	calledRevise := false
@@ -305,16 +314,17 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 		// Filter no-op and garbage output (e.g. raw UUIDs from tool results).
 		if clean == "" || strings.Contains(clean, "[no-op]") || isGarbageOutput(clean) {
-			return core.IterationResult{Done: true}, nil
+			return core.IterationResult{Done: true, ToolCallsJSON: toolCallsJSON}, nil
 		}
 		notify := clean
 		if !notifyDefault && !hadNotifyMarker {
 			notify = ""
 		}
 		return core.IterationResult{
-			Done:   true,
-			Output: clean,
-			Notify: notify,
+			Done:          true,
+			Output:        clean,
+			Notify:        notify,
+			ToolCallsJSON: toolCallsJSON,
 		}, nil
 	}
 
@@ -328,6 +338,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			Progress: progressJSON,
 			Notify: fmt.Sprintf("%s — peer task %s failed %d times. Need human input.\n\n%s",
 				task.Title, progress.PeerTaskID, progress.RevisionCount, truncate(reply, 300)),
+			ToolCallsJSON: toolCallsJSON,
 		}, nil
 	}
 
@@ -347,9 +358,11 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		}
 
 		return core.IterationResult{
-			Pause:    true,
-			Progress: progressJSON,
-			Notify:   notify,
+			Pause:         true,
+			Progress:      progressJSON,
+			Notify:        notify,
+			Output:        reply,
+			ToolCallsJSON: toolCallsJSON,
 		}, nil
 	}
 
@@ -363,9 +376,11 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	}
 
 	return core.IterationResult{
-		Done:     false,
-		Progress: progressJSON,
-		Notify:   notify,
+		Done:          false,
+		Progress:      progressJSON,
+		Notify:        notify,
+		Output:        reply,
+		ToolCallsJSON: toolCallsJSON,
 	}, nil
 }
 
