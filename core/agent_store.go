@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -230,7 +231,12 @@ type IterationRecord struct {
 // main path. Failures are logged but never propagated; the audit log
 // is best-effort, not a correctness barrier.
 func (s *AgentTaskStore) RecordIteration(ctx context.Context, rec IterationRecord) error {
-	if rec.ToolCalls == nil {
+	// Normalise tool_calls to a JSON array. Empty / nil / the literal
+	// string "null" (which json.Marshal returns for a nil slice) would
+	// all land as a scalar in the jsonb column and break downstream
+	// jsonb_array_elements queries. Always coerce to "[]".
+	tc := strings.TrimSpace(string(rec.ToolCalls))
+	if tc == "" || tc == "null" {
 		rec.ToolCalls = json.RawMessage("[]")
 	}
 	var accMet any
