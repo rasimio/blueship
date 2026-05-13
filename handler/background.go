@@ -249,8 +249,22 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	}
 
 	// 3. Resolve model: router format for LLM, display name for session.
-	// Task config may override the model role (default: "background").
+	//
+	// Default by strategy: recurring tick-based tasks (heartbeat, inner-
+	// thought, etc.) use the cheap fast `recurring` role; everything else
+	// (direct one-shot deep work, structured plans, etc.) uses `background`
+	// — a more capable model since those iterations do real synthesis or
+	// planning, not 1-minute polling. agent_task is a universal primitive
+	// so the split is strategy-driven, not handler-specific.
+	//
+	// Task config can override either default via `model_role` so a tiny
+	// recurring monitor can run on gemma even if the deploy upgrades the
+	// recurring default, and a giant research task can pin a specific
+	// frontier model without the operator editing config tables.
 	modelRole := "background"
+	if task.Strategy == core.StrategyRecurring {
+		modelRole = "recurring"
+	}
 	if task.Config != nil {
 		var roleCfg struct {
 			ModelRole string `json:"model_role"`
