@@ -81,6 +81,15 @@ type AgentTask struct {
 	CreatedAt     time.Time  `db:"created_at" json:"created_at"`
 
 	SessionID *string `db:"session_id" json:"session_id,omitempty"`
+
+	// RequiredRecheckURLs are URLs the cortex must re-fetch in the next
+	// iteration before submitting another report. Populated by Gate C
+	// (claim-level grounding) when it rejects with ungrounded attribution
+	// or architectural claims tied to a fetched doc. Enforced by Gate B'
+	// at the top of evaluateAcceptance — without an in-iteration re-fetch
+	// of every URL in this list, the next submit is rejected outright.
+	// Stays empty in shadow mode; activates when Gate C flips to enforce.
+	RequiredRecheckURLs pq.StringArray `db:"required_recheck_urls" json:"required_recheck_urls,omitempty"`
 }
 
 // Strategy values.
