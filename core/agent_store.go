@@ -201,40 +201,50 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 	return s.Get(ctx, task.ID)
 }
 
-// FetchedDocRecord is one row written into agent_task_fetched_docs by
-// browser_fetch when it runs inside an agent_task iteration. Captures
-// both the URL the agent asked for and the URL we actually opened —
-// preprint /abs/ URLs get rewritten to /pdf/ before fetch, and the
-// grounding evaluator must normalise on either side when cross-
-// referencing cited URLs in the report against fetched docs.
-type FetchedDocRecord struct {
+// ToolOutputRecord is one row written into agent_task_tool_outputs by
+// any tool that produced a bulky output worth auditing or replaying
+// later. Generic by design: a single store covers research (browser_
+// fetch HTML/PDF bodies), coding (code_repo_read source files), data
+// analysis (db_query CSV blobs), etc. Per-tool semantics live in
+// ToolInput / Metadata jsonb instead of typed columns so adding a new
+// tool never requires a migration.
+//
+// The 500-char ToolTrace truncation in agent.Loop strips bulky output
+// before downstream gates can see it. This store is the escape hatch.
+type ToolOutputRecord struct {
 	TaskID       uuid.UUID
 	Iteration    int
-	RequestedURL string
-	FinalURL     string
-	Title        string
-	Text         string
-	SourceKind   string
-	PageCount    int
+	ToolName     string          // "browser_fetch", "code_repo_read", ...
+	ToolInput    json.RawMessage // raw tool input json
+	Output       string          // the bulky body
+	OutputFormat string          // "html" | "pdf" | "code" | "json" | "csv" | ...
+	Metadata     json.RawMessage // per-tool typed extras
 }
 
-// RecordFetchedDoc appends a fetched-document row for an agent_task
-// iteration. Called from the browser_fetch tool handler immediately
-// after a successful fetch. Bypasses agent_task_iterations.tool_calls
-// because that column is fed through the 500-char ToolTrace truncation
-// in agent.Loop — the text Gate C needs is the FULL page body.
+// RecordToolOutput appends a tool-output row for an agent_task iteration.
+// Called from the tool handler closure immediately after the tool's
+// own work succeeds — write happens once, store is append-only, no
+// updates.
 //
 // Fire-and-forget from the caller's perspective: any error is the
 // caller's to log; we don't want a transient DB hiccup to fail an
-// otherwise-good fetch.
-func (s *AgentTaskStore) RecordFetchedDoc(ctx context.Context, rec FetchedDocRecord) error {
+// otherwise-good tool call.
+func (s *AgentTaskStore) RecordToolOutput(ctx context.Context, rec ToolOutputRecord) error {
+	input := strings.TrimSpace(string(rec.ToolInput))
+	if input == "" || input == "null" {
+		input = "{}"
+	}
+	meta := strings.TrimSpace(string(rec.Metadata))
+	if meta == "" || meta == "null" {
+		meta = "{}"
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO agent_task_fetched_docs (
-			task_id, iteration, requested_url, final_url,
-			title, text, source_kind, page_count
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		rec.TaskID, rec.Iteration, rec.RequestedURL, rec.FinalURL,
-		rec.Title, rec.Text, rec.SourceKind, rec.PageCount)
+		INSERT INTO agent_task_tool_outputs (
+			task_id, iteration, tool_name,
+			tool_input, output, output_format, metadata
+		) VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb)`,
+		rec.TaskID, rec.Iteration, rec.ToolName,
+		input, rec.Output, rec.OutputFormat, meta)
 	return err
 }
 

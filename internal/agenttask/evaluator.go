@@ -2,6 +2,7 @@ package agenttask
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 
 	"github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/browser"
@@ -131,10 +133,11 @@ func isLooksLikeRealURL(s string) bool {
 
 // loadFetchedURLs pulls the set of URLs the agent_task actually invoked
 // browser_fetch on. Reads BOTH the iteration tool-call trace (the
-// historical source, kept for tasks older than the fetched_docs
-// migration) and the agent_task_fetched_docs persistence table (the
+// historical source, kept for tasks older than the tool_outputs
+// migration) and the agent_task_tool_outputs persistence table (the
 // authoritative source going forward — captures the requested URL the
-// agent asked for AND the final URL after the abstract→PDF rewrite).
+// agent asked for AND the final URL after the abstract→PDF rewrite,
+// both in the metadata jsonb).
 // All URLs are canonicalised before insertion so the report-side and
 // fetch-side sets intersect through the same key space.
 //
@@ -153,7 +156,7 @@ func loadFetchedURLs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID)
 	}
 
 	// Path 1: tool_calls jsonb. tool_calls.input is the URL the agent
-	// asked for (pre-rewrite). Survives even when fetched_docs table is
+	// asked for (pre-rewrite). Survives even when tool_outputs table is
 	// missing (older tasks).
 	rows, err := db.QueryContext(ctx, `
 		SELECT tc->>'input' AS input
@@ -173,53 +176,57 @@ func loadFetchedURLs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID)
 		rows.Close()
 	}
 
-	// Path 2: agent_task_fetched_docs. We have both forms here so we
-	// insert both keys (canonURLKey collapses /abs/ ↔ /pdf/ but storing
-	// both protects against an unanticipated host where the canonical
-	// mapping isn't the identity in both directions).
+	// Path 2: agent_task_tool_outputs filtered to browser_fetch. Both
+	// URL forms ride in metadata (requested_url + final_url) so the
+	// rewrite from /abs/ to /pdf/ doesn't break the cross-reference.
 	docRows, err := db.QueryContext(ctx, `
-		SELECT requested_url, final_url
-		FROM blueship.agent_task_fetched_docs
-		WHERE task_id = $1`, taskID)
+		SELECT metadata->>'requested_url', metadata->>'final_url'
+		FROM blueship.agent_task_tool_outputs
+		WHERE task_id = $1 AND tool_name = 'browser_fetch'`, taskID)
 	if err == nil {
 		defer docRows.Close()
 		for docRows.Next() {
-			var requested, final string
+			var requested, final *string
 			if err := docRows.Scan(&requested, &final); err != nil {
 				continue
 			}
-			if k := canonURLKey(requested); k != "" {
-				out[k] = struct{}{}
+			if requested != nil {
+				if k := canonURLKey(*requested); k != "" {
+					out[k] = struct{}{}
+				}
 			}
-			if k := canonURLKey(final); k != "" {
-				out[k] = struct{}{}
+			if final != nil {
+				if k := canonURLKey(*final); k != "" {
+					out[k] = struct{}{}
+				}
 			}
 		}
 	}
 	return out
 }
 
-// FetchedDoc is one persisted fetched document, returned by
-// loadFetchedDocs for the grounding evaluator to audit against.
-type FetchedDoc struct {
-	URL        string // final URL (post-rewrite, after redirects)
-	Title      string
-	Text       string
-	SourceKind string // "html" | "pdf"
-	PageCount  int
-	Iteration  int // which iteration fetched this doc
+// ToolOutput is one persisted tool-output row returned by
+// loadToolOutputs. Generic enough to carry browser_fetch bodies, code
+// reads, db query results, etc. — the consuming gate dereferences
+// Metadata for whatever per-tool fields it needs.
+type ToolOutput struct {
+	ToolName     string
+	ToolInput    json.RawMessage
+	Output       string
+	OutputFormat string         // "html" | "pdf" | "code" | "json" | "csv" | ...
+	Metadata     map[string]any // parsed per-tool extras
+	Iteration    int            // which iteration produced this
 }
 
-// loadFetchedDocs returns every fetched-document row recorded for a
-// task, ordered by fetched_at. The grounding evaluator (Gate C) reads
-// full body text out of these rows because the per-iteration tool_calls
-// trace is truncated to 500 chars by agent.Loop and can't preserve a
-// 25K-char paper body.
+// loadToolOutputs returns every tool-output row recorded for a task,
+// optionally filtered to a list of tool names. Ordered by created_at.
+// Passing nil/empty toolNames returns every tool's outputs (useful for
+// generic forensics views); passing []string{"browser_fetch"} narrows
+// to research grounding's relevant slice.
 //
-// Returns nil on DB error; caller decides whether "no docs" is a hard
-// fail or a no-op (Gate C in shadow mode logs and continues; Gate C in
-// enforce mode rejects if a research task has 0 docs to ground against).
-func loadFetchedDocs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID) []FetchedDoc {
+// Returns nil on DB error; caller decides whether "no outputs" is a
+// hard fail or a no-op.
+func loadToolOutputs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID, toolNames []string) []ToolOutput {
 	if deps.DB == nil {
 		return nil
 	}
@@ -227,26 +234,58 @@ func loadFetchedDocs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID)
 	if err != nil {
 		return nil
 	}
-	rows, err := db.QueryContext(ctx, `
-		SELECT final_url, COALESCE(title, ''), text,
-		       COALESCE(source_kind, ''), COALESCE(page_count, 0), iteration
-		FROM blueship.agent_task_fetched_docs
-		WHERE task_id = $1
-		ORDER BY fetched_at`, taskID)
+	var rows *sql.Rows
+	if len(toolNames) == 0 {
+		rows, err = db.QueryContext(ctx, `
+			SELECT tool_name, tool_input::text, output, output_format,
+			       COALESCE(metadata::text, '{}'), iteration
+			FROM blueship.agent_task_tool_outputs
+			WHERE task_id = $1
+			ORDER BY created_at`, taskID)
+	} else {
+		rows, err = db.QueryContext(ctx, `
+			SELECT tool_name, tool_input::text, output, output_format,
+			       COALESCE(metadata::text, '{}'), iteration
+			FROM blueship.agent_task_tool_outputs
+			WHERE task_id = $1 AND tool_name = ANY($2)
+			ORDER BY created_at`, taskID, pq.Array(toolNames))
+	}
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
-	var out []FetchedDoc
+	var out []ToolOutput
 	for rows.Next() {
-		var d FetchedDoc
-		if err := rows.Scan(&d.URL, &d.Title, &d.Text, &d.SourceKind,
-			&d.PageCount, &d.Iteration); err != nil {
+		var (
+			toolName, inputJSON, output, format, metaJSON string
+			iter                                          int
+		)
+		if err := rows.Scan(&toolName, &inputJSON, &output, &format, &metaJSON, &iter); err != nil {
 			continue
 		}
-		out = append(out, d)
+		meta := map[string]any{}
+		_ = json.Unmarshal([]byte(metaJSON), &meta)
+		out = append(out, ToolOutput{
+			ToolName:     toolName,
+			ToolInput:    json.RawMessage(inputJSON),
+			Output:       output,
+			OutputFormat: format,
+			Metadata:     meta,
+			Iteration:    iter,
+		})
 	}
 	return out
+}
+
+// metaString pulls a string field out of a parsed metadata map. Missing
+// or non-string values return "" — callers use the empty result as a
+// pre-condition signal (e.g. don't render a URL header for a doc with
+// no final_url).
+func metaString(meta map[string]any, key string) string {
+	if v, ok := meta[key].(string); ok {
+		return v
+	}
+	return ""
 }
 
 // AcceptanceVerdict is the parsed JSON the evaluator LLM returns,
@@ -398,7 +437,7 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 	// flips to enforce.
 	var groundingVerdict *GroundingVerdict
 	if requiredURLs > 0 {
-		docs := loadFetchedDocs(ctx, deps, task.ID)
+		docs := loadToolOutputs(ctx, deps, task.ID, []string{"browser_fetch"})
 		if len(docs) > 0 {
 			v := evaluateGrounding(ctx, deps, task, result, docs)
 			groundingVerdict = &v
@@ -569,7 +608,7 @@ Aim for 8-20 claim entries on a typical research report. Each entry should be on
 // The auditor sees up to groundingPerDocCap chars per doc and
 // groundingTotalBudget chars total; older docs get trimmed first
 // when the cap binds.
-func evaluateGrounding(ctx context.Context, deps core.AgentDeps, task core.AgentTask, report string, docs []FetchedDoc) GroundingVerdict {
+func evaluateGrounding(ctx context.Context, deps core.AgentDeps, task core.AgentTask, report string, docs []ToolOutput) GroundingVerdict {
 	if len(docs) == 0 {
 		return GroundingVerdict{
 			Met:    true,
@@ -651,7 +690,7 @@ func pickGroundingModel(deps core.AgentDeps) string {
 // groundingTotalBudget we trim from the END of the list (oldest fetches
 // first) — recency is a decent priority signal when we can't fit
 // everything. A future Phase C TODO swaps this for per-claim retrieval.
-func buildGroundingUserMessage(report string, docs []FetchedDoc) string {
+func buildGroundingUserMessage(report string, docs []ToolOutput) string {
 	// Per-doc cap. Adaptive: if the natural total at 25K/doc would
 	// exceed budget, shrink the per-doc cap so all docs fit.
 	perDoc := groundingPerDocCap
@@ -664,8 +703,15 @@ func buildGroundingUserMessage(report string, docs []FetchedDoc) string {
 	b.WriteString(report)
 	b.WriteString("\n\n[fetched_documents]\n")
 	for i, d := range docs {
-		fmt.Fprintf(&b, "=== Doc %d: %s (%s)\n", i+1, d.Title, d.URL)
-		text := d.Text
+		title := metaString(d.Metadata, "title")
+		// Prefer final_url (post-rewrite, real PDF) but fall back to
+		// requested_url if the tool didn't record both.
+		docURL := metaString(d.Metadata, "final_url")
+		if docURL == "" {
+			docURL = metaString(d.Metadata, "requested_url")
+		}
+		fmt.Fprintf(&b, "=== Doc %d: %s (%s)\n", i+1, title, docURL)
+		text := d.Output
 		if len(text) > perDoc {
 			text = text[:perDoc] + "\n[...truncated...]"
 		}

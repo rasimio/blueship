@@ -102,7 +102,7 @@ func RegisterBrowserTools(r *bs.ToolRegistry, deps *bs.Deps) error {
 			if err != nil {
 				return nil, fmt.Errorf("browser_fetch: %w", err)
 			}
-			persistFetchedDoc(ctx, deps, res)
+			persistBrowserFetchOutput(ctx, deps, input, res)
 			return res, nil
 		},
 	)
@@ -110,48 +110,70 @@ func RegisterBrowserTools(r *bs.ToolRegistry, deps *bs.Deps) error {
 	return nil
 }
 
-// persistFetchedDoc writes a row into agent_task_fetched_docs when a
-// browser_fetch runs inside an agent_task iteration. Chat-mode fetches
-// (no task id in ctx) skip persistence — the doc table is sized for
-// background research, not every assistant turn. Errors are logged,
-// not returned: a transient DB hiccup must not fail an otherwise-good
-// fetch the model already paid for.
-func persistFetchedDoc(ctx context.Context, deps *bs.Deps, res *browser.FetchResult) {
-	if deps == nil || res == nil {
-		return
-	}
-	taskID, ok := bs.TaskIDFromContext(ctx)
-	if !ok || taskID == uuid.Nil {
-		return // chat-mode call, nothing to attribute
-	}
-	iteration, _ := bs.IterationFromContext(ctx)
-
-	db, err := deps.DB("ship")
-	if err != nil {
-		if deps.Logger != nil {
-			deps.Logger.Warn("browser_fetch: persist skipped, ship DB unavailable",
-				"task_id", taskID, "error", err)
-		}
+// persistBrowserFetchOutput adapts a browser.FetchResult into the
+// generic ToolOutputRecord shape and writes it via persistToolOutput.
+// Per-tool typed extras (requested_url for abstract→PDF rewrite
+// auditing, page_count for PDFs, etc.) ride in the Metadata jsonb so
+// the generic store doesn't grow typed columns per tool.
+func persistBrowserFetchOutput(ctx context.Context, deps *bs.Deps, rawInput json.RawMessage, res *browser.FetchResult) {
+	if res == nil {
 		return
 	}
 	requested := res.RequestedURL
 	if requested == "" {
 		requested = res.URL
 	}
-	store := bs.NewAgentTaskStore(db)
-	err = store.RecordFetchedDoc(ctx, bs.FetchedDocRecord{
-		TaskID:       taskID,
-		Iteration:    iteration,
-		RequestedURL: requested,
-		FinalURL:     res.URL,
-		Title:        res.Title,
-		Text:         res.Text,
-		SourceKind:   res.SourceKind,
-		PageCount:    res.PageCount,
+	meta, err := json.Marshal(map[string]any{
+		"requested_url": requested,
+		"final_url":     res.URL,
+		"title":         res.Title,
+		"page_count":    res.PageCount,
 	})
-	if err != nil && deps.Logger != nil {
-		deps.Logger.Warn("browser_fetch: persist failed",
-			"task_id", taskID, "iteration", iteration,
-			"url", res.URL, "error", err)
+	if err != nil {
+		meta = json.RawMessage(`{}`)
+	}
+	persistToolOutput(ctx, deps, bs.ToolOutputRecord{
+		ToolName:     ToolBrowserFetch,
+		ToolInput:    rawInput,
+		Output:       res.Text,
+		OutputFormat: res.SourceKind, // "html" or "pdf"
+		Metadata:     meta,
+	})
+}
+
+// persistToolOutput writes a row into agent_task_tool_outputs when a
+// tool runs inside an agent_task iteration. Chat-mode invocations (no
+// task id in ctx) skip persistence — the store is sized for background
+// agent runs, not every assistant turn. Errors are logged, not
+// returned: a transient DB hiccup must not fail an otherwise-good tool
+// call the model already paid for.
+//
+// Exposed at package scope so other tool registrations (code_repo_read,
+// db_query, file_read, etc.) can plug into the same audit store
+// without each rewriting the ctx → store boilerplate.
+func persistToolOutput(ctx context.Context, deps *bs.Deps, rec bs.ToolOutputRecord) {
+	if deps == nil {
+		return
+	}
+	taskID, ok := bs.TaskIDFromContext(ctx)
+	if !ok || taskID == uuid.Nil {
+		return // chat-mode call, nothing to attribute
+	}
+	rec.TaskID = taskID
+	rec.Iteration, _ = bs.IterationFromContext(ctx)
+
+	db, err := deps.DB("ship")
+	if err != nil {
+		if deps.Logger != nil {
+			deps.Logger.Warn("tool output persist skipped, ship DB unavailable",
+				"tool", rec.ToolName, "task_id", taskID, "error", err)
+		}
+		return
+	}
+	store := bs.NewAgentTaskStore(db)
+	if err := store.RecordToolOutput(ctx, rec); err != nil && deps.Logger != nil {
+		deps.Logger.Warn("tool output persist failed",
+			"tool", rec.ToolName, "task_id", taskID,
+			"iteration", rec.Iteration, "error", err)
 	}
 }
