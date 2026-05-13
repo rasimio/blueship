@@ -256,9 +256,18 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 
 	result, err := handler.Run(ctx, task, agentDeps)
 
-	// Use background context for all post-handler DB ops — parent ctx may be cancelled on shutdown.
-	dbCtx, dbCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer dbCancel()
+	// Fresh ctx per DB op. We use background-rooted (not the iteration
+	// ctx, which may be cancelled on shutdown), but allocate per-call so
+	// a long-running step in between — most notably the Gate C grounding
+	// evaluator LLM call inside evaluateAcceptance — doesn't eat into the
+	// budget of a downstream UPDATE. Pre-Gate-C this was a single shared
+	// 10s dbCtx; that worked when acceptance was a quick check, but with
+	// a 30-60s auditor LLM call in the middle the shared deadline blew
+	// before reaching s.store.Complete / .UpdateProgress and every
+	// finished research task logged "context deadline exceeded".
+	newDBCtx := func() (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.Background(), 10*time.Second)
+	}
 
 	// Audit-log writer fires last, after every branch above has had a
 	// chance to set iterationOutcome / acceptance / error. Goroutine so
@@ -304,6 +313,8 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			"handler", task.Handler,
 			"error", err,
 		)
+		dbCtx, dbCancel := newDBCtx()
+		defer dbCancel()
 		if fErr := s.store.SetPending(dbCtx, task.ID); fErr != nil {
 			s.logger.ErrorContext(ctx, "agent-tasks: reset after fail error", "error", fErr)
 		}
@@ -342,7 +353,9 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		// Pause carries explicit milestone notifications (handler sets
 		// Notify only when there's something user-actionable). Push.
 		if shouldNotify {
-			s.notify(dbCtx, task.UserID, result.Notify)
+			notifyCtx, notifyCancel := newDBCtx()
+			s.notify(notifyCtx, task.UserID, result.Notify)
+			notifyCancel()
 			notified = true
 		}
 		span.SetAttributes(
@@ -359,6 +372,8 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			"iteration", task.Iteration+1,
 			"peer_task_id", peerTaskID,
 		)
+		dbCtx, dbCancel := newDBCtx()
+		defer dbCancel()
 		if err := s.store.PauseTask(dbCtx, task.ID, result.Progress); err != nil {
 			s.logger.ErrorContext(ctx, "agent-tasks: pause update error", "error", err)
 		}
@@ -399,6 +414,8 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 				// Encode reason into progress so the next iteration
 				// sees what the reviewer flagged.
 				progressWithReason := injectFeedback(result.Progress, verdict.Reason)
+				dbCtx, dbCancel := newDBCtx()
+				defer dbCancel()
 				if err := s.store.UpdateProgress(dbCtx, task.ID, progressWithReason); err != nil {
 					s.logger.ErrorContext(ctx, "agent-tasks: progress update error", "error", err)
 				}
@@ -415,7 +432,9 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		iterationOutcome = "done"
 		result.IsFinal = true
 		if shouldNotify {
-			s.notify(dbCtx, task.UserID, result.Notify)
+			notifyCtx, notifyCancel := newDBCtx()
+			s.notify(notifyCtx, task.UserID, result.Notify)
+			notifyCancel()
 			notified = true
 		}
 		span.SetAttributes(
@@ -433,14 +452,18 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			"output_preview", outputPreview(result.Output),
 			"notified", notified,
 		)
-		if err := s.store.Complete(dbCtx, task.ID, result.Output); err != nil {
+		completeCtx, completeCancel := newDBCtx()
+		if err := s.store.Complete(completeCtx, task.ID, result.Output); err != nil {
 			s.logger.ErrorContext(ctx, "agent-tasks: complete update error", "error", err)
 		}
+		completeCancel()
 		// Recurring tasks: reset for next run.
 		if task.Schedule != nil {
-			if err := s.store.ResetForNextRun(dbCtx, task.ID); err != nil {
+			resetCtx, resetCancel := newDBCtx()
+			if err := s.store.ResetForNextRun(resetCtx, task.ID); err != nil {
 				s.logger.ErrorContext(ctx, "agent-tasks: reset for next run error", "error", err)
 			}
+			resetCancel()
 		}
 		// Notify origin agent (delegate-strategy callback). Non-recurring
 		// only — recurring tasks never originate from a peer.
@@ -454,7 +477,9 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		// flagged something user-relevant via Notify (milestone, blocker)
 		// — random in-progress output is noise, not a message.
 		if shouldNotify {
-			s.notify(dbCtx, task.UserID, result.Notify)
+			notifyCtx, notifyCancel := newDBCtx()
+			s.notify(notifyCtx, task.UserID, result.Notify)
+			notifyCancel()
 			notified = true
 		}
 		span.SetAttributes(
@@ -467,6 +492,8 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			"iteration", task.Iteration+1,
 			"notified", notified,
 		)
+		dbCtx, dbCancel := newDBCtx()
+		defer dbCancel()
 		if err := s.store.UpdateProgress(dbCtx, task.ID, result.Progress); err != nil {
 			s.logger.ErrorContext(ctx, "agent-tasks: progress update error", "error", err)
 		}
