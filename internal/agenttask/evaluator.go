@@ -94,6 +94,62 @@ func canonURLKey(rawURL string) string {
 	return strings.ToLower(u.Host) + u.Path
 }
 
+// multiAuthorPlatforms is the set of preprint servers, conference
+// proceedings, and peer-review forums where each URL represents a
+// distinct work by potentially-different research groups. Multiple
+// citations from these domains aren't "same source" the way 5 URLs
+// from ai.meta.com are — they're 5 independent works using a shared
+// neutral host. Diversity counting treats each URL on these hosts as
+// its own bucket so a brief citing 7 arxiv preprints from 7 different
+// groups isn't flagged as monodomain.
+//
+// Membership is host-suffix-matched against the registrable-domain
+// form (after `registrableDomain` collapse), so subdomains like
+// `proceedings.neurips.cc` and `openaccess.thecvf.com` are covered
+// when their registrable forms (`neurips.cc`, `thecvf.com`) appear
+// here.
+var multiAuthorPlatforms = map[string]bool{
+	"arxiv.org":          true,
+	"openreview.net":     true,
+	"neurips.cc":         true,
+	"thecvf.com":         true,
+	"mlr.press":          true, // ICML proceedings
+	"aclanthology.org":   true,
+	"aaai.org":           true,
+	"acm.org":            true, // dl.acm.org
+	"ieee.org":           true, // ieeexplore.ieee.org
+	"paperswithcode.com": true,
+	"semanticscholar.org": true,
+	"nature.com":         true,
+	"science.org":        true,
+	"plos.org":           true,
+	"biorxiv.org":        true,
+	"medrxiv.org":        true,
+	"ssrn.com":           true,
+}
+
+// diversityBucket returns the grouping key used by Gate D to count
+// distinct "sources" in a citation set. For ordinary hosts (vendor
+// blogs, company docs, personal sites) it collapses to the registrable
+// domain so 5 URLs across `ai.meta.com` and `engineering.meta.com`
+// count as one source. For multi-author platforms (arxiv, openreview,
+// conference proceedings, etc.) it returns the full canonical key
+// (host+path) so each URL bucket is unique — N distinct preprints
+// counts as N sources, not 1.
+//
+// This fixes the 2026-05-14 prod-smoke-s2 failure mode where a JEPA
+// brief cited 7 independent papers (I-JEPA, BYOL, SimSiam, MAE,
+// DINOv2, V-JEPA, V-JEPA-2), all hosted on arxiv.org — diverse work
+// by 7 different research groups, but the prior heuristic counted it
+// as "monodomain" and Gate D rejected.
+func diversityBucket(canonKey string) string {
+	d := registrableDomain(canonKey)
+	if multiAuthorPlatforms[d] {
+		return canonKey
+	}
+	return d
+}
+
 // registrableDomain collapses a canonical URL key (host+path) to its
 // likely registrable domain — the "company / org identity" we use for
 // source-diversity counting. Heuristic: take the LAST TWO dot-separated
