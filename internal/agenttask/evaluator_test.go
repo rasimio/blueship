@@ -384,6 +384,54 @@ func TestScoreGroundingVerdict(t *testing.T) {
 			wantUngrounded:   2,
 			wantRecheckCount: 1, // same URL, deduped
 		},
+		{
+			// S-tier tolerance: 1 hard-ungrounded in a 20-claim report
+			// (5%) is within tolerance, so met=true. Calibrated from
+			// eval-smoke a0ad88ee where 19/20 grounded + 1 fabricated
+			// limitation should be S-tier, not a binary reject.
+			name: "20 claims, 1 hard ungrounded — passes via tolerance",
+			claims: append(
+				repeatClaim(19, ClaimGrounding{Status: "grounded", ClaimType: "architectural"}),
+				ClaimGrounding{Status: "ungrounded", ClaimType: "architectural",
+					Claim: "fabricated limitation X", SupportingDocURL: "https://example.com/p"},
+			),
+			wantMet:          true,
+			wantGrounded:     19,
+			wantUngrounded:   1,
+			wantRecheckCount: 1, // recheck still hands off the URL for forensics, even when met
+			wantReasonHas:    "tolerance",
+		},
+		{
+			// 2 hard-ungrounded in 20 claims (10%) exceeds tolerance of 1.
+			name: "20 claims, 2 hard ungrounded — exceeds tolerance",
+			claims: append(
+				repeatClaim(18, ClaimGrounding{Status: "grounded", ClaimType: "architectural"}),
+				ClaimGrounding{Status: "ungrounded", ClaimType: "architectural",
+					Claim: "fab A", SupportingDocURL: "https://example.com/a"},
+				ClaimGrounding{Status: "ungrounded", ClaimType: "attribution",
+					Claim: "fab B", SupportingDocURL: "https://example.com/b"},
+			),
+			wantMet:          false,
+			wantGrounded:     18,
+			wantUngrounded:   2,
+			wantRecheckCount: 2,
+			wantReasonHas:    "tolerated",
+		},
+		{
+			// Small report (under 20 claims) — tolerance=0, single hard
+			// ungrounded still hard-fails. Keeps strictness for short
+			// briefs where 1 fabrication is a larger fraction.
+			name: "10 claims, 1 hard ungrounded — strict, fails",
+			claims: append(
+				repeatClaim(9, ClaimGrounding{Status: "grounded", ClaimType: "numerical"}),
+				ClaimGrounding{Status: "ungrounded", ClaimType: "architectural",
+					Claim: "single hallucination", SupportingDocURL: "https://example.com/p"},
+			),
+			wantMet:          false,
+			wantGrounded:     9,
+			wantUngrounded:   1,
+			wantRecheckCount: 1,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -406,6 +454,16 @@ func TestScoreGroundingVerdict(t *testing.T) {
 			}
 		})
 	}
+}
+
+// repeatClaim returns n copies of a claim template — convenience for
+// building large synthetic claim slices in scoring tests.
+func repeatClaim(n int, c ClaimGrounding) []ClaimGrounding {
+	out := make([]ClaimGrounding, n)
+	for i := range out {
+		out[i] = c
+	}
+	return out
 }
 
 // parseGroundingResponse strips prose and pulls a Claims array out of
