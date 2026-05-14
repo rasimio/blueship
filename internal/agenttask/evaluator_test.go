@@ -68,6 +68,34 @@ func TestExtractURLs(t *testing.T) {
 	}
 }
 
+// registrableDomain collapses a canonical URL key to its likely root
+// domain for Gate D source-diversity counting. Heuristic is "last two
+// dot-separated host components", which over-collapses compound TLDs
+// (.co.uk, .com.au) — that's acceptable because Gate D errs on the
+// safe side: more-aggressive grouping only fires reject on
+// less-diverse reports, never on more-diverse ones.
+func TestRegistrableDomain(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"arxiv.org/abs/2401.12345", "arxiv.org"},
+		{"ai.meta.com/blog/v-jepa", "meta.com"},
+		{"engineering.fb.com/posts/x", "fb.com"},
+		{"openaccess.thecvf.com/content/y", "thecvf.com"},
+		{"www.nature.com/articles/z", "nature.com"},
+		{"openreview.net/forum?id=abc", "openreview.net"},
+		{"paperswithcode.com/sota/foo", "paperswithcode.com"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := registrableDomain(tc.in); got != tc.want {
+				t.Errorf("registrableDomain(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // extractURLRequirement parses Gate A's count from criteria. Largest wins
 // so a criteria mixing "3 sources" and "5 citations" enforces the
 // stricter 5.

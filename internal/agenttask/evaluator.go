@@ -94,6 +94,37 @@ func canonURLKey(rawURL string) string {
 	return strings.ToLower(u.Host) + u.Path
 }
 
+// registrableDomain collapses a canonical URL key (host+path) to its
+// likely registrable domain — the "company / org identity" we use for
+// source-diversity counting. Heuristic: take the LAST TWO dot-separated
+// components of the host, which is correct for .com/.org/.net/.edu/.io/
+// .ai and most TLDs research reports cite. Compound TLDs (.co.uk,
+// .com.au) over-collapse, but that errs on the safe side — Gate D
+// would group them MORE aggressively, which only fires reject on
+// less-diverse reports, never on more-diverse ones.
+//
+// Examples:
+//   arxiv.org/abs/2401.12345        -> arxiv.org
+//   ai.meta.com/blog/v-jepa         -> meta.com
+//   engineering.fb.com/posts/...    -> fb.com
+//   openaccess.thecvf.com/content/x -> thecvf.com
+//   www.nature.com/articles/y       -> nature.com
+//
+// Empty input or unparseable host returns "" (caller skips it from
+// diversity counting).
+func registrableDomain(canonKey string) string {
+	host := canonKey
+	if slash := strings.Index(canonKey, "/"); slash >= 0 {
+		host = canonKey[:slash]
+	}
+	host = strings.TrimPrefix(host, "www.")
+	parts := strings.Split(host, ".")
+	if len(parts) < 2 {
+		return host
+	}
+	return parts[len(parts)-2] + "." + parts[len(parts)-1]
+}
+
 // isLooksLikeRealURL filters out the most common synthesis artifacts
 // before we even hand the string to url.Parse — saves a parse on
 // obviously corrupted input.
@@ -532,6 +563,49 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 				Reason: fmt.Sprintf(
 					"hard gate: only %d of %d URLs in the report were actually fetched (%d distinct URLs were opened via browser_fetch). The majority of your citations are synthesised. Cite only URLs you opened, or open the URLs you cite.",
 					verifiedURLCount, urlCount, len(fetchedURLs)),
+			}
+		}
+		// Gate D — source-diversity. Even when every cited URL is real
+		// and fetched, a report whose citations all come from one
+		// organisation is a press release, not research. The 2026-05-14
+		// JEPA smoke had 6 References / 5 from ai.meta.com — Gate C
+		// passed because Meta's pages do support Meta's own claims, but
+		// the reader gets no triangulation, no peer-method contrast, no
+		// outside perspective. Force at least three distinct registrable
+		// domains and cap any single domain at ≤50% of the cited set
+		// once there are enough URLs (≥4) for diversity to be meaningful.
+		// Smaller reports (1-3 URLs) skip the gate — a focused brief on
+		// one paper is allowed to cite only that paper's family.
+		if urlCount >= 4 {
+			domainCount := map[string]int{}
+			for key := range resultURLs {
+				if d := registrableDomain(key); d != "" {
+					domainCount[d]++
+				}
+			}
+			var topDomain string
+			var topShare int
+			for d, n := range domainCount {
+				if n > topShare {
+					topShare = n
+					topDomain = d
+				}
+			}
+			distinctDomains := len(domainCount)
+			if distinctDomains < 3 || topShare*2 > urlCount {
+				deps.Logger.Info("acceptance evaluator: hard-fail (source diversity low)",
+					"task_id", task.ID,
+					"urls_in_result", urlCount,
+					"distinct_domains", distinctDomains,
+					"top_domain", topDomain,
+					"top_domain_share", topShare)
+				return AcceptanceVerdict{
+					Met: false,
+					Reason: fmt.Sprintf(
+						"diversity gate: %d cited URLs but only %d distinct domains (top: %s with %d/%d ≈ %d%%). Strong research needs triangulation across ≥3 distinct domains with no single domain over 50%%. Fetch and cite at least one independent or comparative source outside %s before re-submitting.",
+						urlCount, distinctDomains, topDomain, topShare, urlCount,
+						topShare*100/urlCount, topDomain),
+				}
 			}
 		}
 	}
