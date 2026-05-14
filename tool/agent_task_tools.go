@@ -72,7 +72,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 				"tools":{"type":"array","items":{"type":"string"},"description":"Tool allow-list (omit = full registry)"},
 				"use_agents":{"type":"array","items":{"type":"string"},"description":"Peer agent_id allow-list (omit = no peers)"},
 				"config":{"type":"object","description":"Strategy-specific config (plan_template, model overrides, etc.)"},
-				"max_iterations":{"type":"integer","default":20,"description":"Safety cap on iteration count (1-100)"},
+				"max_iterations":{"type":"integer","default":20,"description":"Safety cap on iteration count (1-100). For research with grounding gates, give ≥12 — the auditor needs at least one recovery iteration after rejecting a specific claim, otherwise S-tier work with one fabricated number gets stuck at max-iter as 'failed'."},
 				"cadence":{"type":"string","description":"Min interval between ticks (Go duration: '1h', '30m', '15s'). Rate-limits monitors; omit for fast-iterating tasks."},
 				"deadline":{"type":"string","description":"Optional ISO datetime — task fails if not done by this time"}
 			},
