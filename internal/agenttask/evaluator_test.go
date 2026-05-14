@@ -120,6 +120,87 @@ func TestExtractURLRequirement(t *testing.T) {
 	}
 }
 
+// Diversity-grouping integration: given a set of cited URLs, count
+// distinct registrable domains and the top-domain share. Mirrors what
+// Gate D in evaluateAcceptance computes before deciding to reject.
+// Kept as a separate small unit-level helper test (not via the full
+// evaluateAcceptance path which needs LLM + DB) — guards against
+// regressions in how registrableDomain composes with the per-URL set.
+func TestDiversityGrouping(t *testing.T) {
+	type want struct {
+		distinct  int
+		topDomain string
+		topShare  int
+	}
+	cases := []struct {
+		name string
+		urls []string // canonical keys (host+path)
+		want want
+	}{
+		{
+			name: "5 of 6 from one company — fails diversity intent",
+			urls: []string{
+				"ai.meta.com/blog/x",
+				"ai.meta.com/research/y",
+				"engineering.meta.com/z",
+				"about.meta.com/foo",
+				"ai.meta.com/research/v-jepa",
+				"arxiv.org/abs/2301",
+			},
+			want: want{distinct: 2, topDomain: "meta.com", topShare: 5},
+		},
+		{
+			name: "balanced across 5 distinct domains — diversity passes",
+			urls: []string{
+				"arxiv.org/abs/x",
+				"arxiv.org/abs/y",
+				"ai.meta.com/blog/z",
+				"openreview.net/forum?id=q",
+				"proceedings.neurips.cc/file/w",
+				"openaccess.thecvf.com/content/r",
+			},
+			want: want{distinct: 5, topDomain: "arxiv.org", topShare: 2},
+		},
+		{
+			name: "www prefix stripped before grouping",
+			urls: []string{
+				"www.nature.com/articles/x",
+				"nature.com/articles/y",
+				"arxiv.org/abs/z",
+			},
+			want: want{distinct: 2, topDomain: "nature.com", topShare: 2},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			counts := map[string]int{}
+			for _, k := range tc.urls {
+				if d := registrableDomain(k); d != "" {
+					counts[d]++
+				}
+			}
+			var top string
+			var topShare int
+			for d, n := range counts {
+				if n > topShare {
+					topShare = n
+					top = d
+				}
+			}
+			if len(counts) != tc.want.distinct {
+				t.Errorf("distinct domains = %d, want %d (%v)",
+					len(counts), tc.want.distinct, counts)
+			}
+			if top != tc.want.topDomain {
+				t.Errorf("top domain = %q, want %q", top, tc.want.topDomain)
+			}
+			if topShare != tc.want.topShare {
+				t.Errorf("top share = %d, want %d", topShare, tc.want.topShare)
+			}
+		})
+	}
+}
+
 // extractFetchedURLsFromTrace pulls browser_fetch URLs out of a tool-
 // trace JSON blob. Used by Gate B' to verify recheck URLs were fetched
 // this iteration. Non-browser_fetch entries are ignored; nil/empty
