@@ -205,6 +205,42 @@ func loadFetchedURLs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID)
 	return out
 }
 
+// extractFetchedURLsFromTrace parses a tool-trace jsonb blob (the same
+// shape RecordIteration writes to agent_task_iterations.tool_calls) and
+// returns the canonical-keyed set of URLs that were fetched in this
+// trace. Used by Gate B' which needs to know what THIS iteration fetched
+// (not what the task as a whole fetched). Empty / nil trace yields an
+// empty set — a model that did literally nothing this iteration can
+// never satisfy a recheck-URL requirement.
+//
+// Each trace entry's `input` is a JSON-encoded tool-call body the agent
+// passed (e.g. `{"url":"https://arxiv.org/abs/2401.12345"}` for
+// browser_fetch). We extract every URL-shaped substring from it and
+// canon-key it — same key space loadFetchedURLs uses, so a recheck on
+// `/abs/X` is satisfied by a fetch of `/pdf/X.pdf`.
+func extractFetchedURLsFromTrace(trace json.RawMessage) map[string]struct{} {
+	out := map[string]struct{}{}
+	if len(trace) == 0 {
+		return out
+	}
+	var entries []struct {
+		Name  string `json:"name"`
+		Input string `json:"input"`
+	}
+	if err := json.Unmarshal(trace, &entries); err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if e.Name != "browser_fetch" {
+			continue
+		}
+		for u := range extractURLs(e.Input) {
+			out[u] = struct{}{}
+		}
+	}
+	return out
+}
+
 // ToolOutput is one persisted tool-output row returned by
 // loadToolOutputs. Generic enough to carry browser_fetch bodies, code
 // reads, db query results, etc. — the consuming gate dereferences
@@ -362,7 +398,16 @@ type GroundingVerdict struct {
 // Prompt is intentionally tight: ask for JSON, parse it, treat anything
 // non-parseable as a met=true fallback. The agent_task scheduler is
 // not the right place to argue with the LLM about format.
-func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.AgentTask, result string) AcceptanceVerdict {
+//
+// iterationToolCalls is the tool-trace blob the handler produced for THIS
+// iteration. Used only by Gate B' (recheck enforcement): when the prior
+// iteration's Gate C rejected with attribution/architectural ungrounded
+// claims tied to specific URLs, the cortex MUST re-fetch those URLs in
+// this iteration before a fresh submit is even considered. Without that
+// guard a model would just s/Zhang/Xiong/ in the report on retry and
+// the recomputed Gate C would pass because the corrected attribution
+// matches whatever doc was already there.
+func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.AgentTask, result string, iterationToolCalls json.RawMessage) AcceptanceVerdict {
 	if task.AcceptanceCriteria == nil || strings.TrimSpace(*task.AcceptanceCriteria) == "" {
 		return AcceptanceVerdict{Met: true}
 	}
@@ -370,49 +415,93 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 		return AcceptanceVerdict{Met: true}
 	}
 
+	// Gate B' — recheck enforcement. Runs before any LLM call: if the
+	// previous iteration's Gate C populated required_recheck_urls and
+	// this iteration didn't re-fetch every entry, hard-fail without
+	// burning a Sonnet call on a verdict we already know rejects.
+	if len(task.RequiredRecheckURLs) > 0 {
+		thisIterFetched := extractFetchedURLsFromTrace(iterationToolCalls)
+		var missing []string
+		for _, u := range task.RequiredRecheckURLs {
+			key := canonURLKey(u)
+			if key == "" {
+				continue
+			}
+			if _, ok := thisIterFetched[key]; !ok {
+				missing = append(missing, u)
+			}
+		}
+		if len(missing) > 0 {
+			deps.Logger.Info("acceptance evaluator: hard-fail (recheck URLs not refetched)",
+				"task_id", task.ID,
+				"required", len(task.RequiredRecheckURLs),
+				"missing", len(missing),
+				"missing_urls", missing,
+			)
+			return AcceptanceVerdict{
+				Met: false,
+				Reason: fmt.Sprintf(
+					"recheck gate: previous iteration's grounding audit flagged claims tied to %d URL(s); you must call browser_fetch on each in this same iteration before resubmitting. Missing this iteration: %s",
+					len(task.RequiredRecheckURLs), strings.Join(missing, ", ")),
+			}
+		}
+	}
+
 	desc := ""
 	if task.Description != nil {
 		desc = *task.Description
 	}
 
-	// Evidentiary gate is opt-in via the acceptance_criteria itself.
-	// If the host's criteria contains an explicit "N URLs / sources /
-	// citations" phrase, the evaluator (a) counts syntactically-valid
-	// URLs in the result, (b) cross-references them against URLs the
-	// task actually invoked browser_fetch on, and (c) hard-fails before
-	// the LLM call if (b) is empty or smaller than required. Keeps
-	// blueship language-neutral; the persona layer (Arlene cortex) is
-	// where "research" semantics live and where the criteria is shaped.
+	// Evidentiary gate. Two layers:
+	//
+	//   - Opt-in count gate (Gate A): if criteria spells out "N URLs /
+	//     sources / citations", the result must contain >= N URLs that
+	//     intersect with what browser_fetch actually opened.
+	//
+	//   - Universal hallucination floor: regardless of criteria phrasing,
+	//     a result that cites URLs the task never fetched is a synthesis
+	//     from training data. The old gate only caught this when the
+	//     criteria mentioned a count; now any URL-shaped string in the
+	//     output triggers the cross-check. This closes the gap that let
+	//     world-models-evolution land at 0 fetched docs while citing
+	//     plausible-looking refs in the report.
 	requiredURLs := extractURLRequirement(*task.AcceptanceCriteria)
 	resultURLs := extractURLs(result)
 	urlCount := len(resultURLs)
 	var verifiedURLCount int
-	if requiredURLs > 0 {
+	if requiredURLs > 0 || urlCount > 0 {
 		fetchedURLs := loadFetchedURLs(ctx, deps, task.ID)
 		for u := range resultURLs {
 			if _, ok := fetchedURLs[u]; ok {
 				verifiedURLCount++
 			}
 		}
-		// Hard gate 1: research task with searches but ZERO real fetches
-		// — model is citing without reading. The 2026-05-11 d2f6964c
-		// task did exactly this: 9 browser_search calls, 0 browser_fetch,
-		// and a "references" section with `httpshttps://` corrupted URLs
-		// that the substring-count gate accepted.
-		if len(fetchedURLs) == 0 {
+		// Hard gate 1: result emits URL-shaped strings but browser_fetch
+		// was never called — model is citing without reading. The
+		// 2026-05-11 d2f6964c task did exactly this: 9 browser_search
+		// calls, 0 browser_fetch, and a "references" section with
+		// `httpshttps://` corrupted URLs that the substring-count gate
+		// accepted. Fires universally now, not only when criteria say
+		// "N URLs".
+		if urlCount > 0 && len(fetchedURLs) == 0 {
 			deps.Logger.Info("acceptance evaluator: hard-fail (no fetched URLs)",
 				"task_id", task.ID, "urls_in_result", urlCount)
+			minRequired := requiredURLs
+			if minRequired == 0 {
+				minRequired = 1
+			}
 			return AcceptanceVerdict{
 				Met: false,
 				Reason: fmt.Sprintf(
 					"hard gate: result lists %d URL-like strings but browser_fetch was never called — citations are synthesised, not read. Open at least %d distinct pages via browser_fetch and cite them.",
-					urlCount, requiredURLs),
+					urlCount, minRequired),
 			}
 		}
-		// Hard gate 2: too few URLs in the result intersect with what
-		// was actually fetched. Substring count alone is too easy to
-		// game with `httpshttps://` / `way_ve.ai` / similar fakes.
-		if verifiedURLCount < requiredURLs {
+		// Hard gate 2 (count-form): too few cited URLs intersect with
+		// fetched. Only fires when criteria asked for a specific count;
+		// no point demanding "N fetched" from a task whose criteria
+		// never mentioned a number.
+		if requiredURLs > 0 && verifiedURLCount < requiredURLs {
 			deps.Logger.Info("acceptance evaluator: hard-fail (verified URL count low)",
 				"task_id", task.ID,
 				"required", requiredURLs,
@@ -426,22 +515,48 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 					verifiedURLCount, requiredURLs, urlCount, len(fetchedURLs)),
 			}
 		}
+		// Hard gate 3 (citation-quality, universal): result cites URLs
+		// but most are fabricated. Specifically: fewer than half of the
+		// cited URLs match the fetched set. Triggers when there is at
+		// least one fetched URL (i.e. the task tried) so a non-research
+		// task that happens to mention "https://example.com" once doesn't
+		// fail. The 50% floor catches "fetched 1, cited 8" patterns.
+		if urlCount >= 2 && len(fetchedURLs) >= 1 && verifiedURLCount*2 < urlCount {
+			deps.Logger.Info("acceptance evaluator: hard-fail (citation/fetch ratio low)",
+				"task_id", task.ID,
+				"urls_in_result", urlCount,
+				"verified", verifiedURLCount,
+				"urls_fetched", len(fetchedURLs))
+			return AcceptanceVerdict{
+				Met: false,
+				Reason: fmt.Sprintf(
+					"hard gate: only %d of %d URLs in the report were actually fetched (%d distinct URLs were opened via browser_fetch). The majority of your citations are synthesised. Cite only URLs you opened, or open the URLs you cite.",
+					verifiedURLCount, urlCount, len(fetchedURLs)),
+			}
+		}
 	}
 
-	// Gate C: claim-level source-grounding audit. SHADOW MODE — verdict
-	// is computed and persisted into agent_task_iterations.grounding_
-	// verdict for calibration, but the Met decision here remains
-	// driven by the existing hard gates + qualitative LLM evaluator
-	// below. Once we have ~20-30 tasks' worth of shadow data the
-	// threshold gets pinned (likely 0.60-0.75 grounded_ratio) and Gate C
-	// flips to enforce.
+	// Gate C: claim-level source-grounding audit. Runs whenever the task
+	// fetched ANY pages, regardless of whether the criteria text mentions
+	// "URLs" — old "shadow mode + requiredURLs>0 trigger" meant most
+	// research tasks bypassed grounding entirely (criteria written in
+	// natural language about "deep dive" / "comparison" / "report" never
+	// fired the regex). The verdict is computed AND enforced: a report
+	// that cites unsupported claims fails acceptance, with the qualitative
+	// LLM evaluator below also having veto power (LLM-no + Grounding-yes
+	// still fails — both must agree to pass).
+	//
+	// Non-research tasks that incidentally fetch a page or two run Gate C
+	// too. Cost (~one Sonnet call per accepted submission) is small price
+	// for the universal evidence floor across goal types — the user-facing
+	// goal is "agent_task as universal capable goal-completion", and
+	// "did you actually read what you cite" applies to coding research,
+	// booking research, and analyst research equally.
 	var groundingVerdict *GroundingVerdict
-	if requiredURLs > 0 {
-		docs := loadToolOutputs(ctx, deps, task.ID, []string{"browser_fetch"})
-		if len(docs) > 0 {
-			v := evaluateGrounding(ctx, deps, task, result, docs)
-			groundingVerdict = &v
-		}
+	docs := loadToolOutputs(ctx, deps, task.ID, []string{"browser_fetch"})
+	if len(docs) > 0 {
+		v := evaluateGrounding(ctx, deps, task, result, docs)
+		groundingVerdict = &v
 	}
 
 	system := `You are a strict acceptance-criteria reviewer. Given a task description, an acceptance_criteria string, and a result, decide whether the result demonstrably meets every part of the criteria.
@@ -468,11 +583,21 @@ Be strict: half-done work is not done. Criteria like "code is reviewed" require 
 		return AcceptanceVerdict{Met: true, Grounding: groundingVerdict}
 	}
 
+	// Near-zero temperature is load-bearing. Without it the evaluator flips
+	// PASS/FAIL on identical input across calls — observed in prod where a
+	// single research task at the max-iter boundary saw 17 evaluations
+	// alternate between "met" and "not met" on the same output, with the
+	// system effectively rolling the dice until lucky.
+	//
+	// CompletionRequest treats Temperature=0 as "provider default" (~1.0),
+	// so we pass a small positive epsilon to mean "deterministic" without
+	// breaking the sentinel contract for the rest of the codebase.
 	resp, err := deps.LLM.Complete(ctx, core.CompletionRequest{
-		Model:     model,
-		System:    system,
-		Messages:  []core.Message{{Role: "user", Content: core.NormalizeContent(user)}},
-		MaxTokens: 256,
+		Model:       model,
+		System:      system,
+		Messages:    []core.Message{{Role: "user", Content: core.NormalizeContent(user)}},
+		MaxTokens:   256,
+		Temperature: 0.01,
 	})
 	if err != nil {
 		deps.Logger.Warn("acceptance evaluator: llm call failed", "task_id", task.ID, "error", err)
@@ -494,6 +619,22 @@ Be strict: half-done work is not done. Criteria like "code is reviewed" require 
 		return AcceptanceVerdict{Met: true, Grounding: groundingVerdict}
 	}
 	v.Grounding = groundingVerdict
+	// Gate C veto: even when the qualitative reviewer is satisfied with
+	// the report's structure and coverage, an ungrounded claim is a
+	// hallucination that must fail acceptance. Both gates must pass for
+	// a Done. Reverse direction (LLM-no + Grounding-yes) keeps the
+	// reviewer's veto — the LLM might catch coverage gaps the claim
+	// auditor doesn't see.
+	if v.Met && groundingVerdict != nil && !groundingVerdict.Met {
+		deps.Logger.Info("acceptance evaluator: grounding overrides LLM pass",
+			"task_id", task.ID,
+			"grounded", groundingVerdict.GroundedCount,
+			"ungrounded", groundingVerdict.UngroundedCount,
+			"recheck_urls", len(groundingVerdict.RecheckURLs),
+		)
+		v.Met = false
+		v.Reason = "grounding audit failed: " + groundingVerdict.Reason
+	}
 	deps.Logger.Info("acceptance evaluator: verdict",
 		"task_id", task.ID, "met", v.Met, "reason", v.Reason,
 		"grounding_present", groundingVerdict != nil)

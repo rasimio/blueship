@@ -386,7 +386,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		// to verify. Recurring jobs (Schedule != nil) always complete on
 		// the handler's word.
 		if task.Schedule == nil && task.AcceptanceCriteria != nil && *task.AcceptanceCriteria != "" {
-			verdict := evaluateAcceptance(ctx, agentDeps, task, result.Output)
+			verdict := evaluateAcceptance(ctx, agentDeps, task, result.Output, result.ToolCallsJSON)
 			met := verdict.Met
 			iterationAcceptanceMet = &met
 			iterationAcceptanceReason = verdict.Reason
@@ -403,20 +403,31 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			}
 			if !verdict.Met {
 				iterationOutcome = "rejected"
+				// Recheck URLs only carry over when Gate C identified
+				// specific URLs the next iteration must re-verify. Other
+				// rejection paths (coverage gap from the LLM evaluator,
+				// hard URL-count gate) don't bind to a URL list and the
+				// store call collapses to plain UpdateProgress.
+				var recheckURLs []string
+				if verdict.Grounding != nil && len(verdict.Grounding.RecheckURLs) > 0 {
+					recheckURLs = verdict.Grounding.RecheckURLs
+				}
 				span.SetAttributes(
 					attribute.String("agent_task.outcome", "criteria_not_met"),
 					attribute.Bool("agent_task.acceptance_met", false),
 					attribute.String("agent_task.acceptance_reason", verdict.Reason),
 					attribute.Int("agent_task.output_size_bytes", len(result.Output)),
+					attribute.Int("agent_task.recheck_url_count", len(recheckURLs)),
 				)
 				s.logger.InfoContext(ctx, "agent-tasks: criteria not met, continuing",
-					"task_id", task.ID, "reason", verdict.Reason)
+					"task_id", task.ID, "reason", verdict.Reason,
+					"recheck_urls", len(recheckURLs))
 				// Encode reason into progress so the next iteration
 				// sees what the reviewer flagged.
 				progressWithReason := injectFeedback(result.Progress, verdict.Reason)
 				dbCtx, dbCancel := newDBCtx()
 				defer dbCancel()
-				if err := s.store.UpdateProgress(dbCtx, task.ID, progressWithReason); err != nil {
+				if err := s.store.UpdateProgressWithRecheck(dbCtx, task.ID, progressWithReason, recheckURLs); err != nil {
 					s.logger.ErrorContext(ctx, "agent-tasks: progress update error", "error", err)
 				}
 				return

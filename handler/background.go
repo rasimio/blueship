@@ -348,6 +348,24 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		msg += fmt.Sprintf("\n\nLow iteration budget: %d remaining.", remaining)
 	}
 
+	// Recheck enforcement. When the previous iteration's Gate C identified
+	// ungrounded attribution/architectural claims tied to specific URLs,
+	// the task carries a required_recheck_urls list and the evaluator will
+	// hard-reject any submit that didn't refetch them this iteration. Make
+	// the constraint visible to the model BEFORE it plans the iteration —
+	// dropping a recheck URL into the prompt is cheap; getting auto-
+	// rejected for missing it costs a full iteration budget.
+	if instructionKey == "background-task" && len(task.RequiredRecheckURLs) > 0 {
+		var b strings.Builder
+		b.WriteString("\n\n[GROUNDING RECHECK — read before any tool call]\n")
+		fmt.Fprintf(&b, "Previous iteration's grounding audit flagged claims tied to %d URL(s) as ungrounded. You MUST call browser_fetch on EACH of these BEFORE writing the next report:\n", len(task.RequiredRecheckURLs))
+		for i, u := range task.RequiredRecheckURLs {
+			fmt.Fprintf(&b, "  %d. %s\n", i+1, u)
+		}
+		b.WriteString("Acceptance gate hard-rejects the next submit if any URL in this list is missing from this iteration's tool_calls. Refetch first, then verify the specific claims the previous report got wrong, then rewrite.\n")
+		msg += b.String()
+	}
+
 	// Fetch-rhythm enforcement. Background-task.md tells the model to
 	// browser_fetch after every 2-3 browser_search; on 2026-05-11 task
 	// 24b8ac16 the model ignored that for 6 iterations straight (1
@@ -364,14 +382,19 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	if instructionKey == "background-task" && task.Iteration >= 2 {
 		searches, fetches := recentBrowserToolUsage(ctx, deps, task.ID, 3)
 		totalSearches, totalFetches := recentBrowserToolUsage(ctx, deps, task.ID, 100)
-		// Trigger when EITHER:
-		// (a) recent 3 iters look bad (≥2 search, 0 fetch — covers "stuck"),
-		// (b) running total ratio is unacceptable (≥4 search, fetch < searches/3).
-		// Earlier "≥3 in last 3" never fired because the model spreads
-		// searches across iterations with empty / synthesis iters between
-		// them, so the sliding window never accumulates that count.
+		// Trigger when ANY of:
+		// (a) recent 3 iters look bad (≥2 search, 0 fetch — "stuck searching"),
+		// (b) running total ratio is unacceptable (≥4 search, fetch < searches/3),
+		// (c) recent 3 iters had ZERO tool calls AND task is past iter 3
+		//     ("went passive" — 2026-05-13 world-models-v2 saw iters 6-15
+		//     with 0 tools each while the LLM wrote synthesis from memory.
+		//     Neither (a) nor (b) caught it because searches were also 0).
+		// (d) absolute under-fetching for task age (iter ≥ 5 with 0 total
+		//     fetches — task is clearly drifting toward synthesis-only).
 		hardTrigger := (searches >= 2 && fetches == 0) ||
-			(totalSearches >= 4 && totalFetches < totalSearches/3)
+			(totalSearches >= 4 && totalFetches < totalSearches/3) ||
+			(task.Iteration >= 3 && searches == 0 && fetches == 0) ||
+			(task.Iteration >= 5 && totalFetches == 0)
 		if hardTrigger {
 			urls := recentSearchResultURLs(ctx, deps, task.ID, 5)
 			var urlsBlock string

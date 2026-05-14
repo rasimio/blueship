@@ -45,20 +45,47 @@ func (s *AgentTaskStore) SetRunning(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
-// UpdateProgress saves intermediate state, increments iteration, and sets the task back to pending.
+// UpdateProgress saves intermediate state, increments iteration, and sets
+// the task back to pending. Always clears required_recheck_urls so a
+// stale recheck list doesn't bleed into the next iteration's Gate B'
+// check — the only path that LEAVES recheck URLs set is the explicit
+// UpdateProgressWithRecheck branch used by the grounding-failure path.
 func (s *AgentTaskStore) UpdateProgress(ctx context.Context, id uuid.UUID, progress json.RawMessage) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks
-		SET progress = $2, status = 'pending', iteration = iteration + 1
+		SET progress = $2, status = 'pending', iteration = iteration + 1,
+		    required_recheck_urls = '{}'
 		WHERE id = $1`, id, progress)
 	return err
 }
 
-// Complete marks a task as done with a final result and increments iteration.
+// UpdateProgressWithRecheck is the rejected-by-grounding variant of
+// UpdateProgress. Same semantics — progress saved, iteration++, status
+// back to pending — but persists a list of URLs the next iteration MUST
+// re-fetch before another acceptance attempt is permitted. Gate B' in
+// evaluateAcceptance reads this list and hard-fails any submit that
+// didn't call browser_fetch on every URL within the same iteration's
+// tool_calls trace. Empty recheckURLs collapses to a regular
+// UpdateProgress so the existing semantics keep working.
+func (s *AgentTaskStore) UpdateProgressWithRecheck(ctx context.Context, id uuid.UUID, progress json.RawMessage, recheckURLs []string) error {
+	if len(recheckURLs) == 0 {
+		return s.UpdateProgress(ctx, id, progress)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE agent_tasks
+		SET progress = $2, status = 'pending', iteration = iteration + 1,
+		    required_recheck_urls = $3
+		WHERE id = $1`, id, progress, pq.Array(recheckURLs))
+	return err
+}
+
+// Complete marks a task as done with a final result, increments iteration,
+// and clears any pending recheck URLs (a passing submit obviates them).
 func (s *AgentTaskStore) Complete(ctx context.Context, id uuid.UUID, result string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks
-		SET status = 'done', result = $2, completed_at = NOW(), iteration = iteration + 1
+		SET status = 'done', result = $2, completed_at = NOW(),
+		    iteration = iteration + 1, required_recheck_urls = '{}'
 		WHERE id = $1`, id, result)
 	return err
 }
