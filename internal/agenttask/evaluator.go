@@ -1087,21 +1087,34 @@ func scoreGroundingVerdict(v GroundingVerdict) GroundingVerdict {
 		v.Reason = "auditor returned no classifiable claims; nothing to verify"
 		return v
 	}
-	ratio := float64(v.GroundedCount) / float64(v.TotalCount)
+	// Score with half-credit for partial claims. A "partial" verdict from
+	// the auditor means "the fetched source supports this claim but not
+	// verbatim / not in full" — that's load-bearing evidence, not a
+	// hallucination. Counting partials as zero produced a perverse
+	// outcome on the 2026-05-14 eval-smoke 441a1808 where the model
+	// followed the attribution discipline perfectly (0 ungrounded across
+	// 21 claims) but still failed because 8 of 21 were merely "partial"
+	// — claims like *"V-JEPA matches generative methods on motion-heavy
+	// tasks"* where the source supports the direction but not the exact
+	// phrasing. Half-credit reflects that "partial" is between
+	// "grounded" and "ungrounded" and rewards the conservative
+	// rephrasing the attribution prompt asks for.
+	support := float64(v.GroundedCount) + 0.5*float64(v.PartialCount)
+	ratio := support / float64(v.TotalCount)
 	v.Met = ratio >= groundedRatioThreshold && !hasHardUngrounded
 
 	if v.Met {
 		v.Reason = fmt.Sprintf(
-			"%d/%d claims grounded (%.0f%%), no hard-category ungrounded",
-			v.GroundedCount, v.TotalCount, ratio*100)
+			"%d/%d claims grounded + %d partial (support %.0f%%), no hard-category ungrounded",
+			v.GroundedCount, v.TotalCount, v.PartialCount, ratio*100)
 		return v
 	}
 
 	// Reject reason: lead with the most damning detail. Hard category
 	// ungrounded > ratio under threshold > everything else.
 	var b strings.Builder
-	fmt.Fprintf(&b, "%d/%d claims grounded (%.0f%%); ",
-		v.GroundedCount, v.TotalCount, ratio*100)
+	fmt.Fprintf(&b, "%d/%d grounded + %d partial (support %.0f%%); ",
+		v.GroundedCount, v.TotalCount, v.PartialCount, ratio*100)
 	if hasHardUngrounded && firstHardClaim != nil {
 		fmt.Fprintf(&b, "ungrounded %s claim — %q",
 			firstHardClaim.ClaimType, truncate(firstHardClaim.Claim, 140))
@@ -1109,7 +1122,7 @@ func scoreGroundingVerdict(v GroundingVerdict) GroundingVerdict {
 			fmt.Fprintf(&b, " (issue: %s)", firstHardClaim.Issue)
 		}
 	} else {
-		fmt.Fprintf(&b, "grounded ratio below %.0f%% threshold", groundedRatioThreshold*100)
+		fmt.Fprintf(&b, "support ratio below %.0f%% threshold", groundedRatioThreshold*100)
 	}
 	if len(v.RecheckURLs) > 0 {
 		fmt.Fprintf(&b, "; you MUST re-fetch and re-verify: %s",
