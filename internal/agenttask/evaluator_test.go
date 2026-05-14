@@ -120,6 +120,39 @@ func TestExtractURLRequirement(t *testing.T) {
 	}
 }
 
+// diversityBucket distinguishes "vendor blogs" (collapse to registrable
+// domain) from "multi-author platforms" (preprint servers, conference
+// proceedings — each URL is its own bucket). The bucket key is what
+// Gate D in evaluateAcceptance counts before deciding to reject. This
+// guards the regression that landed on 2026-05-14 prod-smoke-s2 where
+// 7 independent arxiv preprints were wrongly classified as monodomain.
+func TestDiversityBucket(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		// Multi-author platforms: each URL is its own bucket.
+		{"arxiv.org/abs/2301.08243", "arxiv.org/abs/2301.08243"},
+		{"arxiv.org/abs/2111.06377", "arxiv.org/abs/2111.06377"},
+		{"openreview.net/forum?id=abc", "openreview.net/forum?id=abc"},
+		{"proceedings.neurips.cc/file/x", "proceedings.neurips.cc/file/x"},
+		{"openaccess.thecvf.com/content/x", "openaccess.thecvf.com/content/x"},
+		// Vendor / company hosts collapse to registrable domain.
+		{"ai.meta.com/blog/v-jepa", "meta.com"},
+		{"engineering.meta.com/posts/x", "meta.com"},
+		{"www.anthropic.com/news/y", "anthropic.com"},
+		{"docs.openai.com/api", "openai.com"},
+		{"github.com/owner/repo", "github.com"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := diversityBucket(tc.in); got != tc.want {
+				t.Errorf("diversityBucket(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // Diversity-grouping integration: given a set of cited URLs, count
 // distinct registrable domains and the top-domain share. Mirrors what
 // Gate D in evaluateAcceptance computes before deciding to reject.
