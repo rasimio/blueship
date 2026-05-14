@@ -16,21 +16,49 @@ import (
 
 const messagesURL = "https://api.anthropic.com/v1/messages"
 
+// claudeCodeIdentity is the system block Anthropic requires on OAuth-authed
+// (subscription) requests — without it the API rejects inference calls from
+// the Claude Code OAuth client. Sent as a separate first system block so it
+// stays out of the cached user-prompt breakpoint.
+const claudeCodeIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
+
+// TokenSource returns a fresh bearer token. Used by the OAuth code path so
+// the request builder doesn't need to know about refresh logic.
+type TokenSource func() (string, error)
+
 // Provider implements bs.CompletionProvider using the Anthropic Messages API.
+// Auth is either a static API key (x-api-key-style bearer) or an OAuth token
+// supplied by tokenSource — the latter requires the Claude Code identity
+// system block and the oauth-2025-04-20 beta header.
 type Provider struct {
-	apiKey     string
-	httpClient *http.Client
-	logger     *slog.Logger
-	backoffs   []time.Duration
+	apiKey      string
+	tokenSource TokenSource
+	oauth       bool
+	httpClient  *http.Client
+	logger      *slog.Logger
+	backoffs    []time.Duration
 }
 
-// NewProvider creates a new Anthropic CompletionProvider.
+// NewProvider creates a new Anthropic CompletionProvider using a static API key.
 func NewProvider(apiKey string, timeout time.Duration, backoffs []time.Duration, logger *slog.Logger) *Provider {
 	return &Provider{
 		apiKey:     apiKey,
 		httpClient: &http.Client{Timeout: timeout},
 		logger:     logger,
 		backoffs:   backoffs,
+	}
+}
+
+// NewOAuthProvider creates a Provider that authenticates via the Anthropic
+// OAuth subscription flow (Claude Code). The bearer token is fetched fresh
+// for each request via tokenSource (which handles refresh internally).
+func NewOAuthProvider(tokenSource TokenSource, timeout time.Duration, backoffs []time.Duration, logger *slog.Logger) *Provider {
+	return &Provider{
+		tokenSource: tokenSource,
+		oauth:       true,
+		httpClient:  &http.Client{Timeout: timeout},
+		logger:      logger,
+		backoffs:    backoffs,
 	}
 }
 
@@ -134,7 +162,7 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 	apiReq := apiRequest{
 		Model:     req.Model,
 		MaxTokens: req.MaxTokens,
-		System:    buildSystem(req.System),
+		System:    buildSystem(req.System, p.oauth),
 		Messages:  buildMessages(req.Messages),
 		Tools:     buildTools(req.Tools),
 	}
@@ -166,9 +194,18 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	httpReq.Header.Set("anthropic-version", "2023-06-01")
 	httpReq.Header.Set("anthropic-beta", "oauth-2025-04-20")
+
+	bearer := p.apiKey
+	if p.oauth {
+		tok, err := p.tokenSource()
+		if err != nil {
+			return nil, fmt.Errorf("anthropic-oauth auth: %w", err)
+		}
+		bearer = tok
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+bearer)
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
@@ -218,15 +255,21 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 
 // buildSystem converts a system prompt string to the Anthropic array format with cache_control.
 // The minimum cacheable size is 1024 tokens (~3072 chars); we only add cache_control if met.
-func buildSystem(system string) []systemBlock {
-	if system == "" {
-		return nil
+// When oauth is true, prepends the Claude Code identity block — required by
+// Anthropic on subscription-authed requests.
+func buildSystem(system string, oauth bool) []systemBlock {
+	var blocks []systemBlock
+	if oauth {
+		blocks = append(blocks, systemBlock{Type: "text", Text: claudeCodeIdentity})
 	}
-	block := systemBlock{Type: "text", Text: system}
-	if len([]rune(system))/3 >= 1024 {
-		block.CacheControl = &cacheControl{Type: "ephemeral"}
+	if system != "" {
+		block := systemBlock{Type: "text", Text: system}
+		if len([]rune(system))/3 >= 1024 {
+			block.CacheControl = &cacheControl{Type: "ephemeral"}
+		}
+		blocks = append(blocks, block)
 	}
-	return []systemBlock{block}
+	return blocks
 }
 
 // buildTools converts ToolDefinitions to apiTools with cache_control on the last entry.

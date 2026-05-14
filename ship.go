@@ -24,6 +24,7 @@ import (
 	"github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/agenttask"
 	"github.com/rasimio/blueship/internal/anthropic"
+	"github.com/rasimio/blueship/internal/anthropicoauth"
 	"github.com/rasimio/blueship/internal/fleet"
 	"github.com/rasimio/blueship/internal/gateway"
 	"github.com/rasimio/blueship/internal/gemini"
@@ -1127,6 +1128,20 @@ func OpenAICodex(refreshToken, tokenFile string, timeout time.Duration, backoffs
 	}
 	ts.Bootstrap(refreshToken)
 	return openaicodex.NewCompletionProvider(ts, timeout, backoffs, logger)
+}
+
+// AnthropicOAuth creates a CompletionProvider using Claude subscription via OAuth.
+// refreshToken is the initial token from env (minted by `arlene-anthropic-login`);
+// tokenFile persists rotated tokens. Requests are made through the standard
+// Anthropic Messages API but authenticated with a subscription-billed bearer
+// token instead of an API key — usage counts against the Claude Code plan.
+func AnthropicOAuth(refreshToken, tokenFile string, timeout time.Duration, backoffs []time.Duration, logger *slog.Logger) CompletionProvider {
+	ts := anthropicoauth.NewTokenStore(tokenFile, logger)
+	if err := ts.Load(); err != nil {
+		logger.Error("anthropic-oauth: load tokens", "error", err)
+	}
+	ts.Bootstrap(refreshToken)
+	return anthropic.NewOAuthProvider(ts.AccessToken, timeout, backoffs, logger)
 }
 
 // Telegram creates a TransportConfig for Telegram.
