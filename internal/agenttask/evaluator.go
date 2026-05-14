@@ -633,34 +633,43 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 		// Smaller reports (1-3 URLs) skip the gate — a focused brief on
 		// one paper is allowed to cite only that paper's family.
 		if urlCount >= 4 {
-			domainCount := map[string]int{}
+			// Diversity buckets: multi-author platforms (arxiv,
+			// openreview, conference proceedings, etc.) get a separate
+			// bucket per URL because each preprint represents an
+			// independent work by potentially-different research groups.
+			// Vendor blogs and company hosts collapse to registrable
+			// domain so 5 URLs across ai.meta.com / engineering.meta.com
+			// count as one source. The "press release" failure mode this
+			// gate exists to catch is unchanged; the false positive on
+			// "7 independent arxiv preprints" goes away.
+			bucketCount := map[string]int{}
 			for key := range resultURLs {
-				if d := registrableDomain(key); d != "" {
-					domainCount[d]++
+				if b := diversityBucket(key); b != "" {
+					bucketCount[b]++
 				}
 			}
-			var topDomain string
+			var topBucket string
 			var topShare int
-			for d, n := range domainCount {
+			for b, n := range bucketCount {
 				if n > topShare {
 					topShare = n
-					topDomain = d
+					topBucket = b
 				}
 			}
-			distinctDomains := len(domainCount)
-			if distinctDomains < 3 || topShare*2 > urlCount {
+			distinctBuckets := len(bucketCount)
+			if distinctBuckets < 3 || topShare*2 > urlCount {
 				deps.Logger.Info("acceptance evaluator: hard-fail (source diversity low)",
 					"task_id", task.ID,
 					"urls_in_result", urlCount,
-					"distinct_domains", distinctDomains,
-					"top_domain", topDomain,
-					"top_domain_share", topShare)
+					"distinct_buckets", distinctBuckets,
+					"top_bucket", topBucket,
+					"top_bucket_share", topShare)
 				return AcceptanceVerdict{
 					Met: false,
 					Reason: fmt.Sprintf(
-						"diversity gate: %d cited URLs but only %d distinct domains (top: %s with %d/%d ≈ %d%%). Strong research needs triangulation across ≥3 distinct domains with no single domain over 50%%. Fetch and cite at least one independent or comparative source outside %s before re-submitting.",
-						urlCount, distinctDomains, topDomain, topShare, urlCount,
-						topShare*100/urlCount, topDomain),
+						"diversity gate: %d cited URLs but only %d distinct sources (top: %s with %d/%d ≈ %d%%). Strong research needs triangulation across ≥3 distinct sources with no single source over 50%%. Different papers on a shared preprint server (arxiv, openreview, etc.) each count as a separate source; but multiple URLs from one vendor's blog or one company's domain count as one. Fetch and cite at least one independent or comparative source outside %s before re-submitting.",
+						urlCount, distinctBuckets, topBucket, topShare, urlCount,
+						topShare*100/urlCount, topBucket),
 				}
 			}
 		}
