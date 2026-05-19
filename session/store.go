@@ -36,17 +36,17 @@ func (s *Store) CreateWithPrevious(ctx context.Context, userID, model, previousI
 			`UPDATE chat_sessions SET active = false, updated_at = NOW() WHERE id = $1`,
 			previousID)
 		err = s.db.QueryRowxContext(ctx,
-			`INSERT INTO chat_sessions (user_id, model, previous_id)
-			 VALUES ($1, $2, $3)
+			`INSERT INTO chat_sessions (soul_id, user_id, model, previous_id)
+			 VALUES ($4::uuid, $1, $2, $3)
 			 RETURNING *`,
-			userID, model, previousID,
+			userID, model, previousID, bs.SoulID(),
 		).StructScan(&sess)
 	} else {
 		err = s.db.QueryRowxContext(ctx,
-			`INSERT INTO chat_sessions (user_id, model)
-			 VALUES ($1, $2)
+			`INSERT INTO chat_sessions (soul_id, user_id, model)
+			 VALUES ($3::uuid, $1, $2)
 			 RETURNING *`,
-			userID, model,
+			userID, model, bs.SoulID(),
 		).StructScan(&sess)
 	}
 	if err != nil {
@@ -70,17 +70,17 @@ func (s *Store) CreateSessionWithSource(ctx context.Context, userID, model, sour
 	var err error
 	if sourceID != "" {
 		err = s.db.QueryRowxContext(ctx,
-			`INSERT INTO chat_sessions (user_id, model, source, source_id)
-			 VALUES ($1, $2, $3, $4)
+			`INSERT INTO chat_sessions (soul_id, user_id, model, source, source_id)
+			 VALUES ($5::uuid, $1, $2, $3, $4)
 			 RETURNING *`,
-			userID, model, source, sourceID,
+			userID, model, source, sourceID, bs.SoulID(),
 		).StructScan(&sess)
 	} else {
 		err = s.db.QueryRowxContext(ctx,
-			`INSERT INTO chat_sessions (user_id, model, source)
-			 VALUES ($1, $2, $3)
+			`INSERT INTO chat_sessions (soul_id, user_id, model, source)
+			 VALUES ($4::uuid, $1, $2, $3)
 			 RETURNING *`,
-			userID, model, source,
+			userID, model, source, bs.SoulID(),
 		).StructScan(&sess)
 	}
 	if err != nil {
@@ -185,10 +185,10 @@ func (s *Store) appendInternal(ctx context.Context, sessionID, role string, bloc
 
 	var m Message
 	err = tx.QueryRowxContext(ctx,
-		`INSERT INTO chat_messages (session_id, role, content, tool_use_id, token_estimate)
-		 VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO chat_messages (soul_id, session_id, role, content, tool_use_id, token_estimate)
+		 VALUES ($6::uuid, $1, $2, $3, $4, $5)
 		 RETURNING id, session_id, role, content, tool_use_id, token_estimate, created_at`,
-		sessionID, role, contentJSON, toolUseID, tokens,
+		sessionID, role, contentJSON, toolUseID, tokens, bs.SoulID(),
 	).StructScan(&m)
 	if err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)

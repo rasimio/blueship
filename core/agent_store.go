@@ -211,17 +211,18 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 	}
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO agent_tasks (id, user_id, title, description, handler, config, tools,
+		INSERT INTO agent_tasks (soul_id, id, user_id, title, description, handler, config, tools,
 		                         schedule, deadline, status, progress, max_iterations,
 		                         strategy, delegate_to, plan, use_agents,
 		                         acceptance_criteria, session_id, cadence)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+		VALUES ($20::uuid,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
 		task.ID, task.UserID, task.Title, task.Description,
 		task.Handler, task.Config, task.Tools,
 		task.Schedule, task.Deadline,
 		task.Status, task.Progress, task.MaxIterations,
 		task.Strategy, task.DelegateTo, task.Plan, task.UseAgents,
-		task.AcceptanceCriteria, task.SessionID, task.Cadence)
+		task.AcceptanceCriteria, task.SessionID, task.Cadence,
+		SoulID())
 	if err != nil {
 		return AgentTask{}, fmt.Errorf("create agent task: %w", err)
 	}
@@ -267,11 +268,12 @@ func (s *AgentTaskStore) RecordToolOutput(ctx context.Context, rec ToolOutputRec
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_task_tool_outputs (
-			task_id, iteration, tool_name,
+			soul_id, task_id, iteration, tool_name,
 			tool_input, output, output_format, metadata
-		) VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb)`,
+		) VALUES ($8::uuid, $1, $2, $3, $4::jsonb, $5, $6, $7::jsonb)`,
 		rec.TaskID, rec.Iteration, rec.ToolName,
-		input, rec.Output, rec.OutputFormat, meta)
+		input, rec.Output, rec.OutputFormat, meta,
+		SoulID())
 	return err
 }
 
@@ -351,12 +353,12 @@ func (s *AgentTaskStore) RecordIteration(ctx context.Context, rec IterationRecor
 	durationMs := int(rec.CompletedAt.Sub(rec.StartedAt).Milliseconds())
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_task_iterations (
-			task_id, iteration, started_at, completed_at, duration_ms,
+			soul_id, task_id, iteration, started_at, completed_at, duration_ms,
 			outcome, is_final, acceptance_met, acceptance_reason,
 			output, notify, tool_calls, progress, error,
 			trace_id, span_id,
 			grounded_count, ungrounded_count, grounding_verdict
-		) VALUES ($1, $2, $3, $4, $5,
+		) VALUES ($20::uuid, $1, $2, $3, $4, $5,
 		          $6, $7, $8, $9,
 		          $10, $11, $12::jsonb, $13::jsonb, $14,
 		          $15, $16,
@@ -367,6 +369,7 @@ func (s *AgentTaskStore) RecordIteration(ctx context.Context, rec IterationRecor
 		rec.Output, rec.Notify, string(rec.ToolCalls), string(rec.Progress), rec.Error,
 		rec.TraceID, rec.SpanID,
 		grounded, ungrounded, groundingVerdict,
+		SoulID(),
 	)
 	return err
 }
@@ -412,12 +415,12 @@ func (s *AgentTaskStore) Resolve(ctx context.Context, raw string) (AgentTask, er
 // If one exists, updates the schedule. Uses the unique partial index from migration 014.
 func (s *AgentTaskStore) EnsureRecurring(ctx context.Context, userID uuid.UUID, handler, schedule, title string) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO agent_tasks (user_id, handler, schedule, title, status, max_iterations,
+		INSERT INTO agent_tasks (soul_id, user_id, handler, schedule, title, status, max_iterations,
 		                         config, progress, strategy, plan)
-		VALUES ($1, $2, $3, $4, 'pending', 1, '{}', '{}', 'recurring', '{}')
-		ON CONFLICT (user_id, handler) WHERE schedule IS NOT NULL AND status != 'failed'
+		VALUES ($5::uuid, $1, $2, $3, $4, 'pending', 1, '{}', '{}', 'recurring', '{}')
+		ON CONFLICT (soul_id, user_id, handler) WHERE schedule IS NOT NULL AND status != 'failed'
 		DO UPDATE SET schedule = EXCLUDED.schedule, title = EXCLUDED.title`,
-		userID, handler, schedule, title)
+		userID, handler, schedule, title, SoulID())
 	return err
 }
 

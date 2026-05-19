@@ -17,6 +17,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/rasimio/blueship/a2a"
+	bscore "github.com/rasimio/blueship/core"
 )
 
 // ErrNotFound is returned by Get/Read helpers when the row does not exist.
@@ -185,13 +186,14 @@ func (s *Store) CreateCall(ctx context.Context, c a2a.Call) (string, error) {
 		c.State = a2a.CallStatePending
 	}
 	const q = `
-		INSERT INTO a2a_calls (id, peer_id, peer_name, direction, tool_name, mode,
+		INSERT INTO a2a_calls (soul_id, id, peer_id, peer_name, direction, tool_name, mode,
 		                       correlation_id, input, state)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		VALUES ($10::uuid, $1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`
 	_, err := s.db.ExecContext(ctx, q,
 		c.ID, c.PeerID, c.PeerName, string(c.Direction), c.ToolName, string(c.Mode),
-		c.CorrelationID, []byte(c.Input), string(c.State))
+		c.CorrelationID, []byte(c.Input), string(c.State),
+		bscore.SoulID())
 	if err != nil {
 		return "", fmt.Errorf("CreateCall: %w", err)
 	}
@@ -296,8 +298,8 @@ func (s *Store) AppendEvent(ctx context.Context, callID string, eventType a2a.Ev
 			FROM a2a_events
 			WHERE call_id = $1
 		)
-		INSERT INTO a2a_events (call_id, seq, type, payload, is_final)
-		SELECT $1, next.seq, $2, $3, $4 FROM next
+		INSERT INTO a2a_events (soul_id, call_id, seq, type, payload, is_final)
+		SELECT $5::uuid, $1, next.seq, $2, $3, $4 FROM next
 		RETURNING id, call_id, seq, type, COALESCE(payload, '{}'::jsonb) AS payload, is_final, created_at
 	`
 	var ev a2a.Event
@@ -305,7 +307,7 @@ func (s *Store) AppendEvent(ctx context.Context, callID string, eventType a2a.Ev
 	if len(payload) > 0 {
 		payloadBytes = []byte(payload)
 	}
-	if err := s.db.GetContext(ctx, &ev, q, callID, string(eventType), payloadBytes, isFinal); err != nil {
+	if err := s.db.GetContext(ctx, &ev, q, callID, string(eventType), payloadBytes, isFinal, bscore.SoulID()); err != nil {
 		return nil, fmt.Errorf("AppendEvent: %w", err)
 	}
 	return &ev, nil
