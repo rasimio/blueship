@@ -10,6 +10,7 @@ import (
 // Session represents a chat session stored in PostgreSQL.
 type Session struct {
 	ID               string    `db:"id" json:"id"`
+	SoulID           string    `db:"soul_id" json:"soul_id"`
 	UserID           string    `db:"user_id" json:"user_id"`
 	Title            *string   `db:"title" json:"title,omitempty"`
 	Model            string    `db:"model" json:"model"`

@@ -40,6 +40,7 @@ type AgentHandler interface {
 // only as a runaway-safety cap.
 type AgentTask struct {
 	ID          uuid.UUID       `db:"id" json:"id"`
+	SoulID      uuid.UUID       `db:"soul_id" json:"soul_id"`
 	UserID      uuid.UUID       `db:"user_id" json:"user_id"`
 	Title       string          `db:"title" json:"title"`
 	Description *string         `db:"description" json:"description,omitempty"`
