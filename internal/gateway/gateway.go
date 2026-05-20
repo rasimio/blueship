@@ -823,12 +823,13 @@ func (g *Gateway) ProcessInbound(ctx context.Context, chatID string, messages []
 		return fmt.Errorf("resolve user: %w", err)
 	}
 
-	// Resolve the soul this chat is routed to and thread it through ctx
-	// so every downstream write (memory, chat_*, vad, ...) is tenant-
-	// attributed. us.SoulID mirrors it for the detached goroutines
-	// (MessageEncoder / TurnCompletedHook) that run off context.Background.
+	// Resolve the soul this user's requests route to and thread it
+	// through ctx so every downstream write (memory, chat_*, vad, ...)
+	// is tenant-attributed. us.SoulID mirrors it for the detached
+	// goroutines (MessageEncoder / TurnCompletedHook) that run off
+	// context.Background.
 	if g.deps.ResolveSoul != nil {
-		soulID, rErr := g.deps.ResolveSoul(ctx, chatID)
+		soulID, rErr := g.deps.ResolveSoul(ctx, us.UserID)
 		if rErr != nil {
 			return fmt.Errorf("resolve soul: %w", rErr)
 		}

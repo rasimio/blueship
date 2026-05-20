@@ -155,15 +155,15 @@ type Deps struct {
 	// so the peer can route status callbacks back here.
 	SelfAgentID func() string
 
-	// ResolveSoul maps an incoming transport identity (chat id) to the
-	// soul that should handle it. Called at the gateway boundary before
-	// dispatching reflex/cortex; the resolved soul is threaded through
-	// ctx via WithSoulID so every downstream write is tenant-attributed.
-	// The embedding application supplies the implementation — blueship
-	// stays generic about how souls are routed. Nil = single-soul host
-	// with no resolution (gateway then leaves ctx soul-less, which is a
-	// misconfiguration for any tenant-bound write).
-	ResolveSoul func(ctx context.Context, chatID string) (uuid.UUID, error)
+	// ResolveSoul maps an already-resolved user to the soul that should
+	// handle their request. Called at the gateway boundary after user
+	// resolution; the resolved soul is threaded through ctx via
+	// WithSoulID so every downstream write is tenant-attributed. The
+	// embedding application supplies the implementation (membership-
+	// graph lookup) — blueship stays generic about how souls are
+	// routed. Nil leaves ctx soul-less, a misconfiguration for any
+	// tenant-bound write.
+	ResolveSoul func(ctx context.Context, userID uuid.UUID) (uuid.UUID, error)
 
 	pool *dbPool
 }
