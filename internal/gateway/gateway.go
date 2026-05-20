@@ -266,6 +266,28 @@ func (g *Gateway) loadSystemPrompts(dir string) error {
 	return nil
 }
 
+// systemPromptForSoul returns the persona prompt for a soul. If the soul
+// has a row in vaelum.soul_personas (every platform-created soul does),
+// that persona is used; otherwise the process-global prompt loaded from
+// files at startup is returned — so the founding soul, which has no
+// soul_personas row, behaves byte-for-byte as before.
+func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID) string {
+	if soulID == uuid.Nil {
+		return g.systemPrompt
+	}
+	db, err := g.deps.DB("ship")
+	if err != nil {
+		return g.systemPrompt
+	}
+	var prompt string
+	if err := db.GetContext(ctx, &prompt,
+		`SELECT system_prompt FROM vaelum.soul_personas WHERE soul_id = $1`,
+		soulID); err != nil || prompt == "" {
+		return g.systemPrompt
+	}
+	return prompt
+}
+
 // Run starts the polling loop and processes updates. Blocks until ctx is done.
 func (g *Gateway) Run(ctx context.Context) {
 	ch := make(chan telegram.Update, 100)
@@ -1100,10 +1122,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	loop := agent.NewLoop(g.provider, g.store, us.Registry, g.deps.RoleTools, g.deps.Config, g.logger)
 	loop.SetCompactor(g.compactor)
 
-	// Inject current datetime into system prompt so the model always knows "today".
+	// Inject current datetime into the per-soul system prompt so the model
+	// always knows "today". The persona is resolved per soul_id; the
+	// founding soul falls back to the file-loaded process-global prompt.
 	now := time.Now().In(g.tz)
 	systemWithTime := fmt.Sprintf("[current_datetime: %s]\n\n%s",
-		now.Format("2006-01-02 15:04 MST (Monday)"), g.systemPrompt)
+		now.Format("2006-01-02 15:04 MST (Monday)"),
+		g.systemPromptForSoul(ctx, us.SoulID))
 
 	var cortexTemp float64
 	if g.deps.ModelStore != nil {
