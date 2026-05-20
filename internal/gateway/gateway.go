@@ -50,6 +50,14 @@ type Gateway struct {
 
 	systemPrompt string
 
+	// Platform prompt layers for souls in the vaelum tenancy model. Loaded
+	// once from vaelum.platform_prompts and cached by platformPrompts; the
+	// database is the runtime source of truth for system prompts.
+	ppMu       sync.Mutex
+	ppLoaded   bool
+	ppPreamble string
+	ppAgents   string
+
 	// Reflex pipeline prompts. Loaded from <Config.Prompts>/<key>.md when
 	// the agent ships those files; missing files leave the default empty.
 	reflexSystemPrompt   string // system prompt for reflex LLM call
@@ -266,26 +274,66 @@ func (g *Gateway) loadSystemPrompts(dir string) error {
 	return nil
 }
 
-// systemPromptForSoul returns the persona prompt for a soul. If the soul
-// has a row in vaelum.soul_personas (every platform-created soul does),
-// that persona is used; otherwise the process-global prompt loaded from
-// files at startup is returned — so the founding soul, which has no
-// soul_personas row, behaves byte-for-byte as before.
-func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID) string {
+// systemPromptForSoul returns the fully composed system prompt for a soul:
+// the platform preamble + the soul's own persona + the platform agents
+// layer, all read from the database. A soul without a vaelum.soul_personas
+// row is a misconfiguration and surfaces as an error — there is no silent
+// fallback to file-loaded prompts. Framework consumers that do not use the
+// vaelum soul model (soulID is nil) get the file-loaded process prompt.
+func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID) (string, error) {
 	if soulID == uuid.Nil {
-		return g.systemPrompt
+		return g.systemPrompt, nil
 	}
 	db, err := g.deps.DB("ship")
 	if err != nil {
-		return g.systemPrompt
+		return "", fmt.Errorf("system prompt for soul %s: db unavailable: %w", soulID, err)
 	}
-	var prompt string
-	if err := db.GetContext(ctx, &prompt,
+	var persona string
+	if err := db.GetContext(ctx, &persona,
 		`SELECT system_prompt FROM vaelum.soul_personas WHERE soul_id = $1`,
-		soulID); err != nil || prompt == "" {
-		return g.systemPrompt
+		soulID); err != nil {
+		return "", fmt.Errorf("system prompt for soul %s: no persona row in vaelum.soul_personas: %w", soulID, err)
 	}
-	return prompt
+	if strings.TrimSpace(persona) == "" {
+		return "", fmt.Errorf("system prompt for soul %s: persona row has empty system_prompt", soulID)
+	}
+	preamble, agents, err := g.platformPrompts(ctx)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join([]string{preamble, persona, agents}, "\n\n"), nil
+}
+
+// platformPrompts returns the platform preamble and agents layers, loaded
+// once from vaelum.platform_prompts and cached for the process lifetime.
+// A failed load is not cached, so a transient error is retried next call.
+func (g *Gateway) platformPrompts(ctx context.Context) (preamble, agents string, err error) {
+	g.ppMu.Lock()
+	defer g.ppMu.Unlock()
+	if g.ppLoaded {
+		return g.ppPreamble, g.ppAgents, nil
+	}
+	db, err := g.deps.DB("ship")
+	if err != nil {
+		return "", "", fmt.Errorf("platform prompts: db unavailable: %w", err)
+	}
+	var rows []struct {
+		Key     string `db:"key"`
+		Content string `db:"content"`
+	}
+	if err := db.SelectContext(ctx, &rows,
+		`SELECT key, content FROM vaelum.platform_prompts WHERE key IN ('preamble', 'agents')`); err != nil {
+		return "", "", fmt.Errorf("platform prompts: query vaelum.platform_prompts: %w", err)
+	}
+	layer := map[string]string{}
+	for _, r := range rows {
+		layer[r.Key] = r.Content
+	}
+	if strings.TrimSpace(layer["preamble"]) == "" || strings.TrimSpace(layer["agents"]) == "" {
+		return "", "", fmt.Errorf("platform prompts: vaelum.platform_prompts is missing the 'preamble' or 'agents' row")
+	}
+	g.ppPreamble, g.ppAgents, g.ppLoaded = layer["preamble"], layer["agents"], true
+	return g.ppPreamble, g.ppAgents, nil
 }
 
 // tryTelegramPairing checks whether a message is a Vaelum pairing code.
@@ -736,13 +784,15 @@ func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx,
 	b.WriteString(fmt.Sprintf("User: %s\n\n", us.ChatID))
 
 	// Full Cortex SYSTEM PROMPT — the complete plain text that lands in
-	// the LLM's `system` channel before any conversation history. Includes
-	// PREAMBLE / SOUL / AGENTS / behavioral rules that the model loaded
-	// from .md files. Shown verbatim (no truncation) so we can answer
-	// "what does the model actually see?".
+	// the LLM's `system` channel before any conversation history: the
+	// platform preamble, this soul's persona, and the agents layer,
+	// composed from the database. Shown verbatim (no truncation) so we
+	// can answer "what does the model actually see?".
 	b.WriteString("=== SYSTEM PROMPT (full plain text) ===\n")
-	if g.systemPrompt != "" {
-		b.WriteString(g.systemPrompt)
+	if sp, err := g.systemPromptForSoul(ctx, us.SoulID); err != nil {
+		b.WriteString("(error resolving system prompt: " + err.Error() + ")")
+	} else if sp != "" {
+		b.WriteString(sp)
 	} else {
 		b.WriteString("(empty)")
 	}
@@ -1170,13 +1220,20 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	loop := agent.NewLoop(g.provider, g.store, us.Registry, g.deps.RoleTools, g.deps.Config, g.logger)
 	loop.SetCompactor(g.compactor)
 
-	// Inject current datetime into the per-soul system prompt so the model
-	// always knows "today". The persona is resolved per soul_id; the
-	// founding soul falls back to the file-loaded process-global prompt.
+	// Resolve the soul's full system prompt from the database (platform
+	// preamble + persona + agents) and stamp the current datetime so the
+	// model always knows "today". A soul with no persona row is a
+	// misconfiguration — abort the turn loudly rather than answer with the
+	// wrong identity.
 	now := time.Now().In(g.tz)
+	soulPrompt, err := g.systemPromptForSoul(ctx, us.SoulID)
+	if err != nil {
+		g.logger.Error("cortex: cannot resolve system prompt, aborting turn",
+			"soul_id", us.SoulID.String(), "chat_id", us.ChatID, "error", err)
+		return
+	}
 	systemWithTime := fmt.Sprintf("[current_datetime: %s]\n\n%s",
-		now.Format("2006-01-02 15:04 MST (Monday)"),
-		g.systemPromptForSoul(ctx, us.SoulID))
+		now.Format("2006-01-02 15:04 MST (Monday)"), soulPrompt)
 
 	var cortexTemp float64
 	if g.deps.ModelStore != nil {
