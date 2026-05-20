@@ -28,6 +28,7 @@ import (
 	"github.com/rasimio/blueship/internal/fleet"
 	"github.com/rasimio/blueship/internal/gateway"
 	"github.com/rasimio/blueship/internal/gemini"
+	"github.com/rasimio/blueship/internal/infrastructure/httpchat"
 	"github.com/rasimio/blueship/internal/infrastructure/ws"
 	"github.com/rasimio/blueship/internal/ollama"
 	"github.com/rasimio/blueship/internal/openai"
@@ -363,6 +364,18 @@ func (s *Ship) Run(ctx context.Context) error {
 			defer wg.Done()
 			if err := wsSrv.Run(ctx); err != nil {
 				s.logger.Error("websocket server error", "error", err)
+			}
+		}()
+	}
+
+	// 6b. Start HTTP/SSE chat server (Vaelum web platform).
+	if hcCfg := s.cfg.Transport.HTTPChat; hcCfg.Port > 0 && gw != nil {
+		hcSrv := httpchat.NewServer(gw, hcCfg.Port, hcCfg.Token, s.logger)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := hcSrv.Run(ctx); err != nil {
+				s.logger.Error("http chat server error", "error", err)
 			}
 		}()
 	}

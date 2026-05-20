@@ -114,12 +114,22 @@ type TransportConfig struct {
 
 	// WebSocket server for voice/desktop clients (runs alongside Telegram).
 	WebSocket WebSocketConfig
+
+	// HTTPChat server for the Vaelum web platform (runs alongside Telegram).
+	HTTPChat HTTPChatConfig
 }
 
 // WebSocketConfig configures the optional WebSocket server.
 type WebSocketConfig struct {
 	Port  int    // 0 = disabled
 	Token string // bearer auth token
+}
+
+// HTTPChatConfig configures the optional HTTP/SSE chat server that serves
+// the Vaelum web platform's live chat.
+type HTTPChatConfig struct {
+	Port  int    // 0 = disabled
+	Token string // bearer service token vaelum must present
 }
 
 // ModelRef identifies a model and its provider.

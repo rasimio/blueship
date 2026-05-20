@@ -874,6 +874,74 @@ func (g *Gateway) ProcessInbound(ctx context.Context, chatID string, messages []
 	return nil
 }
 
+// ProcessInboundForUser is the entry point for authenticated platform
+// (Vaelum) web users. The caller has already authenticated the user and
+// resolved the soul, so this bypasses chatID resolution and the
+// owner-only gate that getOrInitUser enforces for the Telegram path.
+func (g *Gateway) ProcessInboundForUser(ctx context.Context, userID, soulID uuid.UUID, messages []bs.InboundMessage, sink bs.ResponseSink) error {
+	us, err := g.getOrInitWebUser(ctx, userID, soulID)
+	if err != nil {
+		return fmt.Errorf("init web user: %w", err)
+	}
+
+	var pending []pendingMsg
+	for _, m := range messages {
+		if m.Text == "" && len(m.Images) == 0 {
+			continue
+		}
+		pending = append(pending, pendingMsg{text: m.Text, images: m.Images})
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	g.processMessages(ctx, us, pending, sink)
+	return nil
+}
+
+// getOrInitWebUser builds (or reuses) a UserState for an authenticated
+// platform web user. Unlike getOrInitUser it does not consult
+// user_profiles and does not apply the owner gate — Vaelum is the
+// authentication boundary for web users, and the soul is supplied by the
+// caller (resolved from vaelum.memberships on the platform side).
+func (g *Gateway) getOrInitWebUser(ctx context.Context, userID, soulID uuid.UUID) (*UserState, error) {
+	chatID := "vaelum:" + userID.String()
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if us, ok := g.users[chatID]; ok {
+		return us, nil
+	}
+
+	userDeps := g.deps.ForUser(userID, chatID, false)
+	registry := bs.NewToolRegistry()
+	tool.RegisterBuiltinTools(registry, userDeps)
+	if err := tool.RegisterBrowserTools(registry, userDeps); err != nil {
+		g.logger.Warn("gateway: register browser tools failed", "error", err)
+	}
+	if err := tool.RegisterAgentTaskTools(registry, userDeps); err != nil {
+		g.logger.Warn("gateway: register agent_task tools failed", "error", err)
+	}
+	g.modules.RegisterAllTools(registry, userDeps)
+
+	us := &UserState{
+		ChatID:   chatID,
+		UserID:   userID,
+		SoulID:   soulID,
+		IsOwner:  false,
+		Registry: registry,
+		Deps:     userDeps,
+	}
+	g.users[chatID] = us
+	g.logger.Info("initialized web user",
+		"chat_id", chatID,
+		"user_id", userID.String(),
+		"soul_id", soulID.String(),
+	)
+	return us, nil
+}
+
 func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pendingMsg, sink bs.ResponseSink) {
 	us.Mu.Lock()
 	defer us.Mu.Unlock()
