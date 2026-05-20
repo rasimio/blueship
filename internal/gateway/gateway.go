@@ -559,6 +559,20 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 		return nil, fmt.Errorf("non-owner user rejected")
 	}
 
+	// Resolve the soul this user routes to. Done here (not in
+	// ProcessInbound) because the Telegram path enters via handleUpdate
+	// → debouncer and never touches ProcessInbound — getOrInitUser is
+	// the one boundary both transports share.
+	var soulID uuid.UUID
+	if g.deps.ResolveSoul != nil {
+		soulID, err = g.deps.ResolveSoul(ctx, userID)
+		if err != nil {
+			g.logger.Error("gateway: soul resolution failed",
+				"chat_id", chatID, "user_id", userID.String(), "error", err)
+			return nil, fmt.Errorf("resolve soul: %w", err)
+		}
+	}
+
 	userDeps := g.deps.ForUser(userID, chatID, isOwner)
 	registry := bs.NewToolRegistry()
 	tool.RegisterBuiltinTools(registry, userDeps)
@@ -573,6 +587,7 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 	us := &UserState{
 		ChatID:   chatID,
 		UserID:   userID,
+		SoulID:   soulID,
 		IsOwner:  isOwner,
 		Registry: registry,
 		Deps:     userDeps,
@@ -822,20 +837,8 @@ func (g *Gateway) ProcessInbound(ctx context.Context, chatID string, messages []
 	if err != nil {
 		return fmt.Errorf("resolve user: %w", err)
 	}
-
-	// Resolve the soul this user's requests route to and thread it
-	// through ctx so every downstream write (memory, chat_*, vad, ...)
-	// is tenant-attributed. us.SoulID mirrors it for the detached
-	// goroutines (MessageEncoder / TurnCompletedHook) that run off
-	// context.Background.
-	if g.deps.ResolveSoul != nil {
-		soulID, rErr := g.deps.ResolveSoul(ctx, us.UserID)
-		if rErr != nil {
-			return fmt.Errorf("resolve soul: %w", rErr)
-		}
-		ctx = bs.WithSoulID(ctx, soulID)
-		us.SoulID = soulID
-	}
+	// Soul is resolved + stashed on us inside getOrInitUser; processMessages
+	// re-attaches it to ctx. Nothing to do here.
 
 	// Transcribe audio if present.
 	for i, m := range messages {
@@ -882,6 +885,12 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// requester directly when status changes, instead of broadcasting
 	// through fleet peers).
 	ctx = bs.ContextWithChatID(ctx, us.ChatID)
+
+	// Re-attach the soul. The Telegram path reaches here via a debouncer
+	// goroutine whose ctx was captured at debouncer-creation time —
+	// before any per-turn tagging — so the soul is sourced from
+	// UserState (set in getOrInitUser), not from the inbound ctx.
+	ctx = bs.WithSoulID(ctx, us.SoulID)
 
 	typingCtx, stopTyping := context.WithCancel(ctx)
 	go g.keepTypingViaSink(typingCtx, sink)
