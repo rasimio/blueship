@@ -129,6 +129,7 @@ type UserState struct {
 	Mu       sync.Mutex
 	ChatID   string // canonical chat ID ("telegram:123", "voice:owner")
 	UserID   uuid.UUID
+	SoulID   uuid.UUID // soul this chat is routed to; resolved per inbound batch
 	IsOwner  bool
 	Registry *bs.ToolRegistry
 	Deps     *bs.Deps // per-user deps (carries ContextInjector set by modules)
@@ -822,6 +823,19 @@ func (g *Gateway) ProcessInbound(ctx context.Context, chatID string, messages []
 		return fmt.Errorf("resolve user: %w", err)
 	}
 
+	// Resolve the soul this chat is routed to and thread it through ctx
+	// so every downstream write (memory, chat_*, vad, ...) is tenant-
+	// attributed. us.SoulID mirrors it for the detached goroutines
+	// (MessageEncoder / TurnCompletedHook) that run off context.Background.
+	if g.deps.ResolveSoul != nil {
+		soulID, rErr := g.deps.ResolveSoul(ctx, chatID)
+		if rErr != nil {
+			return fmt.Errorf("resolve soul: %w", rErr)
+		}
+		ctx = bs.WithSoulID(ctx, soulID)
+		us.SoulID = soulID
+	}
+
 	// Transcribe audio if present.
 	for i, m := range messages {
 		if len(m.Audio) > 0 && g.whisper != nil && g.whisper.IsConfigured() {
@@ -896,9 +910,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		}
 	}
 
-	// Memory encoding: Recall → Compare → React (non-blocking).
+	// Memory encoding: Recall → Compare → React (non-blocking). Detaches
+	// from the request ctx but re-carries the soul so its writes stay
+	// tenant-attributed.
 	if msgText != "" && g.deps.MessageEncoder != nil {
-		go g.deps.MessageEncoder(context.Background(), us.UserID.String(), msgText)
+		go g.deps.MessageEncoder(bs.WithSoulID(context.Background(), us.SoulID), us.UserID.String(), msgText)
 	}
 
 	sess, err := g.GetOrCreateSession(ctx, us)
@@ -1259,7 +1275,7 @@ func (g *Gateway) emitTurnCompleted(us *UserState, sess *session.Session) {
 		g.logger.Warn("turn_completed: invalid session id", "session_id", sess.ID, "error", err)
 		return
 	}
-	go g.deps.TurnCompletedHook(context.Background(), us.UserID, sid)
+	go g.deps.TurnCompletedHook(bs.WithSoulID(context.Background(), us.SoulID), us.UserID, sid)
 }
 
 // isVoiceEnabled checks if the user has voice mode on.

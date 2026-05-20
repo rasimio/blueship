@@ -169,6 +169,12 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	s.setBusy(task.ID.String(), true)
 	defer s.setBusy(task.ID.String(), false)
 
+	// Tenant-attribute every write this iteration does. The task row
+	// carries its own soul_id (denormalised in Phase A); thread it
+	// through ctx so the handler, its tools, and the per-call DB ctxes
+	// below all resolve the right soul.
+	ctx = core.WithSoulID(ctx, task.SoulID)
+
 	ctx, span := telemetry.StartTaskSpan(ctx, task.ID.String(), task.Handler, task.Strategy, dispatchTag, task.Iteration+1)
 	defer span.End()
 
@@ -266,7 +272,9 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	// before reaching s.store.Complete / .UpdateProgress and every
 	// finished research task logged "context deadline exceeded".
 	newDBCtx := func() (context.Context, context.CancelFunc) {
-		return context.WithTimeout(context.Background(), 10*time.Second)
+		// Background-rooted (survives iteration-ctx cancel on shutdown)
+		// but re-carries the soul so detached DB writes stay attributed.
+		return context.WithTimeout(core.WithSoulID(context.Background(), task.SoulID), 10*time.Second)
 	}
 
 	// Audit-log writer fires last, after every branch above has had a
@@ -294,7 +302,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			GroundingVerdict: iterationGroundingVerdict,
 		}
 		go func() {
-			recCtx, recCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			recCtx, recCancel := context.WithTimeout(core.WithSoulID(context.Background(), task.SoulID), 10*time.Second)
 			defer recCancel()
 			if err := s.store.RecordIteration(recCtx, rec); err != nil {
 				s.logger.WarnContext(recCtx, "agent-tasks: record iteration failed",
@@ -332,7 +340,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 	// slow consumer doesn't stall executeTask completion.
 	defer func() {
 		if s.deps.AgentIterationCompletedHook != nil {
-			go s.deps.AgentIterationCompletedHook(context.Background(), task, result)
+			go s.deps.AgentIterationCompletedHook(core.WithSoulID(context.Background(), task.SoulID), task, result)
 		}
 	}()
 
@@ -481,7 +489,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		if task.Schedule == nil && s.onStatusChange != nil {
 			task.Status = "done"
 			task.Result = &result.Output
-			go s.onStatusChange(context.Background(), task)
+			go s.onStatusChange(core.WithSoulID(context.Background(), task.SoulID), task)
 		}
 	} else {
 		// Mid-task iteration. Push only when the handler explicitly

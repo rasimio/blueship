@@ -7,8 +7,9 @@ import (
 	"strings"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
 	"github.com/jmoiron/sqlx"
+
+	bs "github.com/rasimio/blueship/core"
 )
 
 // Store provides CRUD operations for chat sessions and messages.
@@ -39,14 +40,14 @@ func (s *Store) CreateWithPrevious(ctx context.Context, userID, model, previousI
 			`INSERT INTO chat_sessions (soul_id, user_id, model, previous_id)
 			 VALUES ($4::uuid, $1, $2, $3)
 			 RETURNING *`,
-			userID, model, previousID, bs.SoulID(),
+			userID, model, previousID, bs.SoulIDFromContext(ctx),
 		).StructScan(&sess)
 	} else {
 		err = s.db.QueryRowxContext(ctx,
 			`INSERT INTO chat_sessions (soul_id, user_id, model)
 			 VALUES ($3::uuid, $1, $2)
 			 RETURNING *`,
-			userID, model, bs.SoulID(),
+			userID, model, bs.SoulIDFromContext(ctx),
 		).StructScan(&sess)
 	}
 	if err != nil {
@@ -73,14 +74,14 @@ func (s *Store) CreateSessionWithSource(ctx context.Context, userID, model, sour
 			`INSERT INTO chat_sessions (soul_id, user_id, model, source, source_id)
 			 VALUES ($5::uuid, $1, $2, $3, $4)
 			 RETURNING *`,
-			userID, model, source, sourceID, bs.SoulID(),
+			userID, model, source, sourceID, bs.SoulIDFromContext(ctx),
 		).StructScan(&sess)
 	} else {
 		err = s.db.QueryRowxContext(ctx,
 			`INSERT INTO chat_sessions (soul_id, user_id, model, source)
 			 VALUES ($4::uuid, $1, $2, $3)
 			 RETURNING *`,
-			userID, model, source, bs.SoulID(),
+			userID, model, source, bs.SoulIDFromContext(ctx),
 		).StructScan(&sess)
 	}
 	if err != nil {
@@ -188,7 +189,7 @@ func (s *Store) appendInternal(ctx context.Context, sessionID, role string, bloc
 		`INSERT INTO chat_messages (soul_id, session_id, role, content, tool_use_id, token_estimate)
 		 VALUES ($6::uuid, $1, $2, $3, $4, $5)
 		 RETURNING id, session_id, role, content, tool_use_id, token_estimate, created_at`,
-		sessionID, role, contentJSON, toolUseID, tokens, bs.SoulID(),
+		sessionID, role, contentJSON, toolUseID, tokens, bs.SoulIDFromContext(ctx),
 	).StructScan(&m)
 	if err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)

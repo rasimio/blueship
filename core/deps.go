@@ -39,6 +39,46 @@ func ChatIDFromContext(ctx context.Context) string {
 	return v
 }
 
+// soulIDCtxKey is a typed context key carrying the tenant identity of
+// the request — which soul this incoming message / agent task / CLI
+// invocation belongs to. Resolved at transport boundaries (gateway,
+// scheduler, CLI startup), threaded through ctx so every downstream
+// repo INSERT can read it without needing soul-specific Deps wiring.
+// One arlene runtime hosts N souls concurrently; soul is per-request,
+// not per-process.
+type soulIDCtxKey struct{}
+
+// WithSoulID returns a copy of ctx carrying the given soul identity.
+// Passing uuid.Nil is a no-op (treated as "no soul resolution
+// happened yet"). Idempotent: re-setting overwrites cleanly.
+func WithSoulID(ctx context.Context, id uuid.UUID) context.Context {
+	if id == uuid.Nil {
+		return ctx
+	}
+	return context.WithValue(ctx, soulIDCtxKey{}, id)
+}
+
+// SoulIDFromContext returns the soul id stashed via WithSoulID, or
+// uuid.Nil when the context was never tagged. A Nil result on a write
+// path is a routing bug — but it is surfaced by the NOT NULL / FK
+// constraint on the tenant table (a loud, logged error) rather than a
+// panic, so a single unwired path can't take the whole daemon down
+// from inside a background goroutine. Use SoulIDFromContextOK when the
+// caller needs to branch on presence without relying on the constraint.
+func SoulIDFromContext(ctx context.Context) uuid.UUID {
+	v, _ := ctx.Value(soulIDCtxKey{}).(uuid.UUID)
+	return v
+}
+
+// SoulIDFromContextOK returns the soul id and a found flag.
+func SoulIDFromContextOK(ctx context.Context) (uuid.UUID, bool) {
+	v, ok := ctx.Value(soulIDCtxKey{}).(uuid.UUID)
+	if !ok || v == uuid.Nil {
+		return uuid.Nil, false
+	}
+	return v, true
+}
+
 // Deps holds runtime dependencies available to modules.
 type Deps struct {
 	Config  *Config
@@ -115,6 +155,16 @@ type Deps struct {
 	// so the peer can route status callbacks back here.
 	SelfAgentID func() string
 
+	// ResolveSoul maps an incoming transport identity (chat id) to the
+	// soul that should handle it. Called at the gateway boundary before
+	// dispatching reflex/cortex; the resolved soul is threaded through
+	// ctx via WithSoulID so every downstream write is tenant-attributed.
+	// The embedding application supplies the implementation — blueship
+	// stays generic about how souls are routed. Nil = single-soul host
+	// with no resolution (gateway then leaves ctx soul-less, which is a
+	// misconfiguration for any tenant-bound write).
+	ResolveSoul func(ctx context.Context, chatID string) (uuid.UUID, error)
+
 	pool *dbPool
 }
 
@@ -148,6 +198,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		MessageEncoder:    d.MessageEncoder,
 		TurnCompletedHook: d.TurnCompletedHook,
 		AgentIterationCompletedHook: d.AgentIterationCompletedHook,
+		ResolveSoul:       d.ResolveSoul,
 		pool:              d.pool,
 	}
 }

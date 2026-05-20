@@ -249,6 +249,15 @@ type GatewayConfig struct {
 	// goroutine; receiver is responsible for its own DB/embedding work.
 	// Nil = no-op.
 	AgentIterationCompletedHook func(ctx context.Context, task AgentTask, result IterationResult) `yaml:"-" json:"-"`
+
+	// ResolveSoul maps an inbound transport identity (chat id) to the
+	// soul that should handle the message. The gateway calls it at the
+	// boundary and threads the result through ctx via WithSoulID so
+	// every downstream write is tenant-attributed. The host supplies
+	// the implementation; blueship stays generic about routing. Nil on
+	// a tenant-bound deployment is a misconfiguration — writes will
+	// panic in SoulIDFromContext.
+	ResolveSoul func(ctx context.Context, chatID string) (uuid.UUID, error) `yaml:"-" json:"-"`
 }
 
 // applyDefaults fills in zero values with sensible defaults.

@@ -138,6 +138,7 @@ func (s *Ship) Run(ctx context.Context) error {
 	// constructor of stores/clients.
 	deps.TurnCompletedHook = s.cfg.Gateway.TurnCompletedHook
 	deps.AgentIterationCompletedHook = s.cfg.Gateway.AgentIterationCompletedHook
+	deps.ResolveSoul = s.cfg.Gateway.ResolveSoul
 
 	// 2. Auto-migrate runtime tables
 	shipDB, err := deps.DB("ship")

@@ -193,7 +193,7 @@ func (s *Store) CreateCall(ctx context.Context, c a2a.Call) (string, error) {
 	_, err := s.db.ExecContext(ctx, q,
 		c.ID, c.PeerID, c.PeerName, string(c.Direction), c.ToolName, string(c.Mode),
 		c.CorrelationID, []byte(c.Input), string(c.State),
-		bscore.SoulID())
+		bscore.SoulIDFromContext(ctx))
 	if err != nil {
 		return "", fmt.Errorf("CreateCall: %w", err)
 	}
@@ -307,7 +307,7 @@ func (s *Store) AppendEvent(ctx context.Context, callID string, eventType a2a.Ev
 	if len(payload) > 0 {
 		payloadBytes = []byte(payload)
 	}
-	if err := s.db.GetContext(ctx, &ev, q, callID, string(eventType), payloadBytes, isFinal, bscore.SoulID()); err != nil {
+	if err := s.db.GetContext(ctx, &ev, q, callID, string(eventType), payloadBytes, isFinal, bscore.SoulIDFromContext(ctx)); err != nil {
 		return nil, fmt.Errorf("AppendEvent: %w", err)
 	}
 	return &ev, nil

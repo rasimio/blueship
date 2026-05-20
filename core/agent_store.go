@@ -222,7 +222,7 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 		task.Status, task.Progress, task.MaxIterations,
 		task.Strategy, task.DelegateTo, task.Plan, task.UseAgents,
 		task.AcceptanceCriteria, task.SessionID, task.Cadence,
-		SoulID())
+		SoulIDFromContext(ctx))
 	if err != nil {
 		return AgentTask{}, fmt.Errorf("create agent task: %w", err)
 	}
@@ -273,7 +273,7 @@ func (s *AgentTaskStore) RecordToolOutput(ctx context.Context, rec ToolOutputRec
 		) VALUES ($8::uuid, $1, $2, $3, $4::jsonb, $5, $6, $7::jsonb)`,
 		rec.TaskID, rec.Iteration, rec.ToolName,
 		input, rec.Output, rec.OutputFormat, meta,
-		SoulID())
+		SoulIDFromContext(ctx))
 	return err
 }
 
@@ -369,7 +369,7 @@ func (s *AgentTaskStore) RecordIteration(ctx context.Context, rec IterationRecor
 		rec.Output, rec.Notify, string(rec.ToolCalls), string(rec.Progress), rec.Error,
 		rec.TraceID, rec.SpanID,
 		grounded, ungrounded, groundingVerdict,
-		SoulID(),
+		SoulIDFromContext(ctx),
 	)
 	return err
 }
@@ -420,7 +420,7 @@ func (s *AgentTaskStore) EnsureRecurring(ctx context.Context, userID uuid.UUID, 
 		VALUES ($5::uuid, $1, $2, $3, $4, 'pending', 1, '{}', '{}', 'recurring', '{}')
 		ON CONFLICT (soul_id, user_id, handler) WHERE schedule IS NOT NULL AND status != 'failed'
 		DO UPDATE SET schedule = EXCLUDED.schedule, title = EXCLUDED.title`,
-		userID, handler, schedule, title, SoulID())
+		userID, handler, schedule, title, SoulIDFromContext(ctx))
 	return err
 }
 
