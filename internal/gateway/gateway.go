@@ -288,6 +288,48 @@ func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID) str
 	return prompt
 }
 
+// tryTelegramPairing checks whether a message is a Vaelum pairing code.
+// If so it links this Telegram account to the platform user behind the
+// code and returns true so the caller stops processing the message.
+// Intercepted before user resolution — the sender is not yet a known user.
+func (g *Gateway) tryTelegramPairing(ctx context.Context, chatID, text string) bool {
+	code := strings.TrimSpace(text)
+	if !strings.HasPrefix(code, "pair-") {
+		return false
+	}
+	db, err := g.deps.DB("ship")
+	if err != nil {
+		return false
+	}
+	reply := g.newTelegramSink(chatID)
+
+	var pairingID, userID uuid.UUID
+	err = db.QueryRowContext(ctx,
+		`SELECT id, user_id FROM vaelum.telegram_pairings
+		 WHERE code = $1 AND consumed_at IS NULL AND expires_at > now()`,
+		code).Scan(&pairingID, &userID)
+	if err != nil {
+		_ = reply.SendText(ctx, "That pairing code is invalid or expired — generate a fresh one in Vaelum settings.")
+		return true
+	}
+
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO vaelum.user_identities (user_id, kind, value, verified_at)
+		 VALUES ($1, 'telegram', $2, now())
+		 ON CONFLICT (kind, value) DO NOTHING`,
+		userID, chatID); err != nil {
+		g.logger.Error("telegram pairing: link failed", "error", err)
+		_ = reply.SendText(ctx, "Something went wrong linking your account — try again shortly.")
+		return true
+	}
+	_, _ = db.ExecContext(ctx,
+		`UPDATE vaelum.telegram_pairings SET consumed_at = now() WHERE id = $1`, pairingID)
+
+	g.logger.Info("telegram pairing: linked", "chat_id", chatID, "user_id", userID.String())
+	_ = reply.SendText(ctx, "Your Telegram is now linked to your Vaelum account.")
+	return true
+}
+
 // Run starts the polling loop and processes updates. Blocks until ctx is done.
 func (g *Gateway) Run(ctx context.Context) {
 	ch := make(chan telegram.Update, 100)
@@ -430,6 +472,12 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 
 	rawChatID := msg.Chat.ID
 	chatID := tgCanonical(rawChatID)
+
+	// Vaelum pairing — a "pair-…" message links this Telegram account to a
+	// platform user. Handled before user resolution rejects the sender.
+	if g.tryTelegramPairing(ctx, chatID, text) {
+		return
+	}
 
 	// Group-chat routing: in a chat with more than one participant the bot
 	// only reacts to messages that are explicitly addressed to it. Private
