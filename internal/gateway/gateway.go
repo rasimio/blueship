@@ -1217,7 +1217,21 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText, priorContext)
 	}
 
-	loop := agent.NewLoop(g.provider, g.store, us.Registry, g.deps.RoleTools, g.deps.Config, g.logger)
+	// Per-turn tool registry: the soul's native tools plus a fresh
+	// snapshot of its connected MCP-server tools. The cached native
+	// registry is cloned only when there are MCP tools to add — the
+	// common no-MCP case reuses it untouched.
+	turnRegistry := us.Registry
+	if g.deps.Config.MCPSource != nil {
+		if mcpTools := g.deps.Config.MCPSource.ToolsForSoul(ctx, us.SoulID); len(mcpTools) > 0 {
+			turnRegistry = us.Registry.Clone()
+			for _, t := range mcpTools {
+				turnRegistry.RegisterRemote(t.Name, t.Description, t.Schema, bs.ToolModeSync, "mcp", t.Handler)
+			}
+		}
+	}
+
+	loop := agent.NewLoop(g.provider, g.store, turnRegistry, g.deps.RoleTools, g.deps.Config, g.logger)
 	loop.SetCompactor(g.compactor)
 
 	// Resolve the soul's full system prompt from the database (platform
@@ -1251,7 +1265,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		ReflexGuidance:  reflexGuidance,
 		Role:            "cortex",
 		Temperature:     cortexTemp,
-		AllowedTools:    g.allowedToolsForSoul(ctx, us),
+		AllowedTools:    g.allowedToolsForSoul(ctx, us.SoulID, turnRegistry),
 	}
 
 	// Voice transport: use streaming LLM with inline sentence-level TTS.

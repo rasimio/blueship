@@ -64,6 +64,10 @@ type Config struct {
 	// per-soul tool filtering — generic consumers are unaffected.
 	ToolMeta map[string]ToolMeta
 
+	// MCPSource supplies a soul's external MCP-server tools to the gateway.
+	// Supplied by the host; nil disables MCP entirely.
+	MCPSource MCPToolSource
+
 	// --- Owner (single-user mode) ---
 	Owner OwnerConfig
 

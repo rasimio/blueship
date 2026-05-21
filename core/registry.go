@@ -280,6 +280,17 @@ func (r *ToolRegistry) Count() int {
 	return len(r.tools)
 }
 
+// Clone returns a new registry holding the same tool entries. Used to
+// compose a per-turn registry (native tools + a soul's MCP tools) without
+// mutating the cached per-user registry.
+func (r *ToolRegistry) Clone() *ToolRegistry {
+	c := NewToolRegistry()
+	for name, t := range r.tools {
+		c.tools[name] = t
+	}
+	return c
+}
+
 // (Tool descriptions, modes, and exposed flags are declared inline at
 // registration time. The earlier LoadToolsConfig/LoadDescriptions
 // helpers, which read these from a `tools` DB table, are gone — code is
