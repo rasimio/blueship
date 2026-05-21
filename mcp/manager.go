@@ -33,6 +33,7 @@ type soulConns struct {
 	mu          sync.Mutex
 	clients     []*Client
 	tools       []core.MCPTool
+	sig         string // serversSignature at last connect
 	refreshedAt time.Time
 	refreshing  bool
 }
@@ -52,9 +53,11 @@ func NewManager(db *sqlx.DB, credFetch CredentialFetcher, logger *slog.Logger) *
 	}
 }
 
-// ToolsForSoul returns the soul's MCP tools — cached, with stale entries
-// served immediately while a refresh runs in the background. A cold soul
-// connects synchronously. It never errors: all-down servers yield nil.
+// ToolsForSoul returns the soul's MCP tools. It is cached per soul; a cheap
+// per-call signature of the soul's mcp_servers rows means a cabinet
+// add/remove is picked up on the next turn. Stale entries (TTL) are served
+// immediately while a refresh runs in the background. A cold soul connects
+// synchronously. It never errors: all-down servers yield nil.
 func (m *Manager) ToolsForSoul(ctx context.Context, soulID uuid.UUID) []core.MCPTool {
 	if soulID == uuid.Nil {
 		return nil
@@ -67,20 +70,23 @@ func (m *Manager) ToolsForSoul(ctx context.Context, soulID uuid.UUID) []core.MCP
 	}
 	m.mu.Unlock()
 
+	sig := m.store.serversSignature(ctx, soulID)
+
 	sc.mu.Lock()
 	cold := sc.refreshedAt.IsZero()
+	changed := !cold && sc.sig != sig
 	stale := !cold && time.Since(sc.refreshedAt) > cacheTTL
 	switch {
-	case !cold && !stale:
+	case !cold && !changed && !stale:
 		tools := sc.tools
 		sc.mu.Unlock()
 		return tools
-	case stale:
+	case !cold && !changed && stale:
 		tools := sc.tools
 		if !sc.refreshing {
 			sc.refreshing = true
 			go func() {
-				m.connectSoul(soulID, sc)
+				m.connectSoul(soulID, sc, sig)
 				sc.mu.Lock()
 				sc.refreshing = false
 				sc.mu.Unlock()
@@ -88,9 +94,9 @@ func (m *Manager) ToolsForSoul(ctx context.Context, soulID uuid.UUID) []core.MCP
 		}
 		sc.mu.Unlock()
 		return tools
-	default: // cold
+	default: // cold, or the soul's server config changed — connect now
 		sc.mu.Unlock()
-		m.connectSoul(soulID, sc)
+		m.connectSoul(soulID, sc, sig)
 		sc.mu.Lock()
 		tools := sc.tools
 		sc.mu.Unlock()
@@ -100,7 +106,7 @@ func (m *Manager) ToolsForSoul(ctx context.Context, soulID uuid.UUID) []core.MCP
 
 // connectSoul dials every enabled server of a soul in parallel and swaps
 // the cached connection set. Per-server failures are isolated.
-func (m *Manager) connectSoul(soulID uuid.UUID, sc *soulConns) {
+func (m *Manager) connectSoul(soulID uuid.UUID, sc *soulConns, sig string) {
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
 
@@ -109,6 +115,7 @@ func (m *Manager) connectSoul(soulID uuid.UUID, sc *soulConns) {
 		m.logger.Warn("mcp: list servers failed", "soul_id", soulID.String(), "error", err)
 		sc.mu.Lock()
 		sc.refreshedAt = time.Now() // don't hammer a broken DB every turn
+		sc.sig = sig
 		sc.mu.Unlock()
 		return
 	}
@@ -137,6 +144,7 @@ func (m *Manager) connectSoul(soulID uuid.UUID, sc *soulConns) {
 	old := sc.clients
 	sc.clients = clients
 	sc.tools = tools
+	sc.sig = sig
 	sc.refreshedAt = time.Now()
 	sc.mu.Unlock()
 

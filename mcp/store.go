@@ -65,6 +65,19 @@ func (s *store) serversForSoul(ctx context.Context, soulID uuid.UUID) ([]ServerR
 	return out, nil
 }
 
+// serversSignature returns a cheap fingerprint of a soul's enabled MCP
+// servers — row count plus the latest updated_at. The Manager compares it
+// each turn so a cabinet add/remove/edit is picked up on the next message
+// rather than waiting out the cache TTL.
+func (s *store) serversSignature(ctx context.Context, soulID uuid.UUID) string {
+	var sig string
+	_ = s.db.GetContext(ctx, &sig,
+		`SELECT count(*)::text || ':' ||
+		        coalesce(max(extract(epoch FROM updated_at))::bigint, 0)::text
+		 FROM vaelum.mcp_servers WHERE soul_id = $1 AND enabled = true`, soulID)
+	return sig
+}
+
 func (s *store) markSynced(ctx context.Context, serverID uuid.UUID, toolCount int) {
 	_, _ = s.db.ExecContext(ctx,
 		`UPDATE vaelum.mcp_servers
