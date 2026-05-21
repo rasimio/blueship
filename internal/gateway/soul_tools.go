@@ -82,30 +82,5 @@ func (g *Gateway) allowedToolsForSoul(ctx context.Context, soulID uuid.UUID, reg
 		}
 		allowed = append(allowed, name) // no explicit choice — default on
 	}
-
-	// TEMP DEBUG — diagnosing why provider tools vanish for a connected soul.
-	calMeta := meta["calendar_today"]
-	calInReg, calInAllowed := false, false
-	for _, def := range registry.Definitions() {
-		if def.Name == "calendar_today" {
-			calInReg = true
-		}
-	}
-	for _, n := range allowed {
-		if n == "calendar_today" {
-			calInAllowed = true
-		}
-	}
-	g.logger.Info("GATING DEBUG",
-		"soul", soulID.String(),
-		"providers", providers,
-		"cal_provider", calMeta.Provider,
-		"cal_core", calMeta.Core,
-		"cal_in_registry", calInReg,
-		"cal_in_allowed", calInAllowed,
-		"meta_nil", meta == nil,
-		"registry_size", len(registry.Definitions()),
-		"allowed_count", len(allowed))
-
 	return allowed
 }
