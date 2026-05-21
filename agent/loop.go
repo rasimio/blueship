@@ -42,6 +42,11 @@ type RunConfig struct {
 	// ToolOverride overrides role-based tool selection with an explicit list.
 	// nil = use role default; empty slice = no tools.
 	ToolOverride []string
+	// AllowedTools is a hard per-soul allowlist applied AFTER role/override
+	// selection — the Vaelum cabinet's per-soul tool config. nil = no
+	// filtering. A tool absent from this list is dropped even if a role or
+	// ToolOverride selected it.
+	AllowedTools []string
 	// Temperature for LLM generation (0 = provider default).
 	Temperature float64
 }
@@ -117,6 +122,20 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		}
 	} else {
 		tools = a.registry.Definitions()
+	}
+	// Apply the per-soul allowlist (Vaelum cabinet tool config), if set.
+	if cfg.AllowedTools != nil {
+		allow := make(map[string]bool, len(cfg.AllowedTools))
+		for _, n := range cfg.AllowedTools {
+			allow[n] = true
+		}
+		kept := make([]bs.ToolDefinition, 0, len(tools))
+		for _, t := range tools {
+			if allow[t.Name] {
+				kept = append(kept, t)
+			}
+		}
+		tools = kept
 	}
 	tokenBudget := a.calculateBudget(cfg.SystemPrompt, tools)
 
@@ -321,6 +340,20 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 		}
 	} else {
 		tools = a.registry.Definitions()
+	}
+	// Apply the per-soul allowlist (Vaelum cabinet tool config), if set.
+	if cfg.AllowedTools != nil {
+		allow := make(map[string]bool, len(cfg.AllowedTools))
+		for _, n := range cfg.AllowedTools {
+			allow[n] = true
+		}
+		kept := make([]bs.ToolDefinition, 0, len(tools))
+		for _, t := range tools {
+			if allow[t.Name] {
+				kept = append(kept, t)
+			}
+		}
+		tools = kept
 	}
 	tokenBudget := a.calculateBudget(cfg.SystemPrompt, tools)
 	compactSummary := cfg.CompactSummary

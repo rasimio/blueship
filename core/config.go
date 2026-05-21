@@ -58,6 +58,12 @@ type Config struct {
 	// back to "no allowlist" — every registered tool is available.
 	RoleTools map[string][]string
 
+	// ToolMeta carries per-tool cabinet metadata (display category + the
+	// `core` flag marking internal machinery users may not disable).
+	// Supplied by the host; nil disables tool-catalog publishing and
+	// per-soul tool filtering — generic consumers are unaffected.
+	ToolMeta map[string]ToolMeta
+
 	// --- Owner (single-user mode) ---
 	Owner OwnerConfig
 
@@ -69,6 +75,15 @@ type Config struct {
 	Gateway  GatewayConfig
 	A2A      A2AConfig
 	Fleet    FleetConfig
+}
+
+// ToolMeta is per-tool metadata the host supplies for the Vaelum cabinet:
+// the display category, and whether the tool is core machinery (always on,
+// not user-disablable). Tools absent from Config.ToolMeta default to
+// category "general" and non-core.
+type ToolMeta struct {
+	Category string
+	Core     bool
 }
 
 // FleetConfig controls the optional BlueFleet directory integration.

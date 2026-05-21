@@ -35,6 +35,7 @@ import (
 	"github.com/rasimio/blueship/internal/openaicodex"
 	"github.com/rasimio/blueship/internal/scheduler"
 	"github.com/rasimio/blueship/internal/telegram"
+	"github.com/rasimio/blueship/internal/toolcatalog"
 	"github.com/rasimio/blueship/internal/user"
 	"github.com/rasimio/blueship/internal/web"
 	"github.com/rasimio/blueship/migrate"
@@ -201,6 +202,25 @@ func (s *Ship) Run(ctx context.Context) error {
 	// 3. Create module registry adapter
 	reg := &moduleRegistry{
 		modules: s.modules,
+	}
+
+	// 3a. Publish the native tool catalog to vaelum.tool_catalog so the
+	// Vaelum web cabinet can enumerate every tool. Gated on ToolMeta —
+	// only the Vaelum host supplies tool categories; generic consumers
+	// skip this entirely. A failure here is non-fatal (stale catalog).
+	if s.cfg.ToolMeta != nil {
+		catReg := core.NewToolRegistry()
+		tool.RegisterBuiltinTools(catReg, deps)
+		if err := tool.RegisterBrowserTools(catReg, deps); err != nil {
+			s.logger.Warn("toolcatalog: register browser tools failed", "error", err)
+		}
+		if err := tool.RegisterAgentTaskTools(catReg, deps); err != nil {
+			s.logger.Warn("toolcatalog: register agent_task tools failed", "error", err)
+		}
+		reg.RegisterAllTools(catReg, deps)
+		if err := toolcatalog.Publish(ctx, shipDB, catReg.Definitions(), s.cfg.ToolMeta, s.logger); err != nil {
+			s.logger.Warn("toolcatalog: publish failed", "error", err)
+		}
 	}
 
 	// 3b. A2A server + peer bootstrap — optional subsystem that lets this

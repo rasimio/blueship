@@ -1251,6 +1251,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		ReflexGuidance:  reflexGuidance,
 		Role:            "cortex",
 		Temperature:     cortexTemp,
+		AllowedTools:    g.allowedToolsForSoul(ctx, us),
 	}
 
 	// Voice transport: use streaming LLM with inline sentence-level TTS.
