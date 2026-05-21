@@ -9,15 +9,16 @@ import (
 )
 
 // allowedToolsForSoul returns the set of tool names a soul may use: every
-// core tool (internal machinery — always on) plus every non-core tool not
-// explicitly disabled in vaelum.soul_tools. The result is handed to the
-// agent loop as RunConfig.AllowedTools — a hard per-turn allowlist, so a
-// cabinet toggle takes effect on the very next message. registry is the
-// per-turn registry (native + this soul's MCP tools).
+// core tool (internal machinery — always on), every non-core tool not
+// disabled in vaelum.soul_tools, and a provider-bound tool only when the
+// soul has connected that provider. The result is handed to the agent loop
+// as RunConfig.AllowedTools — a hard per-turn allowlist, so a cabinet
+// toggle or a freshly connected integration takes effect on the very next
+// message. registry is the per-turn registry (native + this soul's MCP
+// tools).
 //
 // Returns nil — meaning "no filtering, every registered tool is available" —
-// for a soul with no soul_tools rows (the default, unchanged behaviour),
-// for a nil soul (framework consumers outside the vaelum model), and on any
+// for a nil soul (framework consumers outside the vaelum model) and on any
 // DB error (a config-store blip must never strand the soul).
 func (g *Gateway) allowedToolsForSoul(ctx context.Context, soulID uuid.UUID, registry *bs.ToolRegistry) []string {
 	if soulID == uuid.Nil || registry == nil {
@@ -27,31 +28,49 @@ func (g *Gateway) allowedToolsForSoul(ctx context.Context, soulID uuid.UUID, reg
 	if err != nil {
 		return nil
 	}
-	var rows []struct {
+
+	// Per-tool enable/disable overrides chosen in the cabinet.
+	var toolRows []struct {
 		ToolName string `db:"tool_name"`
 		Enabled  bool   `db:"enabled"`
 	}
-	if err := db.SelectContext(ctx, &rows,
+	if err := db.SelectContext(ctx, &toolRows,
 		`SELECT tool_name, enabled FROM vaelum.soul_tools WHERE soul_id = $1`,
 		soulID); err != nil {
 		g.logger.Warn("soul tools: query failed, allowing all tools",
 			"soul_id", soulID.String(), "error", err)
 		return nil
 	}
-	if len(rows) == 0 {
-		return nil // soul never touched tool config — everything on
-	}
-
-	override := make(map[string]bool, len(rows))
-	for _, r := range rows {
+	override := make(map[string]bool, len(toolRows))
+	for _, r := range toolRows {
 		override[r.ToolName] = r.Enabled
 	}
-	meta := g.deps.Config.ToolMeta
 
+	// Service providers this soul has connected (a probe has succeeded).
+	var providers []string
+	if err := db.SelectContext(ctx, &providers,
+		`SELECT provider FROM vaelum.tool_credentials
+		 WHERE soul_id = $1 AND status = 'connected'`,
+		soulID); err != nil {
+		g.logger.Warn("soul tools: provider query failed, allowing all tools",
+			"soul_id", soulID.String(), "error", err)
+		return nil
+	}
+	connected := make(map[string]bool, len(providers))
+	for _, p := range providers {
+		connected[p] = true
+	}
+
+	meta := g.deps.Config.ToolMeta
 	var allowed []string
 	for _, def := range registry.Definitions() {
 		name := def.Name
-		if meta[name].Core {
+		m := meta[name]
+		// A provider-bound tool is offered only once that provider is connected.
+		if m.Provider != "" && !connected[m.Provider] {
+			continue
+		}
+		if m.Core {
 			allowed = append(allowed, name) // core machinery — always on
 			continue
 		}

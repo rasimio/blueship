@@ -46,9 +46,9 @@ func Publish(ctx context.Context, db *sqlx.DB, defs []core.ToolDefinition, meta 
 		}
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO vaelum.tool_catalog
-			   (name, display_name, description, category, kind, core, input_schema, default_enabled)
-			 VALUES ($1, $2, $3, $4, 'native', $5, $6::jsonb, true)`,
-			d.Name, displayName(d.Name), d.Description, category, m.Core, schema); err != nil {
+			   (name, display_name, description, category, kind, core, provider, input_schema, default_enabled)
+			 VALUES ($1, $2, $3, $4, 'native', $5, $6, $7::jsonb, true)`,
+			d.Name, displayName(d.Name), d.Description, category, m.Core, m.Provider, schema); err != nil {
 			return fmt.Errorf("toolcatalog: insert %s: %w", d.Name, err)
 		}
 	}

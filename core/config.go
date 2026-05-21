@@ -82,12 +82,15 @@ type Config struct {
 }
 
 // ToolMeta is per-tool metadata the host supplies for the Vaelum cabinet:
-// the display category, and whether the tool is core machinery (always on,
-// not user-disablable). Tools absent from Config.ToolMeta default to
-// category "general" and non-core.
+// the display category, whether the tool is core machinery (always on, not
+// user-disablable), and an optional Provider. A non-empty Provider binds
+// the tool to a connected service integration — the gateway hides it from
+// any soul that has not connected that provider. Tools absent from
+// Config.ToolMeta default to category "general", non-core, no provider.
 type ToolMeta struct {
 	Category string
 	Core     bool
+	Provider string
 }
 
 // FleetConfig controls the optional BlueFleet directory integration.
