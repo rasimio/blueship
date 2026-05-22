@@ -339,6 +339,31 @@ func (g *Gateway) platformPrompts(ctx context.Context) (preamble, agents string,
 	return g.ppPreamble, g.ppAgents, nil
 }
 
+// reflexSystemPromptForSoul composes the interaction-tier system prompt:
+// platform preamble + the soul's persona only. The agents layer (cortex's
+// full operational manual with all its tools) is deliberately excluded —
+// with it, the fast tier behaves like cortex and tries to call cortex's
+// tools (memory_search, browser_fetch, …) directly instead of escalating.
+func (g *Gateway) reflexSystemPromptForSoul(ctx context.Context, soulID uuid.UUID) (string, error) {
+	if soulID == uuid.Nil {
+		return g.systemPrompt, nil
+	}
+	db, err := g.deps.DB("ship")
+	if err != nil {
+		return "", fmt.Errorf("reflex system prompt: db unavailable: %w", err)
+	}
+	var persona string
+	if err := db.GetContext(ctx, &persona,
+		`SELECT system_prompt FROM vaelum.soul_personas WHERE soul_id = $1`, soulID); err != nil {
+		return "", fmt.Errorf("reflex system prompt: no persona for soul %s: %w", soulID, err)
+	}
+	preamble, _, err := g.platformPrompts(ctx)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join([]string{preamble, persona}, "\n\n"), nil
+}
+
 // tryTelegramPairing checks whether a message is a Vaelum pairing code.
 // If so it links this Telegram account to the platform user behind the
 // code and returns true so the caller stops processing the message.
@@ -1267,6 +1292,27 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	systemWithTime := fmt.Sprintf("[current_datetime: %s]\n\n%s",
 		now.Format("2006-01-02 15:04 MST (Monday)"), soulPrompt)
 
+	// Interaction tier needs a focused system prompt (preamble + persona, no
+	// cortex agents layer) AND a registry subset so the fast tier cannot
+	// execute cortex tools even if it hallucinates a call. Both computed
+	// here so they can be passed to runInteraction.
+	var (
+		reflexSystem string
+		reflexLoop   *agent.Loop
+	)
+	if g.deps.Config.Gateway.InteractionTier && g.reflexInteractionPrompt != "" {
+		rp, rerr := g.reflexSystemPromptForSoul(ctx, us.SoulID)
+		if rerr != nil {
+			g.logger.Error("reflex: cannot resolve system prompt, aborting turn",
+				"soul_id", us.SoulID.String(), "chat_id", us.ChatID, "error", rerr)
+			return
+		}
+		reflexSystem = fmt.Sprintf("[current_datetime: %s]\n\n%s\n\n%s",
+			now.Format("2006-01-02 15:04 MST (Monday)"), rp, g.reflexInteractionPrompt)
+		reflexRegistry := turnRegistry.SubsetForNames([]string{tool.ToolEscalate})
+		reflexLoop = agent.NewLoop(g.provider, g.store, reflexRegistry, g.deps.RoleTools, g.deps.Config, g.logger)
+	}
+
 	var cortexTemp float64
 	if g.deps.ModelStore != nil {
 		cortexTemp = g.deps.ModelStore.Get("cortex").Temperature
@@ -1339,7 +1385,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			}
 		}
 
-		reply, _, _, err := g.runInteraction(ctx, loop, runCfg, content, onText, onText, nil)
+		reply, _, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, onText, onText, nil)
 		if err != nil {
 			if ctx.Err() != nil {
 				g.logger.Info("voice turn cancelled", "chat_id", us.ChatID)
@@ -1378,7 +1424,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	tgSink, isTelegram := sink.(*telegramSink)
 	if !isTelegram {
 		// Non-Telegram transports: batch mode.
-		reply, cortexTraces, _, err := g.runInteraction(ctx, loop, runCfg, content, nil, nil, nil)
+		reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, nil, nil)
 		if err != nil {
 			if ctx.Err() != nil {
 				g.logger.Info("turn cancelled", "chat_id", us.ChatID)
@@ -1467,7 +1513,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		flushEdit()
 	}
 
-	reply, cortexTraces, _, err := g.runInteraction(ctx, loop, runCfg, content, nil, onText, onToolUse)
+	reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, onText, onToolUse)
 	if err != nil {
 		if ctx.Err() != nil {
 			g.logger.Info("turn cancelled", "chat_id", us.ChatID)
@@ -2071,15 +2117,19 @@ func findEscalate(traces []agent.ToolTrace) *escalateArgs {
 func (g *Gateway) runInteraction(
 	ctx context.Context,
 	loop *agent.Loop,
+	reflexLoop *agent.Loop,
 	cortexCfg agent.RunConfig,
+	reflexSystemPrompt string,
 	content any,
 	reflexOnText, cortexOnText func(string),
 	onToolUse func(string),
 ) (reply string, traces []agent.ToolTrace, escalated bool, err error) {
-	// Legacy path: interaction tier off, or the interaction prompt is absent.
-	if !g.deps.Config.Gateway.InteractionTier || g.reflexInteractionPrompt == "" {
-		if g.deps.Config.Gateway.InteractionTier && g.reflexInteractionPrompt == "" {
-			g.logger.Warn("interaction tier enabled but reflex-interaction.md missing — running cortex directly")
+	// Legacy path: interaction tier off, or the caller didn't wire it up
+	// (missing prompt / reflex loop / reflex system prompt).
+	if !g.deps.Config.Gateway.InteractionTier || g.reflexInteractionPrompt == "" ||
+		reflexLoop == nil || reflexSystemPrompt == "" {
+		if g.deps.Config.Gateway.InteractionTier {
+			g.logger.Warn("interaction tier enabled but not fully wired — running cortex directly")
 		}
 		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexOnText, onToolUse)
 		return reply, traces, false, err
@@ -2087,11 +2137,12 @@ func (g *Gateway) runInteraction(
 
 	// Derive the Reflex (interaction-tier) config from the Cortex config:
 	// same session / context / rules, but the fast model, the reflex role
-	// (escalate-only tools) and the interaction-tier prompt.
+	// (escalate-only tools) and the focused interaction-tier system prompt
+	// (preamble + persona; no cortex agents/tools manual).
 	reflexCfg := cortexCfg
 	reflexCfg.Model = g.reflexModel()
 	reflexCfg.Role = "reflex"
-	reflexCfg.SystemPrompt = cortexCfg.SystemPrompt + "\n\n" + g.reflexInteractionPrompt
+	reflexCfg.SystemPrompt = reflexSystemPrompt
 	reflexCfg.MaxTurns = 1
 	reflexCfg.Ephemeral = true
 	reflexCfg.SkipUserAppend = true
@@ -2111,12 +2162,24 @@ func (g *Gateway) runInteraction(
 		return "", nil, false, fmt.Errorf("interaction: append user message: %w", err)
 	}
 
-	reflexReply, reflexTraces, rerr := loop.RunStream(ctx, reflexCfg, content, reflexOnText, nil)
+	// Reflex runs against an escalate-only registry subset — if it
+	// hallucinates a cortex tool (memory_search etc.) the registry rejects
+	// it as unknown instead of executing it for real.
+	reflexReply, reflexTraces, rerr := reflexLoop.RunStream(ctx, reflexCfg, content, reflexOnText, nil)
 	if rerr != nil {
 		return "", reflexTraces, false, fmt.Errorf("interaction: reflex: %w", rerr)
 	}
 
 	esc := findEscalate(reflexTraces)
+	if esc == nil && len(reflexTraces) > 0 {
+		// Reflex tried to call a tool but not (or not only) escalate — it
+		// hallucinated a cortex tool. Any tool intent from the fast tier
+		// means "I need the deep tier", so escalate. The hallucinated tool
+		// name goes into the reason for observability.
+		esc = &escalateArgs{Reason: "fast tier requested a tool: " + reflexTraces[0].Name}
+		g.logger.Info("interaction: reflex called non-escalate tool, treating as escalation",
+			"tool", reflexTraces[0].Name)
+	}
 	if esc == nil {
 		// Simple turn — Reflex answered it. Persist its reply as the turn.
 		if strings.TrimSpace(reflexReply) != "" {
@@ -2131,8 +2194,8 @@ func (g *Gateway) runInteraction(
 		return reflexReply, reflexTraces, false, nil
 	}
 
-	// Escalation — run the Cortex tier. The user message is already
-	// persisted; Cortex persists its own answer normally.
+	// Escalation — run the Cortex tier with the full registry. The user
+	// message is already persisted; Cortex persists its own answer normally.
 	g.logger.Info("interaction: escalating to cortex", "reason", truncateStr(esc.Reason, 120))
 	cortexCfg.SkipUserAppend = true
 	if esc.Guidance != "" {
