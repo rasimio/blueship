@@ -1390,7 +1390,32 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			}
 		}
 
-		reply, _, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, onText, onText, nil)
+		// reflexFlush emits whatever the reflex tier has spoken so far as an
+		// audio chunk. Called by runInteraction the instant the reflex stream
+		// ends so the user hears the filler ("щас гляну…") immediately, before
+		// cortex starts thinking — the interaction-model point. On a simple
+		// turn (no escalation) it also sends the answer slightly earlier than
+		// the post-loop flush would.
+		reflexFlush := func() {
+			remaining := strings.TrimSpace(sentenceBuf.String())
+			if remaining == "" {
+				return
+			}
+			sentenceBuf.Reset()
+			chunkSeq++
+			seq := chunkSeq
+			audio, terr := synthesize(ctx, remaining, voice, instruct)
+			if terr != nil {
+				g.logger.Warn("tts: filler synth failed", "error", terr, "text_len", len(remaining))
+				return
+			}
+			g.logger.Info("tts: filler sent", "seq", seq, "audio_bytes", len(audio), "text_len", len(remaining))
+			if werr := streamSink.SendVoiceChunk(ctx, audio, seq, false); werr != nil {
+				g.logger.Warn("tts: send filler chunk failed", "error", werr, "seq", seq)
+			}
+		}
+
+		reply, _, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, onText, onText, nil, reflexFlush)
 		if err != nil {
 			if ctx.Err() != nil {
 				g.logger.Info("voice turn cancelled", "chat_id", us.ChatID)
@@ -1444,7 +1469,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	tgSink, isTelegram := sink.(*telegramSink)
 	if !isTelegram {
 		// Non-Telegram transports: batch mode.
-		reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, nil, nil)
+		reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, nil, nil, nil)
 		if err != nil {
 			if ctx.Err() != nil {
 				g.logger.Info("turn cancelled", "chat_id", us.ChatID)
@@ -1533,7 +1558,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		flushEdit()
 	}
 
-	reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, onText, onToolUse)
+	reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, onText, onToolUse, nil)
 	if err != nil {
 		if ctx.Err() != nil {
 			g.logger.Info("turn cancelled", "chat_id", us.ChatID)
@@ -2143,6 +2168,7 @@ func (g *Gateway) runInteraction(
 	content any,
 	reflexOnText, cortexOnText func(string),
 	onToolUse func(string),
+	onReflexDone func(),
 ) (reply string, traces []agent.ToolTrace, escalated bool, err error) {
 	// Legacy path: interaction tier off, or the caller didn't wire it up
 	// (missing prompt / reflex loop / reflex system prompt).
@@ -2188,6 +2214,12 @@ func (g *Gateway) runInteraction(
 	reflexReply, reflexTraces, rerr := reflexLoop.RunStream(ctx, reflexCfg, content, reflexOnText, nil)
 	if rerr != nil {
 		return "", reflexTraces, false, fmt.Errorf("interaction: reflex: %w", rerr)
+	}
+
+	// Voice transports flush the reflex's spoken text-so-far the instant the
+	// stream ends, so the filler reaches the user BEFORE cortex starts.
+	if onReflexDone != nil {
+		onReflexDone()
 	}
 
 	esc := findEscalate(reflexTraces)
