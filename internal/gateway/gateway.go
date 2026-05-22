@@ -28,16 +28,15 @@ import (
 
 // Gateway receives transport updates and routes them through the AgentLoop.
 type Gateway struct {
-	deps      *bs.Deps
-	modules   ModuleRegistry
-	poller    *telegram.Poller
-	tg        *telegram.Client
-	store     *session.Store
-	provider  bs.CompletionProvider
-	compactor *agent.Compactor
-	whisper   *openai.TranscriptionProvider
-	tz        *time.Location
-	logger    *slog.Logger
+	deps     *bs.Deps
+	modules  ModuleRegistry
+	poller   *telegram.Poller
+	tg       *telegram.Client
+	store    *session.Store
+	provider bs.CompletionProvider
+	whisper  *openai.TranscriptionProvider
+	tz       *time.Location
+	logger   *slog.Logger
 
 	// botID and botUsername are populated at startup via telegram getMe so
 	// command handlers can recognise `/reset@<bot>` targeted commands AND
@@ -60,12 +59,12 @@ type Gateway struct {
 
 	// Reflex pipeline prompts. Loaded from <Config.Prompts>/<key>.md when
 	// the agent ships those files; missing files leave the default empty.
-	reflexSystemPrompt   string // system prompt for reflex LLM call
-	reflexPlanTemplate   string // user prompt template (has %s placeholders for rules, tools, message)
-	extractInsightPrompt    string   // system prompt for insight extraction
-	selfReflectionMarkers  []string // optional self_reflection_markers.md (JSON array)
+	reflexSystemPrompt    string   // system prompt for reflex LLM call
+	reflexPlanTemplate    string   // user prompt template (has %s placeholders for rules, tools, message)
+	extractInsightPrompt  string   // system prompt for insight extraction
+	selfReflectionMarkers []string // optional self_reflection_markers.md (JSON array)
 
-	mu sync.Mutex
+	mu    sync.Mutex
 	users map[string]*UserState // keyed by canonical chatID ("telegram:123", "voice:owner")
 }
 
@@ -185,15 +184,14 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 	}
 
 	gw := &Gateway{
-		deps:      deps,
-		modules:   modules,
-		store:     session.NewStore(coreDB),
-		provider:  cfg.LLM,
-		compactor: agent.NewCompactor(cfg.LLM, cfg, logger),
-		whisper:   whisperProvider,
-		tz:        tz,
-		logger:    logger,
-		users:     make(map[string]*UserState),
+		deps:     deps,
+		modules:  modules,
+		store:    session.NewStore(coreDB),
+		provider: cfg.LLM,
+		whisper:  whisperProvider,
+		tz:       tz,
+		logger:   logger,
+		users:    make(map[string]*UserState),
 	}
 
 	if cfg.Transport.BotToken != "" {
@@ -252,9 +250,6 @@ func (g *Gateway) loadSystemPrompts(dir string) error {
 			return ""
 		}
 		return string(data)
-	}
-	if v := readOpt("compact"); v != "" && g.compactor != nil {
-		g.compactor.SetSystemPrompt(v)
 	}
 	if v := readOpt("reflex-system"); v != "" {
 		g.reflexSystemPrompt = v
@@ -1231,8 +1226,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		}
 	}
 
+	// The chat loop runs without a compactor: compaction deletes messages,
+	// and chat history is permanent. The loop windows the context itself
+	// (MessagesForAPI); older turns are recalled associatively by AME, not
+	// by a linear summary.
 	loop := agent.NewLoop(g.provider, g.store, turnRegistry, g.deps.RoleTools, g.deps.Config, g.logger)
-	loop.SetCompactor(g.compactor)
 
 	// Resolve the soul's full system prompt from the database (platform
 	// preamble + persona + agents) and stamp the current datetime so the
@@ -1371,10 +1369,10 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 
 	// Telegram streaming: progressive message editing.
 	var (
-		streamMsgID int         // Telegram message ID for edits
+		streamMsgID int // Telegram message ID for edits
 		streamBuf   strings.Builder
 		lastEdit    time.Time
-		toolStatus  string      // current tool being executed
+		toolStatus  string // current tool being executed
 		mu          sync.Mutex
 	)
 
@@ -1666,7 +1664,6 @@ func tgCanonical(chatID int64) string {
 const reflexConfidenceThreshold = 0.7
 const preActionTimeout = 10 * time.Second
 const maxPreActions = 2
-
 
 // runReflexPipeline executes the System 1/2 pipeline:
 // 1. ReflexPreparer → structured context (traces + candidate rules)
@@ -2096,11 +2093,11 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 
 	// Parse with flexible tools field: Flash sometimes returns objects instead of strings.
 	var raw struct {
-		MatchedRules   []string        `json:"matched_rules"`
-		Intent         string          `json:"intent"`
-		Confidence     float64         `json:"confidence"`
-		PreActions     []bs.ToolAction `json:"pre_actions"`
-		PostActions    []bs.PostAction `json:"post_actions"`
+		MatchedRules         []string                 `json:"matched_rules"`
+		Intent               string                   `json:"intent"`
+		Confidence           float64                  `json:"confidence"`
+		PreActions           []bs.ToolAction          `json:"pre_actions"`
+		PostActions          []bs.PostAction          `json:"post_actions"`
 		Tools                json.RawMessage          `json:"tools"`
 		Guidance             string                   `json:"guidance"`
 		ClarificationOptions []bs.ClarificationOption `json:"clarification_options"`
@@ -2125,7 +2122,9 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 		if err := json.Unmarshal(raw.Tools, &toolStrings); err == nil {
 			result.Tools = toolStrings
 		} else {
-			var toolObjects []struct{ Tool string `json:"tool"` }
+			var toolObjects []struct {
+				Tool string `json:"tool"`
+			}
 			if err := json.Unmarshal(raw.Tools, &toolObjects); err == nil {
 				for _, t := range toolObjects {
 					result.Tools = append(result.Tools, t.Tool)
@@ -2151,35 +2150,18 @@ func (g *Gateway) keepTypingViaSink(ctx context.Context, sink bs.ResponseSink) {
 	}
 }
 
-// GetOrCreateSession gets or creates a session with daily reset.
+// GetOrCreateSession returns the soul's single permanent chat session,
+// creating it on first contact. There is no rotation: the conversation
+// is one continuous thread per (user, soul). Chat history is permanent
+// and decoupled from the LLM context window — the agent loop windows the
+// context itself (MessagesForAPI) and AME recalls older turns
+// associatively. The session is never archived; "resetting" it would
+// mean destroying history.
 func (g *Gateway) GetOrCreateSession(ctx context.Context, us *UserState) (*session.Session, error) {
 	if g.deps.ModelStore != nil {
 		_ = g.deps.ModelStore.Refresh(ctx)
 	}
-	model := g.cortexModelDisplay()
-	sess, err := g.store.GetOrCreate(ctx, us.UserID.String(), model)
-	if err != nil {
-		return nil, err
-	}
-
-	resetTime := g.todayResetTime()
-	if sess.CreatedAt.Before(resetTime) {
-		if err := g.store.Archive(ctx, sess.ID); err != nil {
-			return nil, fmt.Errorf("archive old session: %w", err)
-		}
-		return g.store.Create(ctx, us.UserID.String(), model)
-	}
-
-	return sess, nil
-}
-
-func (g *Gateway) todayResetTime() time.Time {
-	now := time.Now().In(g.tz)
-	reset := time.Date(now.Year(), now.Month(), now.Day(), g.deps.Config.Gateway.SessionResetHour, 0, 0, 0, g.tz)
-	if now.Before(reset) {
-		reset = reset.AddDate(0, 0, -1)
-	}
-	return reset
+	return g.store.GetOrCreate(ctx, us.UserID.String(), g.cortexModelDisplay())
 }
 
 // Timezone returns the configured timezone.

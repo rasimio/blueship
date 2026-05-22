@@ -245,7 +245,7 @@ func (s *Store) MessagesForAPI(ctx context.Context, sessionID string, maxTokens 
 		 FROM chat_messages
 		 WHERE session_id = $1
 		 ORDER BY created_at DESC
-		 LIMIT 50`,
+		 LIMIT 200`,
 		sessionID,
 	)
 	if err != nil {

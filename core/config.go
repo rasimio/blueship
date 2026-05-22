@@ -13,23 +13,23 @@ import (
 // All fields have sensible defaults; only LLM, Transport, and DB are required.
 type Config struct {
 	// --- Required ---
-	LLM       CompletionProvider // e.g. blueship.Anthropic(apiKey)
-	Transport TransportConfig    // e.g. blueship.Telegram(botToken)
-	DB        string             // PostgreSQL DSN (app database)
-	ShipSchema string            // Schema for BlueShip tables (default: "" = public)
+	LLM        CompletionProvider // e.g. blueship.Anthropic(apiKey)
+	Transport  TransportConfig    // e.g. blueship.Telegram(botToken)
+	DB         string             // PostgreSQL DSN (app database)
+	ShipSchema string             // Schema for BlueShip tables (default: "" = public)
 
 	// --- Optional providers (nil = disabled) ---
-	Embedder    EmbeddingProvider      // default: nil (embedding features disabled)
-	Search      SearchEngine           // default: nil (web_search tool disabled)
-	Fetcher     WebFetcher             // default: nil (auto-created if nil)
-	Calendar    CalendarProvider       // default: nil
-	Transcriber TranscriptionProvider  // default: nil (voice disabled)
-	TTS              TTSProvider                   // default: nil (text-to-speech disabled)
-	TTSVoice         string                        // default TTS voice name
-	TTSInstructMapper func(strategy string) string    // maps emotion strategy to TTS instruct
-	TTSTextCleaner   func(text string) string         // strips kaomoji/markdown for TTS
-	TTSConverter     func(wav []byte) ([]byte, error) // WAV→OGG converter (nil = send WAV as-is)
-	Sender           MessageSender                 // default: nil (message sending disabled)
+	Embedder          EmbeddingProvider                // default: nil (embedding features disabled)
+	Search            SearchEngine                     // default: nil (web_search tool disabled)
+	Fetcher           WebFetcher                       // default: nil (auto-created if nil)
+	Calendar          CalendarProvider                 // default: nil
+	Transcriber       TranscriptionProvider            // default: nil (voice disabled)
+	TTS               TTSProvider                      // default: nil (text-to-speech disabled)
+	TTSVoice          string                           // default TTS voice name
+	TTSInstructMapper func(strategy string) string     // maps emotion strategy to TTS instruct
+	TTSTextCleaner    func(text string) string         // strips kaomoji/markdown for TTS
+	TTSConverter      func(wav []byte) ([]byte, error) // WAV→OGG converter (nil = send WAV as-is)
+	Sender            MessageSender                    // default: nil (message sending disabled)
 
 	// --- Optional infrastructure ---
 	Redis    string // Redis address (default: "" = no cache)
@@ -179,13 +179,13 @@ type ModelsConfig struct {
 
 // LimitsConfig defines token budget limits.
 type LimitsConfig struct {
-	MaxContext        int // Opus input budget (default: 180000)
-	CompactThreshold  int // trigger compaction above this (default: 40000)
-	CompactKeep       int // keep recent messages intact (default: 30000)
-	MaxOutputTokens   int // agent loop max output (default: 8192)
-	CompactOutput     int // haiku compaction output (default: 2048)
-	ThinkingBudget    int // extended thinking budget (default: 0 = disabled)
-	MinMessageBudget  int // minimum token budget for messages (default: 10000)
+	MaxContext       int // Opus input budget (default: 180000)
+	CompactThreshold int // trigger compaction above this (default: 40000)
+	CompactKeep      int // keep recent messages intact (default: 30000)
+	MaxOutputTokens  int // agent loop max output (default: 8192)
+	CompactOutput    int // haiku compaction output (default: 2048)
+	ThinkingBudget   int // extended thinking budget (default: 0 = disabled)
+	MinMessageBudget int // minimum token budget for messages (default: 10000)
 }
 
 // TimeoutsConfig defines timeouts for external calls.
@@ -248,10 +248,9 @@ type A2APeerConfig struct {
 
 // GatewayConfig defines gateway behavior.
 type GatewayConfig struct {
-	DebounceWindow   time.Duration // default: 1500ms
-	DebounceCap      int           // default: 10
-	SessionResetHour int           // default: 4 (4am)
-	MaxTurns         int           // default: 15
+	DebounceWindow time.Duration // default: 1500ms
+	DebounceCap    int           // default: 10
+	MaxTurns       int           // default: 15
 
 	// Debug, when true, both:
 	//   - sends errors to the owner via Telegram instead of a "Sorry..." reply;
@@ -364,9 +363,6 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Gateway.DebounceCap == 0 {
 		c.Gateway.DebounceCap = 10
-	}
-	if c.Gateway.SessionResetHour == 0 {
-		c.Gateway.SessionResetHour = 4
 	}
 	if c.Gateway.MaxTurns == 0 {
 		c.Gateway.MaxTurns = 15
