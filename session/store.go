@@ -90,15 +90,17 @@ func (s *Store) CreateSessionWithSource(ctx context.Context, userID, model, sour
 	return sess.ID, nil
 }
 
-// GetOrCreate returns the latest active session for a user, or creates a new one.
+// GetOrCreate returns the latest active session for a (user, soul), or
+// creates a new one. The lookup is scoped to the request's soul — without
+// it a user with more than one soul collides their sessions.
 func (s *Store) GetOrCreate(ctx context.Context, userID, model string) (*Session, error) {
 	var sess Session
 	err := s.db.GetContext(ctx, &sess,
 		`SELECT * FROM chat_sessions
-		 WHERE user_id = $1 AND active = true AND source = 'chat'
+		 WHERE user_id = $1 AND soul_id = $2 AND active = true AND source = 'chat'
 		 ORDER BY updated_at DESC
 		 LIMIT 1`,
-		userID,
+		userID, bs.SoulIDFromContext(ctx),
 	)
 	if err == nil {
 		return &sess, nil
@@ -394,14 +396,14 @@ func (s *Store) LastMessages(ctx context.Context, sessionIDs []string) (map[stri
 	return result, nil
 }
 
-// ListActive returns all active sessions for a user.
+// ListActive returns all active sessions for a (user, soul).
 func (s *Store) ListActive(ctx context.Context, userID string) ([]Session, error) {
 	var sessions []Session
 	err := s.db.SelectContext(ctx, &sessions,
 		`SELECT * FROM chat_sessions
-		 WHERE user_id = $1 AND active = true
+		 WHERE user_id = $1 AND soul_id = $2 AND active = true
 		 ORDER BY updated_at DESC`,
-		userID,
+		userID, bs.SoulIDFromContext(ctx),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list active sessions: %w", err)
