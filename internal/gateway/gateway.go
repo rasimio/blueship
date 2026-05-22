@@ -663,10 +663,22 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 
 	// Resolve userID from chatID. Unknown users are rejected — no fallback to
 	// owner, which would let any stranger chat as the owner.
-	userID, err := user.ResolveByChatID(ctx, coreDB, chatID)
-	if err != nil {
-		g.logger.Info("rejected unknown chat_id", "chat_id", chatID, "error", err)
-		return nil, fmt.Errorf("unknown chat_id %s: not in user_profiles", chatID)
+	var userID uuid.UUID
+	if chatID == "voice:owner" {
+		// Legacy single-tenant voice transport (ws.handleConnectionLegacy):
+		// the synthetic "voice:owner" chatID has no user_profiles row, so
+		// resolve it to the configured owner. B4's device-token auth
+		// replaces this bridge.
+		if err = coreDB.GetContext(ctx, &userID,
+			`SELECT id FROM user_profiles WHERE is_owner = true LIMIT 1`); err != nil {
+			return nil, fmt.Errorf("voice transport: no owner in user_profiles: %w", err)
+		}
+	} else {
+		userID, err = user.ResolveByChatID(ctx, coreDB, chatID)
+		if err != nil {
+			g.logger.Info("rejected unknown chat_id", "chat_id", chatID, "error", err)
+			return nil, fmt.Errorf("unknown chat_id %s: not in user_profiles", chatID)
+		}
 	}
 
 	var isOwner bool
