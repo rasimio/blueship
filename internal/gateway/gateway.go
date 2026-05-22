@@ -1722,6 +1722,47 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	// Store emotional strategy for TTS instruct mapping.
 	us.LastStrategy = rc.Strategy
 
+	// Interaction tier: the streaming reflex (runInteraction) owns the
+	// answer/escalate decision and all tool use. Context prep here must stay
+	// lean — AME traces + the structured rule engine only. The legacy
+	// callReflex classifier and its pre-actions add a redundant ~5 s
+	// round-trip per turn and are skipped entirely.
+	if g.deps.Config.Gateway.InteractionTier {
+		var guidance strings.Builder
+		hasRules := false
+		engineRuleCount := 0
+		if us.Deps.RuleEngine != nil {
+			engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
+				UserID:   us.Deps.UserID.String(),
+				Strategy: rc.Strategy,
+				Hour:     time.Now().Hour(),
+				Message:  msgText,
+			})
+			for _, r := range engineRules {
+				if r.Silent {
+					g.logger.Info("rule engine: silent rule matched, aborting turn",
+						"rule_id", r.ID, "trigger", r.Trigger, "chat_id", us.ChatID)
+					return "", "", nil, nil, 0, true
+				}
+			}
+			for _, r := range engineRules {
+				if !hasRules {
+					guidance.WriteString("[active rules]\n")
+					hasRules = true
+				}
+				fmt.Fprintf(&guidance, "WHEN: %s\nDO: %s\n\n", r.Trigger, r.Action)
+			}
+			engineRuleCount = len(engineRules)
+			if engineRuleCount > 0 {
+				g.logger.Info("rule engine matched (interaction tier)", "count", engineRuleCount)
+			}
+		}
+		if hasRules {
+			guidance.WriteString("[/active rules]")
+		}
+		return rc.FormattedTraces, guidance.String(), nil, nil, engineRuleCount, false
+	}
+
 	// Build reflex prompt.
 	var rulesBlock strings.Builder
 	for _, r := range rc.CandidateRules {
