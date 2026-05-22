@@ -260,6 +260,20 @@ type GatewayConfig struct {
 	// when the config flag is off).
 	Debug bool
 
+	// InteractionTier, when true, runs the two-tier interaction model:
+	// the Reflex (fast) tier handles every turn and decides — via the
+	// `escalate` tool — when to hand off to the Cortex (background) tier.
+	// When false the gateway calls Cortex directly every turn (legacy).
+	// Default false; opt-in for safe rollout.
+	InteractionTier bool
+
+	// BargeIn, when true, runs the WebSocket voice transport with a
+	// concurrent read loop + turn manager so the user can interrupt a
+	// response mid-stream (speech_start / cancel frames). When false the
+	// transport uses the legacy strictly-sequential read loop.
+	// Default false; opt-in, paired with the client-side AEC work.
+	BargeIn bool
+
 	// TurnCompletedHook fires after the gateway successfully sends an
 	// assistant reply to the user (across Telegram batch, Telegram
 	// streaming, voice streaming, and WebSocket batch transports). The

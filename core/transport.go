@@ -27,3 +27,12 @@ type StreamingVoiceSink interface {
 	// final=true indicates the last chunk.
 	SendVoiceChunk(ctx context.Context, audio []byte, seq int, final bool) error
 }
+
+// SpokenTextSink is an optional sink capability: the gateway calls
+// NoteSpokenText with each text chunk as it streams a voice response, so a
+// barge-in–aware transport can track what the assistant is currently saying
+// (used to classify a user interjection). Sinks that do not implement it are
+// simply not notified.
+type SpokenTextSink interface {
+	NoteSpokenText(text string)
+}

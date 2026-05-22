@@ -87,13 +87,25 @@ type InMsg struct {
 
 // OutMsg is the server→client JSON message.
 type OutMsg struct {
-	Type  string `json:"type"`            // "text", "audio", "audio_chunk", "thinking", "error"
+	Type  string `json:"type"` // "text", "audio", "audio_chunk", "thinking", "error"
 	Data  string `json:"data"`
 	Seq   int    `json:"seq,omitempty"`   // chunk sequence number
 	Final bool   `json:"final,omitempty"` // true = last chunk
 }
 
+// handleConnection dispatches to the legacy strictly-sequential loop or, when
+// barge-in is enabled, the concurrent read-loop + turn-manager path.
 func (s *Server) handleConnection(ctx context.Context, conn *websocket.Conn) {
+	if s.gw.BargeInEnabled() {
+		s.handleConnectionBargeIn(ctx, conn)
+		return
+	}
+	s.handleConnectionLegacy(ctx, conn)
+}
+
+// handleConnectionLegacy reads and processes one frame at a time — it does not
+// read the next frame until the current turn finishes. No barge-in.
+func (s *Server) handleConnectionLegacy(ctx context.Context, conn *websocket.Conn) {
 	// Use owner chatID for voice connections.
 	chatID := "voice:owner"
 
@@ -138,29 +150,83 @@ func (s *Server) handleConnection(ctx context.Context, conn *websocket.Conn) {
 	}
 }
 
-// wsSink implements bs.ResponseSink for WebSocket transport.
+// handleConnectionBargeIn runs the concurrent path: a read goroutine keeps
+// draining frames into a channel while a turn is in flight, and the turn
+// manager owns turn lifecycle, cancellation and interjection handling.
+func (s *Server) handleConnectionBargeIn(ctx context.Context, conn *websocket.Conn) {
+	w := newConnWriter(conn)
+	tm := newTurnManager(s.gw, "voice:owner", w, s.logger)
+
+	inbound := make(chan InMsg, 16)
+	go func() {
+		defer close(inbound)
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				return // connection closed or read error
+			}
+			var msg InMsg
+			if json.Unmarshal(data, &msg) != nil {
+				w.write(ctx, OutMsg{Type: "error", Data: "invalid JSON"})
+				continue
+			}
+			select {
+			case inbound <- msg:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	tm.run(ctx, inbound)
+}
+
+// wsSink implements bs.ResponseSink (and bs.StreamingVoiceSink,
+// bs.SpokenTextSink) for the WebSocket transport. The legacy path sets conn;
+// the barge-in path sets writer (mutexed, multi-writer-safe) and turn (to
+// record spoken text for interjection classification).
 type wsSink struct {
-	conn   *websocket.Conn
+	conn   *websocket.Conn // legacy path — direct writer
 	ctx    context.Context
 	logger *slog.Logger
+
+	writer *connWriter // barge-in path — serialised writer
+	turn   *turnHandle // barge-in path — spoken-text tracking
+}
+
+// emit sends one frame via whichever writer this sink was built with.
+func (s *wsSink) emit(ctx context.Context, msg OutMsg) error {
+	if s.writer != nil {
+		return s.writer.write(ctx, msg)
+	}
+	return writeJSON(ctx, s.conn, msg)
 }
 
 func (s *wsSink) SendText(ctx context.Context, text string) error {
-	return writeJSON(ctx, s.conn, OutMsg{Type: "text", Data: text})
+	return s.emit(ctx, OutMsg{Type: "text", Data: text})
 }
 
 func (s *wsSink) SendVoice(ctx context.Context, audio []byte) error {
 	encoded := base64.StdEncoding.EncodeToString(audio)
-	return writeJSON(ctx, s.conn, OutMsg{Type: "audio", Data: encoded})
+	return s.emit(ctx, OutMsg{Type: "audio", Data: encoded})
 }
 
 func (s *wsSink) SendVoiceChunk(ctx context.Context, audio []byte, seq int, final bool) error {
 	encoded := base64.StdEncoding.EncodeToString(audio)
-	return writeJSON(ctx, s.conn, OutMsg{Type: "audio_chunk", Data: encoded, Seq: seq, Final: final})
+	return s.emit(ctx, OutMsg{Type: "audio_chunk", Data: encoded, Seq: seq, Final: final})
 }
 
 func (s *wsSink) SendTyping(ctx context.Context) error {
-	return writeJSON(ctx, s.conn, OutMsg{Type: "thinking", Data: ""})
+	return s.emit(ctx, OutMsg{Type: "thinking", Data: ""})
+}
+
+// NoteSpokenText records a streamed text chunk on the turn handle so the
+// interjection classifier can see what the assistant is currently saying.
+// No-op on the legacy path (turn is nil).
+func (s *wsSink) NoteSpokenText(text string) {
+	if s.turn != nil {
+		s.turn.noteSpoken(text)
+	}
 }
 
 func writeJSON(ctx context.Context, conn *websocket.Conn, msg OutMsg) error {

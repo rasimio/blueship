@@ -80,6 +80,23 @@ type ActiveRule struct {
 	Silent bool `json:"silent,omitempty"`
 }
 
+// InterjectionClass classifies a user utterance that arrives while the
+// assistant is still mid-response (barge-in). It decides whether the
+// in-flight turn should keep running or be interrupted.
+type InterjectionClass string
+
+const (
+	// InterjectionBackchannel — the user is acknowledging / encouraging
+	// ("ага", "понятно", "да-да"); the in-flight turn keeps running.
+	InterjectionBackchannel InterjectionClass = "backchannel"
+	// InterjectionInterrupt — the user is correcting or redirecting; the
+	// in-flight turn is cancelled and the utterance starts a fresh turn.
+	InterjectionInterrupt InterjectionClass = "interruption"
+	// InterjectionUnclear — ambiguous; treated as backchannel so the
+	// assistant is never cut off on a guess.
+	InterjectionUnclear InterjectionClass = "unclear"
+)
+
 // ReflexContext is the structured output of the context preparation phase.
 // It separates AME traces from candidate rules so the reflex can classify rules
 // independently, then the gateway reassembles the final context.

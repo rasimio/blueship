@@ -59,10 +59,12 @@ type Gateway struct {
 
 	// Reflex pipeline prompts. Loaded from <Config.Prompts>/<key>.md when
 	// the agent ships those files; missing files leave the default empty.
-	reflexSystemPrompt    string   // system prompt for reflex LLM call
-	reflexPlanTemplate    string   // user prompt template (has %s placeholders for rules, tools, message)
-	extractInsightPrompt  string   // system prompt for insight extraction
-	selfReflectionMarkers []string // optional self_reflection_markers.md (JSON array)
+	reflexSystemPrompt       string   // system prompt for reflex LLM call
+	reflexPlanTemplate       string   // user prompt template (has %s placeholders for rules, tools, message)
+	reflexInteractionPrompt  string   // interaction-tier task rules, appended to the soul prompt when InteractionTier is on
+	reflexInterjectionPrompt string   // system prompt for barge-in interjection classification
+	extractInsightPrompt     string   // system prompt for insight extraction
+	selfReflectionMarkers    []string // optional self_reflection_markers.md (JSON array)
 
 	mu    sync.Mutex
 	users map[string]*UserState // keyed by canonical chatID ("telegram:123", "voice:owner")
@@ -256,6 +258,12 @@ func (g *Gateway) loadSystemPrompts(dir string) error {
 	}
 	if v := readOpt("reflex-plan"); v != "" {
 		g.reflexPlanTemplate = v
+	}
+	if v := readOpt("reflex-interaction"); v != "" {
+		g.reflexInteractionPrompt = v
+	}
+	if v := readOpt("reflex-interjection"); v != "" {
+		g.reflexInterjectionPrompt = v
 	}
 	if v := readOpt("extract-insight"); v != "" {
 		g.extractInsightPrompt = v
@@ -1285,9 +1293,16 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			synthesize = mp3Provider.SynthesizeMP3
 		}
 
+		// Barge-in: notify a spoken-text-aware sink of each streamed chunk so
+		// it can track what the assistant is currently saying.
+		noter, _ := sink.(bs.SpokenTextSink)
+
 		onText := func(chunk string) {
 			if cfg.TTSTextCleaner != nil {
 				chunk = cfg.TTSTextCleaner(chunk)
+			}
+			if noter != nil {
+				noter.NoteSpokenText(chunk)
 			}
 			sentenceBuf.WriteString(chunk)
 			text := sentenceBuf.String()
@@ -1312,8 +1327,12 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			}
 		}
 
-		reply, _, err := loop.RunStream(ctx, runCfg, content, onText, nil)
+		reply, _, _, err := g.runInteraction(ctx, loop, runCfg, content, onText, onText, nil)
 		if err != nil {
+			if ctx.Err() != nil {
+				g.logger.Info("voice turn cancelled", "chat_id", us.ChatID)
+				return
+			}
 			g.logger.Error("agent loop error", "chat_id", us.ChatID, "error", err)
 			g.sendDebugError(ctx, sink, "agent", err)
 			return
@@ -1346,14 +1365,18 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// Streaming path for Telegram: send placeholder, edit as chunks arrive.
 	tgSink, isTelegram := sink.(*telegramSink)
 	if !isTelegram {
-		// Non-Telegram transports: batch mode (unchanged).
-		result, err := loop.RunTracked(ctx, runCfg, content)
+		// Non-Telegram transports: batch mode.
+		reply, cortexTraces, _, err := g.runInteraction(ctx, loop, runCfg, content, nil, nil, nil)
 		if err != nil {
+			if ctx.Err() != nil {
+				g.logger.Info("turn cancelled", "chat_id", us.ChatID)
+				return
+			}
 			g.logger.Error("agent loop error", "chat_id", us.ChatID, "error", err)
 			g.sendDebugError(ctx, sink, "agent", err)
 			return
 		}
-		reply := sanitizeLeakedToolCalls(result.Text)
+		reply = sanitizeLeakedToolCalls(reply)
 		if reply != "" {
 			if len(postActions) > 0 {
 				g.executePostActions(ctx, us, postActions, reply)
@@ -1362,7 +1385,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			g.emitTurnCompleted(us, sess)
 		}
 		if us.DebugMode || g.deps.Config.Gateway.Debug {
-			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, msgText, preTraces, result.ToolTraces, engineRuleCount)
+			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, msgText, preTraces, cortexTraces, engineRuleCount)
 		}
 		return
 	}
@@ -1432,8 +1455,12 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		flushEdit()
 	}
 
-	reply, cortexTraces, err := loop.RunStream(ctx, runCfg, content, onText, onToolUse)
+	reply, cortexTraces, _, err := g.runInteraction(ctx, loop, runCfg, content, nil, onText, onToolUse)
 	if err != nil {
+		if ctx.Err() != nil {
+			g.logger.Info("turn cancelled", "chat_id", us.ChatID)
+			return
+		}
 		g.logger.Error("agent loop error", "chat_id", us.ChatID, "error", err)
 		g.sendDebugError(ctx, sink, "agent", err)
 		return
@@ -1953,6 +1980,217 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	}
 
 	return formattedTraces, guidance.String(), reflexResult.PostActions, preTraces, engineRuleCount, false
+}
+
+// escalateArgs is the parsed input of an escalate tool call.
+type escalateArgs struct {
+	Reason         string   `json:"reason"`
+	Guidance       string   `json:"guidance"`
+	SuggestedTools []string `json:"suggested_tools"`
+}
+
+// findEscalate scans tool traces for an escalate call. Detection keys on the
+// tool name (never truncated); args are parsed best-effort — a truncated trace
+// input still escalates, just without the guidance hint.
+func findEscalate(traces []agent.ToolTrace) *escalateArgs {
+	for _, tr := range traces {
+		if tr.Name != tool.ToolEscalate {
+			continue
+		}
+		var a escalateArgs
+		_ = json.Unmarshal([]byte(tr.Input), &a)
+		return &a
+	}
+	return nil
+}
+
+// runInteraction runs a turn through the two-tier interaction model when
+// Gateway.InteractionTier is enabled, falling back to a direct Cortex call
+// otherwise. It replaces the bare loop call in each of processMessages'
+// transport blocks.
+//
+// Interaction-tier flow: the user message is persisted once, then the Reflex
+// tier streams a reply. If Reflex answers directly (no escalate tool call)
+// that reply is the turn. If Reflex calls escalate, its streamed text was a
+// short spoken filler — the Cortex tier then runs and its answer becomes the
+// turn. reflexOnText is nil for non-voice transports so a filler is never
+// shown as text; cortexOnText / onToolUse drive the transport's own streaming.
+func (g *Gateway) runInteraction(
+	ctx context.Context,
+	loop *agent.Loop,
+	cortexCfg agent.RunConfig,
+	content any,
+	reflexOnText, cortexOnText func(string),
+	onToolUse func(string),
+) (reply string, traces []agent.ToolTrace, escalated bool, err error) {
+	// Legacy path: interaction tier off, or the interaction prompt is absent.
+	if !g.deps.Config.Gateway.InteractionTier || g.reflexInteractionPrompt == "" {
+		if g.deps.Config.Gateway.InteractionTier && g.reflexInteractionPrompt == "" {
+			g.logger.Warn("interaction tier enabled but reflex-interaction.md missing — running cortex directly")
+		}
+		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexOnText, onToolUse)
+		return reply, traces, false, err
+	}
+
+	// Derive the Reflex (interaction-tier) config from the Cortex config:
+	// same session / context / rules, but the fast model, the reflex role
+	// (escalate-only tools) and the interaction-tier prompt.
+	reflexCfg := cortexCfg
+	reflexCfg.Model = g.reflexModel()
+	reflexCfg.Role = "reflex"
+	reflexCfg.SystemPrompt = cortexCfg.SystemPrompt + "\n\n" + g.reflexInteractionPrompt
+	reflexCfg.MaxTurns = 1
+	reflexCfg.Ephemeral = true
+	reflexCfg.SkipUserAppend = true
+	reflexCfg.MaxTokens = 0
+	reflexCfg.Temperature = 0
+	// AllowedTools cleared — reflex's only tool is the system `escalate`
+	// sentinel, which must not be dropped by the per-soul cabinet allowlist.
+	reflexCfg.AllowedTools = nil
+	if g.deps.ModelStore != nil {
+		ref := g.deps.ModelStore.Get("reflex")
+		reflexCfg.MaxTokens = ref.MaxTokens
+		reflexCfg.Temperature = ref.Temperature
+	}
+
+	// Persist the user message once; both tiers read it, neither re-appends.
+	if err = g.store.Append(ctx, cortexCfg.SessionID, bs.Message{Role: "user", Content: content}); err != nil {
+		return "", nil, false, fmt.Errorf("interaction: append user message: %w", err)
+	}
+
+	reflexReply, reflexTraces, rerr := loop.RunStream(ctx, reflexCfg, content, reflexOnText, nil)
+	if rerr != nil {
+		return "", reflexTraces, false, fmt.Errorf("interaction: reflex: %w", rerr)
+	}
+
+	esc := findEscalate(reflexTraces)
+	if esc == nil {
+		// Simple turn — Reflex answered it. Persist its reply as the turn.
+		if strings.TrimSpace(reflexReply) != "" {
+			if aerr := g.store.Append(ctx, cortexCfg.SessionID, bs.Message{
+				Role:    "assistant",
+				Content: []bs.ContentBlock{{Type: "text", Text: reflexReply}},
+			}); aerr != nil {
+				g.logger.Warn("interaction: persist reflex reply failed", "error", aerr)
+			}
+		}
+		g.logger.Info("interaction: reflex answered, no escalation")
+		return reflexReply, reflexTraces, false, nil
+	}
+
+	// Escalation — run the Cortex tier. The user message is already
+	// persisted; Cortex persists its own answer normally.
+	g.logger.Info("interaction: escalating to cortex", "reason", truncateStr(esc.Reason, 120))
+	cortexCfg.SkipUserAppend = true
+	if esc.Guidance != "" {
+		note := "[escalation note] " + esc.Guidance
+		if cortexCfg.ReflexGuidance != "" {
+			cortexCfg.ReflexGuidance = note + "\n\n" + cortexCfg.ReflexGuidance
+		} else {
+			cortexCfg.ReflexGuidance = note
+		}
+	}
+	reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexOnText, onToolUse)
+	return reply, traces, true, err
+}
+
+// BargeInEnabled reports whether the barge-in voice path is enabled. The
+// WebSocket transport reads it to choose its connection-handling loop.
+func (g *Gateway) BargeInEnabled() bool {
+	return g.deps.Config.Gateway.BargeIn
+}
+
+// TranscribeAudio runs speech-to-text on raw audio bytes. Used by the barge-in
+// turn manager to transcribe an interjection before classifying it.
+func (g *Gateway) TranscribeAudio(ctx context.Context, audio []byte) (string, error) {
+	if g.whisper == nil || !g.whisper.IsConfigured() {
+		return "", fmt.Errorf("transcription not configured")
+	}
+	return g.whisper.Transcribe(ctx, audio, "voice.wav")
+}
+
+// ClassifyInterjection decides whether a user utterance that arrived mid-
+// response is a backchannel (keep the turn running) or a real interruption
+// (cancel it). It is a single cheap reflex-model call; it deliberately does
+// not run the AME / rule pipeline so it stays fast and lock-free while the
+// active turn is still streaming. inflightTail is what the assistant is
+// currently saying — without it the classifier cannot tell "да-да, понятно"
+// from "да-да, не то ищешь".
+func (g *Gateway) ClassifyInterjection(ctx context.Context, transcript, inflightTail string) (bs.InterjectionClass, error) {
+	model := g.reflexModel()
+	if model == "" {
+		return bs.InterjectionUnclear, fmt.Errorf("reflex model not configured")
+	}
+	if g.reflexInterjectionPrompt == "" {
+		return bs.InterjectionUnclear, fmt.Errorf("reflex-interjection prompt not loaded")
+	}
+
+	// Only the recent tail of the in-flight response matters for the decision.
+	tail := []rune(inflightTail)
+	if len(tail) > 600 {
+		tail = tail[len(tail)-600:]
+	}
+	prompt := fmt.Sprintf("Ассистент сейчас говорит:\n%s\n\nПользователь перебил репликой:\n%s",
+		strings.TrimSpace(string(tail)), transcript)
+
+	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
+		Model:     model,
+		MaxTokens: 16,
+		System:    g.reflexInterjectionPrompt,
+		Messages:  []bs.Message{{Role: "user", Content: prompt}},
+	})
+	if err != nil {
+		return bs.InterjectionUnclear, fmt.Errorf("classify interjection: %w", err)
+	}
+
+	out := strings.ToLower(strings.TrimSpace(bs.ExtractText(resp.Content)))
+	switch {
+	case strings.Contains(out, "interrupt"):
+		return bs.InterjectionInterrupt, nil
+	case strings.Contains(out, "backchannel"):
+		return bs.InterjectionBackchannel, nil
+	default:
+		return bs.InterjectionUnclear, nil
+	}
+}
+
+// PersistInterrupted records a cancelled turn's partial response as an
+// assistant message so the session keeps user/assistant alternation intact —
+// a dangling user message with no reply would break the next turn's API call.
+// Runs on a fresh background context because the turn's own context is, by
+// definition, already cancelled.
+func (g *Gateway) PersistInterrupted(_ context.Context, chatID, partial string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	us, err := g.getOrInitUser(ctx, chatID)
+	if err != nil {
+		g.logger.Warn("persist interrupted: resolve user failed", "error", err)
+		return
+	}
+	ctx = bs.WithSoulID(ctx, us.SoulID)
+
+	us.Mu.Lock()
+	defer us.Mu.Unlock()
+
+	sess, err := g.GetOrCreateSession(ctx, us)
+	if err != nil {
+		g.logger.Warn("persist interrupted: session failed", "error", err)
+		return
+	}
+
+	text := strings.TrimSpace(partial)
+	if text == "" {
+		text = "[прервано пользователем]"
+	} else {
+		text += " […прервано]"
+	}
+	if err := g.store.Append(ctx, sess.ID, bs.Message{
+		Role:    "assistant",
+		Content: []bs.ContentBlock{{Type: "text", Text: text}},
+	}); err != nil {
+		g.logger.Warn("persist interrupted: append failed", "error", err)
+	}
 }
 
 // executePostActions runs post-cortex actions (save reflection, etc.).

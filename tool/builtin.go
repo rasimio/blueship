@@ -80,6 +80,9 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 
 	RegisterTraceRecall(r, d.Config.TraceFilePath)
 
+	// escalate — the interaction tier's hand-off sentinel to the deep tier.
+	RegisterEscalateTool(r)
+
 	if d.Config.Sender != nil {
 		// message_send routes through the configured MessageSender. For
 		// channel-style targets (no leading digit, '-', or '@') prepend '@'

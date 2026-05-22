@@ -49,6 +49,16 @@ type RunConfig struct {
 	AllowedTools []string
 	// Temperature for LLM generation (0 = provider default).
 	Temperature float64
+	// Ephemeral, when true, runs the loop without persisting the assistant
+	// response or tool results to the session — the user message is still
+	// appended unless SkipUserAppend is also set. Used for the interaction
+	// tier's escalation pass, whose filler speech is conversational glue
+	// rather than a canonical turn message.
+	Ephemeral bool
+	// SkipUserAppend, when true, skips appending userMessage at loop start
+	// because the caller already persisted it. Used so the background tier
+	// can continue a turn the interaction tier already opened.
+	SkipUserAppend bool
 }
 
 // NewLoop creates a new agent loop.
@@ -103,10 +113,11 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		cfg.Model = a.cfg.Models.Primary.Name
 	}
 
-	// 1. Append user message
-	err := a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: userMessage})
-	if err != nil {
-		return nil, fmt.Errorf("append user message: %w", err)
+	// 1. Append user message (unless the caller already persisted it).
+	if !cfg.SkipUserAppend {
+		if err := a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: userMessage}); err != nil {
+			return nil, fmt.Errorf("append user message: %w", err)
+		}
 	}
 
 	// Select tools: ToolOverride > Role-based > all.
@@ -224,13 +235,15 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			"turn", turn+1,
 		)
 
-		// 5. Store assistant response
-		err = a.store.AppendWithTokens(ctx, cfg.SessionID, bs.Message{
-			Role:    "assistant",
-			Content: resp.Content,
-		}, resp.Usage.OutputTokens)
-		if err != nil {
-			return nil, fmt.Errorf("append assistant message: %w", err)
+		// 5. Store assistant response (skipped for an ephemeral run).
+		if !cfg.Ephemeral {
+			err = a.store.AppendWithTokens(ctx, cfg.SessionID, bs.Message{
+				Role:    "assistant",
+				Content: resp.Content,
+			}, resp.Usage.OutputTokens)
+			if err != nil {
+				return nil, fmt.Errorf("append assistant message: %w", err)
+			}
 		}
 
 		// Collect text from this turn
@@ -277,12 +290,14 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 				traces = append(traces, ToolTrace{Name: block.Name, Input: inputStr, Output: outputStr, Error: isError})
 			}
 
-			err = a.store.Append(ctx, cfg.SessionID, bs.Message{
-				Role:    "user",
-				Content: toolResults,
-			})
-			if err != nil {
-				return nil, fmt.Errorf("append tool results: %w", err)
+			if !cfg.Ephemeral {
+				err = a.store.Append(ctx, cfg.SessionID, bs.Message{
+					Role:    "user",
+					Content: toolResults,
+				})
+				if err != nil {
+					return nil, fmt.Errorf("append tool results: %w", err)
+				}
 			}
 
 			continue
@@ -292,9 +307,13 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		}
 	}
 
-	// Return whatever text was accumulated before hitting the turn limit.
-	if text := accumulated.String(); text != "" {
-		a.logger.Warn("agent loop hit turn limit, returning partial response", "turns", cfg.MaxTurns)
+	// Return whatever text/traces accumulated before hitting the turn limit.
+	// A turn that produced text or called a tool (e.g. an escalation pass run
+	// with MaxTurns:1) is a valid result, not a failure.
+	if text := accumulated.String(); text != "" || len(traces) > 0 {
+		if text != "" {
+			a.logger.Warn("agent loop hit turn limit, returning partial response", "turns", cfg.MaxTurns)
+		}
 		return &RunResult{Text: text, ToolTraces: traces}, nil
 	}
 	return nil, fmt.Errorf("agent loop exceeded %d turns with no text output", cfg.MaxTurns)
@@ -324,9 +343,10 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 		cfg.Model = a.cfg.Models.Primary.Name
 	}
 
-	err := a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: userMessage})
-	if err != nil {
-		return "", nil, fmt.Errorf("append user message: %w", err)
+	if !cfg.SkipUserAppend {
+		if err := a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: userMessage}); err != nil {
+			return "", nil, fmt.Errorf("append user message: %w", err)
+		}
 	}
 
 	var tools []bs.ToolDefinition
@@ -411,12 +431,14 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 			"turn", turn+1,
 		)
 
-		err = a.store.AppendWithTokens(ctx, cfg.SessionID, bs.Message{
-			Role:    "assistant",
-			Content: resp.Content,
-		}, resp.Usage.OutputTokens)
-		if err != nil {
-			return "", nil, fmt.Errorf("append assistant message: %w", err)
+		if !cfg.Ephemeral {
+			err = a.store.AppendWithTokens(ctx, cfg.SessionID, bs.Message{
+				Role:    "assistant",
+				Content: resp.Content,
+			}, resp.Usage.OutputTokens)
+			if err != nil {
+				return "", nil, fmt.Errorf("append assistant message: %w", err)
+			}
 		}
 
 		if turnText := bs.ExtractText(resp.Content); turnText != "" {
@@ -459,9 +481,11 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 				})
 			}
 
-			err = a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: toolResults})
-			if err != nil {
-				return "", nil, fmt.Errorf("append tool results: %w", err)
+			if !cfg.Ephemeral {
+				err = a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: toolResults})
+				if err != nil {
+					return "", nil, fmt.Errorf("append tool results: %w", err)
+				}
 			}
 			continue
 
@@ -470,7 +494,9 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 		}
 	}
 
-	if text := accumulated.String(); text != "" {
+	// A turn that produced text or called a tool (e.g. an escalation pass run
+	// with MaxTurns:1) is a valid result, not a failure.
+	if text := accumulated.String(); text != "" || len(traces) > 0 {
 		return text, traces, nil
 	}
 	return "", traces, fmt.Errorf("agent loop exceeded %d turns with no text output", cfg.MaxTurns)
