@@ -139,12 +139,13 @@ type apiContentBlock struct {
 
 // apiRequest is the wire format for Anthropic Messages API.
 type apiRequest struct {
-	Model       string        `json:"model"`
-	MaxTokens   int           `json:"max_tokens"`
-	System      []systemBlock `json:"system,omitempty"`
-	Messages    []apiMessage  `json:"messages"`
-	Tools       []apiTool     `json:"tools,omitempty"`
-	Temperature float64       `json:"temperature,omitempty"`
+	Model       string          `json:"model"`
+	MaxTokens   int             `json:"max_tokens"`
+	Stream      bool            `json:"stream,omitempty"`
+	System      []systemBlock   `json:"system,omitempty"`
+	Messages    []apiMessage    `json:"messages"`
+	Tools       []apiTool       `json:"tools,omitempty"`
+	Temperature float64         `json:"temperature,omitempty"`
 	Thinking    *thinkingConfig `json:"thinking,omitempty"`
 }
 
