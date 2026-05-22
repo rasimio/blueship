@@ -1338,6 +1338,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	if isStreaming && g.deps.Config.TTS != nil {
 		var sentenceBuf strings.Builder
 		chunkSeq := 0
+		onTextCalls := 0
 
 		cfg := g.deps.Config
 		voice := cfg.TTSVoice
@@ -1362,6 +1363,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			if noter != nil {
 				noter.NoteSpokenText(chunk)
 			}
+			onTextCalls++
 			sentenceBuf.WriteString(chunk)
 			text := sentenceBuf.String()
 
@@ -1376,10 +1378,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 					seq := chunkSeq
 					audio, err := synthesize(ctx, sentence, voice, instruct)
 					if err != nil {
-						g.logger.Warn("tts: stream chunk failed", "error", err)
+						g.logger.Warn("tts: stream chunk failed", "error", err, "sentence_len", len(sentence))
 						return
 					}
-					streamSink.SendVoiceChunk(ctx, audio, seq, false)
+					g.logger.Info("tts: stream chunk ok", "seq", seq, "audio_bytes", len(audio), "sentence_len", len(sentence))
+					if werr := streamSink.SendVoiceChunk(ctx, audio, seq, false); werr != nil {
+						g.logger.Warn("tts: send chunk failed", "error", werr, "seq", seq)
+					}
 					return
 				}
 			}
@@ -1396,15 +1401,30 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			return
 		}
 
-		// Flush remaining text as final chunk
-		if remaining := strings.TrimSpace(sentenceBuf.String()); remaining != "" {
+		// Flush remaining text as final chunk.
+		remaining := strings.TrimSpace(sentenceBuf.String())
+		g.logger.Info("voice: stream done, flushing",
+			"on_text_calls", onTextCalls,
+			"chunks_streamed", chunkSeq,
+			"remaining_len", len(remaining),
+			"reply_len", len(reply),
+		)
+		if remaining != "" {
 			chunkSeq++
-			if audio, err := synthesize(ctx, remaining, voice, instruct); err == nil {
-				streamSink.SendVoiceChunk(ctx, audio, chunkSeq, true)
+			audio, terr := synthesize(ctx, remaining, voice, instruct)
+			if terr != nil {
+				g.logger.Warn("tts: flush synth failed", "error", terr, "text_len", len(remaining))
+			} else {
+				g.logger.Info("tts: flush sent", "seq", chunkSeq, "audio_bytes", len(audio))
+				if werr := streamSink.SendVoiceChunk(ctx, audio, chunkSeq, true); werr != nil {
+					g.logger.Warn("tts: send flush chunk failed", "error", werr)
+				}
 			}
 		} else if chunkSeq > 0 {
-			// Mark last sent chunk as final (re-send empty final marker)
-			streamSink.SendVoiceChunk(ctx, nil, chunkSeq, true)
+			// Mark last sent chunk as final (re-send empty final marker).
+			if werr := streamSink.SendVoiceChunk(ctx, nil, chunkSeq, true); werr != nil {
+				g.logger.Warn("tts: send final marker failed", "error", werr)
+			}
 		}
 
 		// Also send text for logging
