@@ -1346,11 +1346,12 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		if cfg.TTSInstructMapper != nil {
 			instruct = cfg.TTSInstructMapper(us.LastStrategy)
 		}
-		mp3Provider, hasMP3 := cfg.TTS.(bs.TTSProviderMP3)
+		// Stream path uses the default Synthesize (OGG/Opus from ElevenLabs).
+		// The legacy SynthesizeMP3 preference existed because macOS arlene-
+		// voice couldn't decode OGG — that client is gone, and per-chunk MP3
+		// has a ~150 ms decoder warmup on Android which manifests as the
+		// "first word swallowed" on every TTS chunk. Opus warms in ~5 ms.
 		synthesize := cfg.TTS.Synthesize
-		if hasMP3 {
-			synthesize = mp3Provider.SynthesizeMP3
-		}
 
 		// Barge-in: notify a spoken-text-aware sink of each streamed chunk so
 		// it can track what the assistant is currently saying.
