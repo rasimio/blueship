@@ -1805,29 +1805,22 @@ const maxPreActions = 2
 // When silent=true the caller MUST abort the turn without calling cortex or
 // sending any output — a structured rule with Silent=true matched.
 func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText, priorContext string) (string, string, []bs.PostAction, []agent.ToolTrace, int, bool) {
-	rc := us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText, priorContext)
-	if rc == nil {
-		return "", "", nil, nil, 0, false
-	}
-
-	// Store emotional strategy for TTS instruct mapping.
-	us.LastStrategy = rc.Strategy
-
-	// Interaction tier: the streaming reflex (runInteraction) owns the
-	// answer/escalate decision and all tool use. Context prep here must stay
-	// lean — AME traces + the structured rule engine only. The legacy
-	// callReflex classifier and its pre-actions add a redundant ~5 s
-	// round-trip per turn and are skipped entirely.
+	// Interaction tier: skip the ReflexPreparer entirely. The full AME pass
+	// (memory_associate + scoring + diversity filter + emotion detection)
+	// costs ~3-5 s per turn and the streaming reflex doesn't need it — for
+	// chatty/social turns it answers from session history alone, and for
+	// memory-needing turns it escalates to cortex which still has the full
+	// chat history and all tools. We only run the structured rule engine
+	// here (cheap; catches Silent rules and injects scope-based guidance).
 	if g.deps.Config.Gateway.InteractionTier {
 		var guidance strings.Builder
 		hasRules := false
 		engineRuleCount := 0
 		if us.Deps.RuleEngine != nil {
 			engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
-				UserID:   us.Deps.UserID.String(),
-				Strategy: rc.Strategy,
-				Hour:     time.Now().Hour(),
-				Message:  msgText,
+				UserID:  us.Deps.UserID.String(),
+				Hour:    time.Now().Hour(),
+				Message: msgText,
 			})
 			for _, r := range engineRules {
 				if r.Silent {
@@ -1851,8 +1844,16 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		if hasRules {
 			guidance.WriteString("[/active rules]")
 		}
-		return rc.FormattedTraces, guidance.String(), nil, nil, engineRuleCount, false
+		return "", guidance.String(), nil, nil, engineRuleCount, false
 	}
+
+	rc := us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText, priorContext)
+	if rc == nil {
+		return "", "", nil, nil, 0, false
+	}
+
+	// Store emotional strategy for TTS instruct mapping.
+	us.LastStrategy = rc.Strategy
 
 	// Build reflex prompt.
 	var rulesBlock strings.Builder
