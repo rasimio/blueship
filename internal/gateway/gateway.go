@@ -1434,6 +1434,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		// it can track what the assistant is currently saying.
 		noter, _ := sink.(bs.SpokenTextSink)
 
+		// First chunk emits on any low-latency boundary (sentence end OR a
+		// comma/dash after ≥ 6 chars) so the user hears Arlene within ~1 s
+		// of the LLM starting to stream. Later chunks demand a full
+		// sentence-end so the playback doesn't sound choppy.
+		var firstChunkEmitted bool
 		onText := func(chunk string) {
 			if cfg.TTSTextCleaner != nil {
 				chunk = cfg.TTSTextCleaner(chunk)
@@ -1445,26 +1450,38 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			sentenceBuf.WriteString(chunk)
 			text := sentenceBuf.String()
 
-			// Check for sentence boundary
-			for _, delim := range []string{". ", "! ", "? ", ".\n", "!\n", "?\n"} {
-				if idx := strings.LastIndex(text, delim); idx >= 10 {
-					sentence := strings.TrimSpace(text[:idx+1])
-					sentenceBuf.Reset()
-					sentenceBuf.WriteString(text[idx+len(delim):])
+			// Sentence-end delimiters — always cut here.
+			delims := []string{". ", "! ", "? ", ".\n", "!\n", "?\n"}
+			minIdx := 10
+			// Until the first audio has gone out, also accept a comma /
+			// dash / colon as a cut point so reflex's «Секунду,» turns
+			// into audio immediately instead of waiting for the period.
+			if !firstChunkEmitted {
+				delims = append(delims, ", ", " — ", ": ", ",\n")
+				minIdx = 6
+			}
+			for _, delim := range delims {
+				idx := strings.LastIndex(text, delim)
+				if idx < minIdx {
+					continue
+				}
+				sentence := strings.TrimSpace(text[:idx+1])
+				sentenceBuf.Reset()
+				sentenceBuf.WriteString(text[idx+len(delim):])
 
-					chunkSeq++
-					seq := chunkSeq
-					audio, err := synthesize(ctx, sentence, voice, instruct)
-					if err != nil {
-						g.logger.Warn("tts: stream chunk failed", "error", err, "sentence_len", len(sentence))
-						return
-					}
-					g.logger.Info("tts: stream chunk ok", "seq", seq, "audio_bytes", len(audio), "sentence_len", len(sentence))
-					if werr := streamSink.SendVoiceChunk(ctx, audio, seq, false); werr != nil {
-						g.logger.Warn("tts: send chunk failed", "error", werr, "seq", seq)
-					}
+				chunkSeq++
+				seq := chunkSeq
+				audio, err := synthesize(ctx, sentence, voice, instruct)
+				if err != nil {
+					g.logger.Warn("tts: stream chunk failed", "error", err, "sentence_len", len(sentence))
 					return
 				}
+				g.logger.Info("tts: stream chunk ok", "seq", seq, "audio_bytes", len(audio), "sentence_len", len(sentence), "first", !firstChunkEmitted)
+				if werr := streamSink.SendVoiceChunk(ctx, audio, seq, false); werr != nil {
+					g.logger.Warn("tts: send chunk failed", "error", werr, "seq", seq)
+				}
+				firstChunkEmitted = true
+				return
 			}
 		}
 
