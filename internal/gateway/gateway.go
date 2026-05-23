@@ -2195,6 +2195,11 @@ func (g *Gateway) runInteraction(
 	reflexCfg.SkipUserAppend = true
 	reflexCfg.MaxTokens = 0
 	reflexCfg.Temperature = 0
+	// Tight history window for the fast tier — routing/answer decisions need
+	// the recent conversation, not the full session. ~4 K tokens ≈ last 15-25
+	// messages, enough for short-term continuity; full context lives on the
+	// cortex side when escalation happens.
+	reflexCfg.MessageBudget = 4000
 	// AllowedTools cleared — reflex's only tool is the system `escalate`
 	// sentinel, which must not be dropped by the per-soul cabinet allowlist.
 	reflexCfg.AllowedTools = nil

@@ -59,6 +59,11 @@ type RunConfig struct {
 	// because the caller already persisted it. Used so the background tier
 	// can continue a turn the interaction tier already opened.
 	SkipUserAppend bool
+	// MessageBudget, when > 0, overrides the calculated message-window token
+	// budget. The fast interaction tier uses this to limit reflex's input to
+	// the last ~15-20 turns — Sonnet on 30 K of session history was the
+	// dominant per-turn latency, and routing decisions don't need long memory.
+	MessageBudget int
 }
 
 // NewLoop creates a new agent loop.
@@ -149,6 +154,9 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		tools = kept
 	}
 	tokenBudget := a.calculateBudget(cfg.SystemPrompt, tools)
+	if cfg.MessageBudget > 0 {
+		tokenBudget = cfg.MessageBudget
+	}
 
 	// Pre-existing compact summary from previous runs
 	compactSummary := cfg.CompactSummary
@@ -376,6 +384,9 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 		tools = kept
 	}
 	tokenBudget := a.calculateBudget(cfg.SystemPrompt, tools)
+	if cfg.MessageBudget > 0 {
+		tokenBudget = cfg.MessageBudget
+	}
 	compactSummary := cfg.CompactSummary
 
 	var accumulated strings.Builder
