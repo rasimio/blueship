@@ -144,7 +144,17 @@ type TransportConfig struct {
 // WebSocketConfig configures the optional WebSocket server.
 type WebSocketConfig struct {
 	Port  int    // 0 = disabled
-	Token string // bearer auth token
+	Token string // legacy shared bearer token (dev fallback when ResolveDevice is nil)
+
+	// ResolveDevice authenticates a per-user device bearer token and
+	// returns the (user, soul) it is bound to. When non-nil, voice
+	// connections present `Authorization: Bearer <opaque>` and are
+	// dispatched to ProcessInboundForUser — no chatID translation, no
+	// owner gate. When nil, the legacy shared Token + voice:owner
+	// chatID path runs (single-tenant dev fallback). The host supplies
+	// the implementation (typically a vaelum.devices lookup); blueship
+	// stays generic about the token format.
+	ResolveDevice func(ctx context.Context, token string) (userID, soulID uuid.UUID, err error) `yaml:"-" json:"-"`
 }
 
 // HTTPChatConfig configures the optional HTTP/SSE chat server that serves

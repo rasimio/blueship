@@ -99,7 +99,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	sink := &sseSink{w: w, flusher: flusher}
-	if err := s.gw.ProcessInboundForUser(r.Context(), userID, soulID,
+	if err := s.gw.ProcessInboundForUser(r.Context(), userID, soulID, "vaelum",
 		[]bs.InboundMessage{{Text: req.Text}}, sink); err != nil {
 		s.logger.Warn("httpchat: process error", "error", err)
 		sink.event("error", err.Error())

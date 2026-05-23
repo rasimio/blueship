@@ -1035,13 +1035,39 @@ func (g *Gateway) ProcessInbound(ctx context.Context, chatID string, messages []
 }
 
 // ProcessInboundForUser is the entry point for authenticated platform
-// (Vaelum) web users. The caller has already authenticated the user and
-// resolved the soul, so this bypasses chatID resolution and the
-// owner-only gate that getOrInitUser enforces for the Telegram path.
-func (g *Gateway) ProcessInboundForUser(ctx context.Context, userID, soulID uuid.UUID, messages []bs.InboundMessage, sink bs.ResponseSink) error {
-	us, err := g.getOrInitWebUser(ctx, userID, soulID)
+// users (Vaelum web chat, native device voice). The caller has already
+// authenticated the user and resolved the soul, so this bypasses chatID
+// resolution and the owner-only gate that getOrInitUser enforces for the
+// Telegram path.
+//
+// `transport` distinguishes parallel sessions for the same (user, soul):
+// "vaelum" for the web chat, "voice" for the device WS. Each transport
+// gets its own cached UserState (separate sink, independent in-flight
+// loop) — the chat session and AME memory are shared because they key
+// on (user, soul), not on transport.
+//
+// Audio in InboundMessage is transcribed via Whisper before dispatch;
+// text-only callers (httpchat) are unaffected — empty Audio = no-op.
+func (g *Gateway) ProcessInboundForUser(ctx context.Context, userID, soulID uuid.UUID, transport string, messages []bs.InboundMessage, sink bs.ResponseSink) error {
+	us, err := g.getOrInitPlatformUser(ctx, userID, soulID, transport)
 	if err != nil {
-		return fmt.Errorf("init web user: %w", err)
+		return fmt.Errorf("init platform user: %w", err)
+	}
+
+	// Transcribe audio if present (same loop as the legacy ProcessInbound).
+	for i, m := range messages {
+		if len(m.Audio) > 0 && g.whisper != nil && g.whisper.IsConfigured() {
+			transcript, err := g.whisper.Transcribe(ctx, m.Audio, "voice.wav")
+			if err != nil {
+				g.logger.Warn("transcribe failed", "error", err)
+				continue
+			}
+			if messages[i].Text != "" {
+				messages[i].Text += "\n\n" + transcript
+			} else {
+				messages[i].Text = transcript
+			}
+		}
 	}
 
 	var pending []pendingMsg
@@ -1059,13 +1085,64 @@ func (g *Gateway) ProcessInboundForUser(ctx context.Context, userID, soulID uuid
 	return nil
 }
 
-// getOrInitWebUser builds (or reuses) a UserState for an authenticated
-// platform web user. Unlike getOrInitUser it does not consult
-// user_profiles and does not apply the owner gate — Vaelum is the
-// authentication boundary for web users, and the soul is supplied by the
-// caller (resolved from vaelum.memberships on the platform side).
+// PersistInterruptedForUser is the soul-aware counterpart to
+// PersistInterrupted — the barge-in voice path uses this when a turn is
+// cancelled mid-stream so the partial assistant reply persists against
+// the authenticated (user, soul), with no chatID round-trip.
+func (g *Gateway) PersistInterruptedForUser(_ context.Context, userID, soulID uuid.UUID, transport, partial string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	us, err := g.getOrInitPlatformUser(ctx, userID, soulID, transport)
+	if err != nil {
+		g.logger.Warn("persist interrupted: init platform user failed", "error", err)
+		return
+	}
+	ctx = bs.WithSoulID(ctx, us.SoulID)
+
+	us.Mu.Lock()
+	defer us.Mu.Unlock()
+
+	sess, err := g.GetOrCreateSession(ctx, us)
+	if err != nil {
+		g.logger.Warn("persist interrupted: session failed", "error", err)
+		return
+	}
+
+	text := strings.TrimSpace(partial)
+	if text == "" {
+		text = "[прервано пользователем]"
+	} else {
+		text += " […прервано]"
+	}
+	if err := g.store.Append(ctx, sess.ID, bs.Message{
+		Role:    "assistant",
+		Content: []bs.ContentBlock{{Type: "text", Text: text}},
+	}); err != nil {
+		g.logger.Warn("persist interrupted: append failed", "error", err)
+	}
+}
+
+// getOrInitWebUser is retained as a thin wrapper for backward
+// compatibility with the "vaelum" web chat transport.
 func (g *Gateway) getOrInitWebUser(ctx context.Context, userID, soulID uuid.UUID) (*UserState, error) {
-	chatID := "vaelum:" + userID.String()
+	return g.getOrInitPlatformUser(ctx, userID, soulID, "vaelum")
+}
+
+// getOrInitPlatformUser builds (or reuses) a UserState for an
+// authenticated platform user. Unlike getOrInitUser it does not consult
+// user_profiles and does not apply the owner gate — Vaelum is the
+// authentication boundary for platform users, and the soul is supplied
+// by the caller (resolved from vaelum.memberships on the platform side
+// or vaelum.devices on the device path).
+//
+// transport is the chatID prefix ("vaelum", "voice", …) so two transports
+// for the same (user, soul) maintain independent UserStates.
+func (g *Gateway) getOrInitPlatformUser(ctx context.Context, userID, soulID uuid.UUID, transport string) (*UserState, error) {
+	if transport == "" {
+		transport = "vaelum"
+	}
+	chatID := transport + ":" + userID.String()
 
 	g.mu.Lock()
 	defer g.mu.Unlock()

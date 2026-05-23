@@ -7,13 +7,33 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"nhooyr.io/websocket"
 
 	bs "github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/gateway"
 )
+
+// connAuth carries the per-connection auth verdict from handleWS down into
+// the read/dispatch loops. When `legacy` is true the connection runs the
+// single-tenant voice:owner path (cfg.Token shared secret + ProcessInbound).
+// When false it ran through cfg.ResolveDevice, so (userID, soulID) are
+// populated and dispatch goes through ProcessInboundForUser.
+type connAuth struct {
+	legacy bool
+	chatID string // "voice:owner" (legacy) or "voice:<userID>" (device-authed)
+	userID uuid.UUID
+	soulID uuid.UUID
+}
+
+// deviceTransport is the chatID prefix the gateway uses to key a separate
+// UserState cache slot per (user, soul) for the voice WS path — distinct
+// from "vaelum" (httpchat) so concurrent web and voice sessions for the
+// same user don't share LoopBusy / Mu state.
+const deviceTransport = "voice"
 
 // Server handles WebSocket connections for voice/desktop clients.
 type Server struct {
@@ -50,17 +70,10 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
-	// Auth: bearer token.
-	if s.cfg.Token != "" {
-		token := r.Header.Get("Authorization")
-		if token != "Bearer "+s.cfg.Token {
-			// Also check query param for browser clients.
-			token = r.URL.Query().Get("token")
-			if token != s.cfg.Token {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-		}
+	auth, err := s.authenticate(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
 	}
 
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
@@ -73,9 +86,57 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(16 * 1024 * 1024) // 16MB for base64 audio
 	defer conn.Close(websocket.StatusNormalClosure, "bye")
 
-	s.logger.Info("ws: client connected", "remote", r.RemoteAddr)
-	s.handleConnection(r.Context(), conn, r.RemoteAddr)
-	s.logger.Info("ws: client disconnected", "remote", r.RemoteAddr)
+	s.logger.Info("ws: client connected",
+		"remote", r.RemoteAddr,
+		"chat_id", auth.chatID,
+		"device_authed", !auth.legacy)
+	s.handleConnection(r.Context(), conn, r.RemoteAddr, auth)
+	s.logger.Info("ws: client disconnected", "remote", r.RemoteAddr, "chat_id", auth.chatID)
+}
+
+// authenticate resolves the connection's auth verdict. Priority:
+//  1. If cfg.ResolveDevice is wired, the Bearer header (or `?token=`) is a
+//     per-user device token; resolve it to (userID, soulID) or 401.
+//  2. Else fall back to the legacy shared cfg.Token (single-tenant dev).
+//  3. Empty cfg.Token AND nil ResolveDevice = open server (legacy path).
+func (s *Server) authenticate(r *http.Request) (connAuth, error) {
+	token := bearerToken(r)
+	if token == "" {
+		token = r.URL.Query().Get("token")
+	}
+
+	if s.cfg.ResolveDevice != nil {
+		if token == "" {
+			return connAuth{}, fmt.Errorf("missing bearer token")
+		}
+		userID, soulID, err := s.cfg.ResolveDevice(r.Context(), token)
+		if err != nil {
+			s.logger.Info("ws: device auth rejected", "error", err, "remote", r.RemoteAddr)
+			return connAuth{}, err
+		}
+		return connAuth{
+			legacy: false,
+			chatID: deviceTransport + ":" + userID.String(),
+			userID: userID,
+			soulID: soulID,
+		}, nil
+	}
+
+	// Legacy single-tenant fallback.
+	if s.cfg.Token != "" && token != s.cfg.Token {
+		return connAuth{}, fmt.Errorf("invalid legacy token")
+	}
+	return connAuth{legacy: true, chatID: "voice:owner"}, nil
+}
+
+// bearerToken extracts a `Bearer <token>` value from the Authorization header.
+func bearerToken(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if !strings.HasPrefix(h, prefix) {
+		return ""
+	}
+	return strings.TrimSpace(h[len(prefix):])
 }
 
 // InMsg is the client→server JSON message.
@@ -98,20 +159,17 @@ type OutMsg struct {
 // remote address is threaded through so inbound/outbound logs can be
 // correlated to a specific TCP connection — critical when multiple voice
 // clients (or a reconnect storm) share the same chatID.
-func (s *Server) handleConnection(ctx context.Context, conn *websocket.Conn, remote string) {
+func (s *Server) handleConnection(ctx context.Context, conn *websocket.Conn, remote string, auth connAuth) {
 	if s.gw.BargeInEnabled() {
-		s.handleConnectionBargeIn(ctx, conn, remote)
+		s.handleConnectionBargeIn(ctx, conn, remote, auth)
 		return
 	}
-	s.handleConnectionLegacy(ctx, conn, remote)
+	s.handleConnectionLegacy(ctx, conn, remote, auth)
 }
 
 // handleConnectionLegacy reads and processes one frame at a time — it does not
 // read the next frame until the current turn finishes. No barge-in.
-func (s *Server) handleConnectionLegacy(ctx context.Context, conn *websocket.Conn, remote string) {
-	// Use owner chatID for voice connections.
-	chatID := "voice:owner"
-
+func (s *Server) handleConnectionLegacy(ctx context.Context, conn *websocket.Conn, remote string, auth connAuth) {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -148,9 +206,15 @@ func (s *Server) handleConnectionLegacy(ctx context.Context, conn *websocket.Con
 
 		sink := &wsSink{conn: conn, ctx: ctx, logger: s.logger, remote: remote}
 
-		if err := s.gw.ProcessInbound(ctx, chatID, []bs.InboundMessage{inbound}, sink); err != nil {
-			s.logger.Warn("ws: process error", "error", err, "remote", remote)
-			writeJSON(ctx, conn, OutMsg{Type: "error", Data: err.Error()})
+		var perr error
+		if auth.legacy {
+			perr = s.gw.ProcessInbound(ctx, auth.chatID, []bs.InboundMessage{inbound}, sink)
+		} else {
+			perr = s.gw.ProcessInboundForUser(ctx, auth.userID, auth.soulID, deviceTransport, []bs.InboundMessage{inbound}, sink)
+		}
+		if perr != nil {
+			s.logger.Warn("ws: process error", "error", perr, "remote", remote)
+			writeJSON(ctx, conn, OutMsg{Type: "error", Data: perr.Error()})
 		}
 	}
 }
@@ -158,9 +222,9 @@ func (s *Server) handleConnectionLegacy(ctx context.Context, conn *websocket.Con
 // handleConnectionBargeIn runs the concurrent path: a read goroutine keeps
 // draining frames into a channel while a turn is in flight, and the turn
 // manager owns turn lifecycle, cancellation and interjection handling.
-func (s *Server) handleConnectionBargeIn(ctx context.Context, conn *websocket.Conn, remote string) {
+func (s *Server) handleConnectionBargeIn(ctx context.Context, conn *websocket.Conn, remote string, auth connAuth) {
 	w := newConnWriter(conn)
-	tm := newTurnManager(s.gw, "voice:owner", w, s.logger)
+	tm := newTurnManager(s.gw, auth, w, s.logger)
 	_ = remote // barge-in path has its own sink construction; logging hook lands later
 
 	inbound := make(chan InMsg, 16)

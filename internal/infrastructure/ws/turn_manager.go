@@ -77,7 +77,7 @@ type interjectResult struct {
 // channels. No locks on turn-manager state; no lock-ordering hazards.
 type turnManager struct {
 	gw     *gateway.Gateway
-	chatID string
+	auth   connAuth
 	w      *connWriter
 	logger *slog.Logger
 
@@ -88,10 +88,10 @@ type turnManager struct {
 	interject chan interjectResult
 }
 
-func newTurnManager(gw *gateway.Gateway, chatID string, w *connWriter, logger *slog.Logger) *turnManager {
+func newTurnManager(gw *gateway.Gateway, auth connAuth, w *connWriter, logger *slog.Logger) *turnManager {
 	return &turnManager{
 		gw:        gw,
-		chatID:    chatID,
+		auth:      auth,
 		w:         w,
 		logger:    logger,
 		turnDone:  make(chan *turnHandle, 4),
@@ -235,7 +235,12 @@ func (tm *turnManager) startTurn(connCtx context.Context, inb bs.InboundMessage)
 	sink := &wsSink{logger: tm.logger, writer: tm.w, turn: h}
 
 	go func() {
-		err := tm.gw.ProcessInbound(turnCtx, tm.chatID, []bs.InboundMessage{inb}, sink)
+		var err error
+		if tm.auth.legacy {
+			err = tm.gw.ProcessInbound(turnCtx, tm.auth.chatID, []bs.InboundMessage{inb}, sink)
+		} else {
+			err = tm.gw.ProcessInboundForUser(turnCtx, tm.auth.userID, tm.auth.soulID, deviceTransport, []bs.InboundMessage{inb}, sink)
+		}
 		if err != nil && turnCtx.Err() == nil {
 			tm.logger.Warn("ws: process error", "error", err)
 			tm.w.write(connCtx, OutMsg{Type: "error", Data: err.Error()})
@@ -244,7 +249,11 @@ func (tm *turnManager) startTurn(connCtx context.Context, inb bs.InboundMessage)
 		// so the session keeps user/assistant alternation intact (a dangling
 		// user message with no reply breaks the next turn's API call).
 		if turnCtx.Err() != nil {
-			tm.gw.PersistInterrupted(connCtx, tm.chatID, h.spokenText())
+			if tm.auth.legacy {
+				tm.gw.PersistInterrupted(connCtx, tm.auth.chatID, h.spokenText())
+			} else {
+				tm.gw.PersistInterruptedForUser(connCtx, tm.auth.userID, tm.auth.soulID, deviceTransport, h.spokenText())
+			}
 		}
 		select {
 		case tm.turnDone <- h:
