@@ -66,14 +66,25 @@ func (s *store) serversForSoul(ctx context.Context, soulID uuid.UUID) ([]ServerR
 }
 
 // serversSignature returns a cheap fingerprint of a soul's enabled MCP
-// servers — row count plus the latest updated_at. The Manager compares it
-// each turn so a cabinet add/remove/edit is picked up on the next message
-// rather than waiting out the cache TTL.
+// servers. The Manager compares it each turn so a cabinet add/remove/edit
+// is picked up on the next message rather than waiting out the cache TTL.
+//
+// MUST include only user-config fields (id / transport / url / command /
+// args / credential), not bookkeeping columns like updated_at — markSynced
+// bumps updated_at on every successful connect, so including it here used
+// to flip the signature on every turn and trigger a cold reconnect on the
+// next ToolsForSoul call (~1 s of needless reflex-time latency).
 func (s *store) serversSignature(ctx context.Context, soulID uuid.UUID) string {
 	var sig string
 	_ = s.db.GetContext(ctx, &sig,
-		`SELECT count(*)::text || ':' ||
-		        coalesce(max(extract(epoch FROM updated_at))::bigint, 0)::text
+		`SELECT count(*)::text || ':' || coalesce(
+		     md5(string_agg(
+		         id::text || '|' || transport || '|' ||
+		         coalesce(url, '') || '|' || coalesce(command, '') || '|' ||
+		         coalesce(array_to_string(args, ','), '') || '|' ||
+		         coalesce(credential_id::text, ''),
+		         '~' ORDER BY id
+		     )), '')
 		 FROM vaelum.mcp_servers WHERE soul_id = $1 AND enabled = true`, soulID)
 	return sig
 }
