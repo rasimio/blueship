@@ -74,7 +74,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close(websocket.StatusNormalClosure, "bye")
 
 	s.logger.Info("ws: client connected", "remote", r.RemoteAddr)
-	s.handleConnection(r.Context(), conn)
+	s.handleConnection(r.Context(), conn, r.RemoteAddr)
 	s.logger.Info("ws: client disconnected", "remote", r.RemoteAddr)
 }
 
@@ -94,18 +94,21 @@ type OutMsg struct {
 }
 
 // handleConnection dispatches to the legacy strictly-sequential loop or, when
-// barge-in is enabled, the concurrent read-loop + turn-manager path.
-func (s *Server) handleConnection(ctx context.Context, conn *websocket.Conn) {
+// barge-in is enabled, the concurrent read-loop + turn-manager path. The
+// remote address is threaded through so inbound/outbound logs can be
+// correlated to a specific TCP connection — critical when multiple voice
+// clients (or a reconnect storm) share the same chatID.
+func (s *Server) handleConnection(ctx context.Context, conn *websocket.Conn, remote string) {
 	if s.gw.BargeInEnabled() {
-		s.handleConnectionBargeIn(ctx, conn)
+		s.handleConnectionBargeIn(ctx, conn, remote)
 		return
 	}
-	s.handleConnectionLegacy(ctx, conn)
+	s.handleConnectionLegacy(ctx, conn, remote)
 }
 
 // handleConnectionLegacy reads and processes one frame at a time — it does not
 // read the next frame until the current turn finishes. No barge-in.
-func (s *Server) handleConnectionLegacy(ctx context.Context, conn *websocket.Conn) {
+func (s *Server) handleConnectionLegacy(ctx context.Context, conn *websocket.Conn, remote string) {
 	// Use owner chatID for voice connections.
 	chatID := "voice:owner"
 
@@ -115,7 +118,7 @@ func (s *Server) handleConnectionLegacy(ctx context.Context, conn *websocket.Con
 			if websocket.CloseStatus(err) != -1 {
 				return // normal close
 			}
-			s.logger.Warn("ws: read error", "error", err)
+			s.logger.Warn("ws: read error", "error", err, "remote", remote)
 			return
 		}
 
@@ -124,6 +127,8 @@ func (s *Server) handleConnectionLegacy(ctx context.Context, conn *websocket.Con
 			writeJSON(ctx, conn, OutMsg{Type: "error", Data: "invalid JSON"})
 			continue
 		}
+
+		s.logger.Info("ws: inbound", "remote", remote, "type", msg.Type, "data_len", len(msg.Data))
 
 		var inbound bs.InboundMessage
 		switch msg.Type {
@@ -141,10 +146,10 @@ func (s *Server) handleConnectionLegacy(ctx context.Context, conn *websocket.Con
 			continue
 		}
 
-		sink := &wsSink{conn: conn, ctx: ctx, logger: s.logger}
+		sink := &wsSink{conn: conn, ctx: ctx, logger: s.logger, remote: remote}
 
 		if err := s.gw.ProcessInbound(ctx, chatID, []bs.InboundMessage{inbound}, sink); err != nil {
-			s.logger.Warn("ws: process error", "error", err)
+			s.logger.Warn("ws: process error", "error", err, "remote", remote)
 			writeJSON(ctx, conn, OutMsg{Type: "error", Data: err.Error()})
 		}
 	}
@@ -153,9 +158,10 @@ func (s *Server) handleConnectionLegacy(ctx context.Context, conn *websocket.Con
 // handleConnectionBargeIn runs the concurrent path: a read goroutine keeps
 // draining frames into a channel while a turn is in flight, and the turn
 // manager owns turn lifecycle, cancellation and interjection handling.
-func (s *Server) handleConnectionBargeIn(ctx context.Context, conn *websocket.Conn) {
+func (s *Server) handleConnectionBargeIn(ctx context.Context, conn *websocket.Conn, remote string) {
 	w := newConnWriter(conn)
 	tm := newTurnManager(s.gw, "voice:owner", w, s.logger)
+	_ = remote // barge-in path has its own sink construction; logging hook lands later
 
 	inbound := make(chan InMsg, 16)
 	go func() {
@@ -189,6 +195,7 @@ type wsSink struct {
 	conn   *websocket.Conn // legacy path — direct writer
 	ctx    context.Context
 	logger *slog.Logger
+	remote string // for log correlation across multiple concurrent sockets
 
 	writer *connWriter // barge-in path — serialised writer
 	turn   *turnHandle // barge-in path — spoken-text tracking
@@ -213,6 +220,7 @@ func (s *wsSink) SendVoice(ctx context.Context, audio []byte) error {
 
 func (s *wsSink) SendVoiceChunk(ctx context.Context, audio []byte, seq int, final bool) error {
 	encoded := base64.StdEncoding.EncodeToString(audio)
+	s.logger.Info("ws: send chunk", "remote", s.remote, "seq", seq, "final", final, "audio_bytes", len(audio), "encoded_bytes", len(encoded))
 	return s.emit(ctx, OutMsg{Type: "audio_chunk", Data: encoded, Seq: seq, Final: final})
 }
 
