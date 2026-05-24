@@ -1460,29 +1460,42 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 				delims = append(delims, ", ", " — ", ": ", ",\n")
 				minIdx = 6
 			}
+			// Pick the EARLIEST valid split point across all delims (was
+			// LastIndex per delim, which collapsed multi-sentence bursts
+			// from a fast LLM into a single TTS call — the first sentence
+			// then waited for the rest of the buffer to land instead of
+			// streaming out as it became available).
+			bestIdx := -1
+			bestDelimLen := 0
 			for _, delim := range delims {
-				idx := strings.LastIndex(text, delim)
+				idx := strings.Index(text, delim)
 				if idx < minIdx {
 					continue
 				}
-				sentence := strings.TrimSpace(text[:idx+1])
-				sentenceBuf.Reset()
-				sentenceBuf.WriteString(text[idx+len(delim):])
-
-				chunkSeq++
-				seq := chunkSeq
-				audio, err := synthesize(ctx, sentence, voice, instruct)
-				if err != nil {
-					g.logger.Warn("tts: stream chunk failed", "error", err, "sentence_len", len(sentence))
-					return
+				if bestIdx < 0 || idx < bestIdx {
+					bestIdx = idx
+					bestDelimLen = len(delim)
 				}
-				g.logger.Info("tts: stream chunk ok", "seq", seq, "audio_bytes", len(audio), "sentence_len", len(sentence), "first", !firstChunkEmitted)
-				if werr := streamSink.SendVoiceChunk(ctx, audio, seq, false); werr != nil {
-					g.logger.Warn("tts: send chunk failed", "error", werr, "seq", seq)
-				}
-				firstChunkEmitted = true
+			}
+			if bestIdx < 0 {
 				return
 			}
+			sentence := strings.TrimSpace(text[:bestIdx+1])
+			sentenceBuf.Reset()
+			sentenceBuf.WriteString(text[bestIdx+bestDelimLen:])
+
+			chunkSeq++
+			seq := chunkSeq
+			audio, err := synthesize(ctx, sentence, voice, instruct)
+			if err != nil {
+				g.logger.Warn("tts: stream chunk failed", "error", err, "sentence_len", len(sentence))
+				return
+			}
+			g.logger.Info("tts: stream chunk ok", "seq", seq, "audio_bytes", len(audio), "sentence_len", len(sentence), "first", !firstChunkEmitted)
+			if werr := streamSink.SendVoiceChunk(ctx, audio, seq, false); werr != nil {
+				g.logger.Warn("tts: send chunk failed", "error", werr, "seq", seq)
+			}
+			firstChunkEmitted = true
 		}
 
 		// reflexFlush emits whatever the reflex tier has spoken so far as an
