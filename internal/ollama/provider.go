@@ -264,8 +264,11 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 // tokens that Ollama surfaces under "thinking" rather than "content".
 // We forward content-only into assistant messages so the user-facing
 // reply stays clean while the model still gets to plan its tool chain.
-// Models without a thinking head (e.g. gemma4-nothinker) ignore the
-// flag — request stays cheap.
+// IMPORTANT: passing think=true to a thinking-capable model burns 400-
+// 500 hidden tokens per turn (~5-6 s on M4 Max) before the first visible
+// byte. Even fine-tunes named "nothinker" still expose the capability
+// in Ollama and obey the flag — set ThinkingBudget=0 on the reflex tier
+// or any latency-critical path.
 func (p *CompletionProvider) buildRequest(req bs.CompletionRequest, stream bool) chatRequest {
 	options := map[string]any{}
 	if req.MaxTokens > 0 {
