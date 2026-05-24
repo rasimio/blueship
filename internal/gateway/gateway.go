@@ -1438,11 +1438,17 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		// comma/dash after ≥ 6 chars) so the user hears Arlene within ~1 s
 		// of the LLM starting to stream. Later chunks demand a full
 		// sentence-end so the playback doesn't sound choppy.
+		//
+		// IMPORTANT: TTSTextCleaner is applied AFTER we extract a complete
+		// sentence (in the synth call sites below), NOT per chunk. Many of
+		// its regexes are multi-character patterns — kaomoji like "(^_^)"
+		// and "(≧▽≦)", "**bold**", "_italic_" — that arrive token-by-token
+		// in the stream. If we cleaned each chunk in isolation the regex
+		// would never see the full pattern, so kaomoji slipped through to
+		// the TTS engine and got read out as literal noise. The sentence
+		// boundary is the first place we have the full text.
 		var firstChunkEmitted bool
 		onText := func(chunk string) {
-			if cfg.TTSTextCleaner != nil {
-				chunk = cfg.TTSTextCleaner(chunk)
-			}
 			if noter != nil {
 				noter.NoteSpokenText(chunk)
 			}
@@ -1483,6 +1489,12 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			sentence := strings.TrimSpace(text[:bestIdx+1])
 			sentenceBuf.Reset()
 			sentenceBuf.WriteString(text[bestIdx+bestDelimLen:])
+			if cfg.TTSTextCleaner != nil {
+				sentence = cfg.TTSTextCleaner(sentence)
+			}
+			if sentence == "" {
+				return
+			}
 
 			chunkSeq++
 			seq := chunkSeq
@@ -1510,6 +1522,12 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 				return
 			}
 			sentenceBuf.Reset()
+			if cfg.TTSTextCleaner != nil {
+				remaining = cfg.TTSTextCleaner(remaining)
+			}
+			if remaining == "" {
+				return
+			}
 			chunkSeq++
 			seq := chunkSeq
 			audio, terr := synthesize(ctx, remaining, voice, instruct)
@@ -1542,6 +1560,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			"remaining_len", len(remaining),
 			"reply_len", len(reply),
 		)
+		if remaining != "" {
+			if cfg.TTSTextCleaner != nil {
+				remaining = cfg.TTSTextCleaner(remaining)
+			}
+		}
 		if remaining != "" {
 			chunkSeq++
 			audio, terr := synthesize(ctx, remaining, voice, instruct)
