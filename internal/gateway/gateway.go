@@ -2315,12 +2315,17 @@ func (g *Gateway) runInteraction(
 		ref := g.deps.ModelStore.Get("reflex")
 		reflexCfg.MaxTokens = ref.MaxTokens
 		reflexCfg.Temperature = ref.Temperature
-		// CRITICAL: don't inherit cortex's thinking budget. reflex has its
-		// own DB-configured ThinkingBudget (typically 0 = no reasoning).
-		// Without this line gemma4-nothinker (and any thinking-capable
-		// model) generated 400-500 hidden reasoning tokens per turn —
-		// ~5-6 s of pure latency burn on the voice path.
-		reflexCfg.ThinkingBudget = ref.ThinkingBudget
+		// Per-role thinking budget: 0 in DB = disabled. -1 forces the
+		// agent loop's chooseThinkingBudget to ignore the global default.
+		// Without this, reflex inherited cortex's 4096-token thinking
+		// budget and gemma4-nothinker (and any thinking-capable model)
+		// burned 400-500 hidden reasoning tokens per turn — ~5-6 s of
+		// pure latency burn on the voice path.
+		if ref.ThinkingBudget > 0 {
+			reflexCfg.ThinkingBudget = ref.ThinkingBudget
+		} else {
+			reflexCfg.ThinkingBudget = -1
+		}
 	}
 
 	// Persist the user message once; both tiers read it, neither re-appends.

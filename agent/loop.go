@@ -64,6 +64,14 @@ type RunConfig struct {
 	// the last ~15-20 turns — Sonnet on 30 K of session history was the
 	// dominant per-turn latency, and routing decisions don't need long memory.
 	MessageBudget int
+	// ThinkingBudget per-RunConfig override of a.cfg.Limits.ThinkingBudget.
+	//   0  = inherit global (default)
+	//   -1 = explicitly disabled (forces no thinking even if global > 0)
+	//   >0 = explicit budget in tokens
+	// Set -1 on latency-critical paths (reflex/voice) — thinking-capable
+	// models like gemma4-nothinker burn 400-500 hidden tokens (~6 s on M4
+	// Max) per turn when enabled. See chooseThinkingBudget below.
+	ThinkingBudget int
 }
 
 // NewLoop creates a new agent loop.
@@ -229,7 +237,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			System:         effectiveSystem,
 			Messages:       messages,
 			Tools:          tools,
-			ThinkingBudget: normalizeThinkingBudget(a.cfg.Limits.ThinkingBudget),
+			ThinkingBudget: chooseThinkingBudget(cfg.ThinkingBudget, a.cfg.Limits.ThinkingBudget),
 			Temperature:    cfg.Temperature,
 		})
 		if err != nil {
@@ -423,7 +431,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 			System:         effectiveSystem,
 			Messages:       messages,
 			Tools:          tools,
-			ThinkingBudget: normalizeThinkingBudget(a.cfg.Limits.ThinkingBudget),
+			ThinkingBudget: chooseThinkingBudget(cfg.ThinkingBudget, a.cfg.Limits.ThinkingBudget),
 			Temperature:    cfg.Temperature,
 		}
 
@@ -513,12 +521,27 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 	return "", traces, fmt.Errorf("agent loop exceeded %d turns with no text output", cfg.MaxTurns)
 }
 
-// calculateBudget computes the token budget for message retrieval.
-func normalizeThinkingBudget(budget int) int {
-	if budget == 0 {
-		return -1
+// chooseThinkingBudget picks the effective budget:
+//   - cfg < 0  → explicit disable (0 to provider; both Anthropic and Ollama
+//     treat 0 as "no extended thinking")
+//   - cfg > 0  → explicit per-RunConfig budget
+//   - cfg == 0 → inherit a.cfg.Limits.ThinkingBudget (the global default)
+//
+// Older code passed normalizeThinkingBudget(globalLimit) which returned -1
+// when the global was 0 — Ollama then treated -1 != 0 as "thinking on" and
+// the reflex tier paid 5-6 s of hidden tokens per turn. Don't bring that
+// back: 0 reaches providers as 0.
+func chooseThinkingBudget(cfgValue, globalDefault int) int {
+	if cfgValue < 0 {
+		return 0
 	}
-	return budget
+	if cfgValue > 0 {
+		return cfgValue
+	}
+	if globalDefault < 0 {
+		return 0
+	}
+	return globalDefault
 }
 
 func (a *Loop) calculateBudget(systemPrompt string, tools []bs.ToolDefinition) int {
