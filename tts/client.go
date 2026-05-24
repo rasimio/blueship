@@ -122,13 +122,14 @@ func (c *Client) synthesizeOpenAI(ctx context.Context, text, voice, instruct str
 	payload := map[string]any{
 		"model":           c.model,
 		"input":           text,
-		"response_format": "wav",
+		"response_format": "opus", // OGG-Opus directly, skips the WAV→OGG ffmpeg hop
 	}
 	if voice != "" {
 		payload["voice"] = voice
 	}
 	if instruct != "" {
-		payload["instruct"] = instruct
+		// tts-1 ignores `instructions`; gpt-4o-mini-tts uses it for tone control.
+		payload["instructions"] = instruct
 	}
 	if c.speed > 0 && c.speed != 1.0 {
 		payload["speed"] = c.speed
