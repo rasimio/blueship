@@ -275,6 +275,18 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		case "end_turn", "max_tokens":
 			return &RunResult{Text: accumulated.String(), ToolTraces: traces}, nil
 
+		case "refusal":
+			// Anthropic safety classifier refused (introduced 2025-late).
+			// Falling through to default returned empty text and the gateway
+			// silently sent nothing — the user just saw the chat stop. Surface
+			// it explicitly so the user gets feedback and can rephrase.
+			a.logger.Warn("LLM refused to respond", "model", cfg.Model, "turn", turn+1)
+			text := accumulated.String()
+			if text == "" {
+				text = "(модель отказалась отвечать на этот запрос — переформулируй / упрости контекст)"
+			}
+			return &RunResult{Text: text, ToolTraces: traces}, nil
+
 		case "tool_use":
 			var toolResults []bs.ContentBlock
 			for _, block := range resp.Content {
@@ -470,6 +482,18 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 		switch resp.StopReason {
 		case "end_turn", "max_tokens":
 			return accumulated.String(), traces, nil
+
+		case "refusal":
+			// Same as Run() — surface explicitly so the user gets feedback.
+			a.logger.Warn("LLM refused to respond (stream)", "model", cfg.Model, "turn", turn+1)
+			text := accumulated.String()
+			if text == "" {
+				text = "(модель отказалась отвечать на этот запрос — переформулируй / упрости контекст)"
+				if onText != nil {
+					onText(text)
+				}
+			}
+			return text, traces, nil
 
 		case "tool_use":
 			var toolResults []bs.ContentBlock
