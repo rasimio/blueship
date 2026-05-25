@@ -388,9 +388,11 @@ func (s *Ship) Run(ctx context.Context) error {
 		}()
 	}
 
-	// 6b. Start HTTP/SSE chat server (Vaelum web platform).
+	// 6b. Start HTTP/SSE chat server (Vaelum web platform). The host's
+	// optional Extras callback mounts additional internal-API routes on
+	// the same port/token (arlene uses this for AME associate).
 	if hcCfg := s.cfg.Transport.HTTPChat; hcCfg.Port > 0 && gw != nil {
-		hcSrv := httpchat.NewServer(gw, hcCfg.Port, hcCfg.Token, s.logger)
+		hcSrv := httpchat.NewServer(gw, hcCfg.Port, hcCfg.Token, hcCfg.Extras, s.logger)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

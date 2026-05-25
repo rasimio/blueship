@@ -2,6 +2,11 @@
 // response as Server-Sent Events. It serves the Vaelum web platform: the
 // vaelum backend relays an authenticated user's message here, and the SSE
 // stream is piped straight back to the browser.
+//
+// The same server also hosts host-supplied internal-API routes via the
+// Extras callback on HTTPChatConfig — arlene plugs its AME-associate
+// endpoint in this way. All routes share the bearer-token middleware so
+// the host's extras are authed without each handler re-implementing it.
 package httpchat
 
 import (
@@ -24,22 +29,34 @@ type Server struct {
 	gw     *gateway.Gateway
 	port   int
 	token  string
+	extras func(*http.ServeMux)
 	logger *slog.Logger
 }
 
 // NewServer creates an HTTP chat server attached to an existing Gateway.
-// token is the shared service token vaelum must present; empty disables auth.
-func NewServer(gw *gateway.Gateway, port int, token string, logger *slog.Logger) *Server {
-	return &Server{gw: gw, port: port, token: token, logger: logger}
+// token is the shared service token vaelum must present; empty disables
+// auth. extras, when non-nil, is called once during Run with the server's
+// mux so the host can mount additional routes (they share the bearer
+// middleware).
+func NewServer(gw *gateway.Gateway, port int, token string, extras func(*http.ServeMux), logger *slog.Logger) *Server {
+	return &Server{gw: gw, port: port, token: token, extras: extras, logger: logger}
 }
 
 // Run starts the HTTP server. Blocks until ctx is done.
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /chat", s.handleChat)
+	if s.extras != nil {
+		s.extras(mux)
+	}
+
+	handler := http.Handler(mux)
+	if s.token != "" {
+		handler = s.requireBearer(handler)
+	}
 
 	addr := fmt.Sprintf(":%d", s.port)
-	srv := &http.Server{Addr: addr, Handler: mux}
+	srv := &http.Server{Addr: addr, Handler: handler}
 
 	go func() {
 		<-ctx.Done()
@@ -55,6 +72,20 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
+// requireBearer is the auth middleware applied to every route on the mux
+// (both `/chat` and host-supplied extras). Vaelum is the only trusted
+// caller; the token comes from the shared VAELUM_DAEMON_SERVICE_TOKEN env.
+func (s *Server) requireBearer(next http.Handler) http.Handler {
+	want := "Bearer " + s.token
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != want {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 type chatRequest struct {
 	UserID string `json:"user_id"`
 	SoulID string `json:"soul_id"`
@@ -62,12 +93,6 @@ type chatRequest struct {
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
-	// Service-token auth — vaelum is the trusted caller.
-	if s.token != "" && r.Header.Get("Authorization") != "Bearer "+s.token {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
