@@ -2892,6 +2892,12 @@ func (g *Gateway) handleResetCommand(ctx context.Context, chatID int64) {
 		g.logger.Debug("reset command: ignored", "chat_id", chatID, "error", err)
 		return
 	}
+	// CRITICAL: bind soul_id to the goroutine context. Without this,
+	// GetOrCreate's WHERE soul_id = $2 filter ran against the zero UUID
+	// and returned no row — every "reset" silently produced phantom
+	// sessions instead of archiving the real chat. user_id alone is not
+	// sufficient: a single user can have multiple souls.
+	ctx = bs.WithSoulID(ctx, us.SoulID)
 
 	// Refresh model config from DB. Role-tool allowlists come from code
 	// (Config.RoleTools); they are not refreshable at runtime.
@@ -2905,22 +2911,49 @@ func (g *Gateway) handleResetCommand(ctx context.Context, chatID int64) {
 	uid := us.UserID.String()
 	model := g.cortexModelDisplay()
 	sess, err := g.store.GetOrCreate(ctx, uid, g.cortexModel())
-	if err == nil && sess != nil {
-		_ = g.store.Archive(ctx, sess.ID)
-		g.logger.Info("reset: archived session",
-			"chat_id", chatID,
-			"session_id", sess.ID,
-			"messages", sess.MessageCount,
-		)
+	if err != nil {
+		g.logger.Error("reset: GetOrCreate failed", "chat_id", chatID, "error", err)
+		_ = g.tg.SendLong(ctx, chatID, "Reset failed (session lookup): "+err.Error())
+		return
 	}
+	if sess == nil {
+		g.logger.Error("reset: GetOrCreate returned nil", "chat_id", chatID)
+		_ = g.tg.SendLong(ctx, chatID, "Reset failed (no session)")
+		return
+	}
+	if err := g.store.Archive(ctx, sess.ID); err != nil {
+		// Surfaced (was silently dropped) — Archive returns "session not
+		// found" if the soul_id query mismatch ever recurs, and we want
+		// to see that in Telegram instead of pretending the reset worked.
+		g.logger.Error("reset: archive failed", "chat_id", chatID, "session_id", sess.ID, "error", err)
+		_ = g.tg.SendLong(ctx, chatID, "Reset failed (archive): "+err.Error())
+		return
+	}
+	g.logger.Info("reset: archived session",
+		"chat_id", chatID,
+		"session_id", sess.ID,
+		"messages", sess.MessageCount,
+	)
 
-	// Create new session right away so no race between archive and next message.
-	newSess, err := g.store.Create(ctx, uid, model)
-	sessionInfo := ""
-	if err == nil && newSess != nil {
-		sessionInfo = fmt.Sprintf("\nSession: %s", newSess.ID)
+	// Create new session right away so no race between archive and next
+	// message. Linking via previousID + the source='chat' default inside
+	// CreateWithPrevious means GetOrCreate immediately sees it next turn.
+	newSess, err := g.store.CreateWithPrevious(ctx, uid, g.cortexModel(), sess.ID)
+	if err != nil || newSess == nil {
+		g.logger.Error("reset: create failed", "chat_id", chatID, "error", err)
+		_ = g.tg.SendLong(ctx, chatID, "Reset failed (create new): "+fmt.Sprintf("%v", err))
+		return
 	}
-	msg := fmt.Sprintf("Session reset.\nModel: %s%s", model, sessionInfo)
+	g.logger.Info("reset: created new session",
+		"chat_id", chatID,
+		"new_session_id", newSess.ID,
+		"previous_id", sess.ID,
+	)
+
+	msg := fmt.Sprintf(
+		"Session reset.\nModel: %s\nNew session: %s\nArchived: %s (%d msgs)",
+		model, newSess.ID, sess.ID, sess.MessageCount,
+	)
 	if err := g.tg.SendLong(ctx, chatID, msg); err != nil {
 		g.logger.Error("reset command: send error", "error", err)
 	}

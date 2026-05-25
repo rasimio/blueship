@@ -27,7 +27,14 @@ func (s *Store) Create(ctx context.Context, userID, model string) (*Session, err
 	return s.CreateWithPrevious(ctx, userID, model, "")
 }
 
-// CreateWithPrevious creates a new session linked to a previous one.
+// CreateWithPrevious creates a new chat-source session linked to a previous
+// one. The 'chat' source tag is what `GetOrCreate` filters on — without it
+// the returned session is invisible to the normal lookup path and the next
+// message goes to a different session entirely (`/reset` was silently
+// broken for this exact reason).
+//
+// For non-chat sessions (agent_task background runs, etc.) use
+// [CreateSessionWithSource] directly — that path is unchanged.
 func (s *Store) CreateWithPrevious(ctx context.Context, userID, model, previousID string) (*Session, error) {
 	var sess Session
 	var err error
@@ -37,15 +44,15 @@ func (s *Store) CreateWithPrevious(ctx context.Context, userID, model, previousI
 			`UPDATE chat_sessions SET active = false, updated_at = NOW() WHERE id = $1`,
 			previousID)
 		err = s.db.QueryRowxContext(ctx,
-			`INSERT INTO chat_sessions (soul_id, user_id, model, previous_id)
-			 VALUES ($4::uuid, $1, $2, $3)
+			`INSERT INTO chat_sessions (soul_id, user_id, model, previous_id, source)
+			 VALUES ($4::uuid, $1, $2, $3, 'chat')
 			 RETURNING *`,
 			userID, model, previousID, bs.SoulIDFromContext(ctx),
 		).StructScan(&sess)
 	} else {
 		err = s.db.QueryRowxContext(ctx,
-			`INSERT INTO chat_sessions (soul_id, user_id, model)
-			 VALUES ($3::uuid, $1, $2)
+			`INSERT INTO chat_sessions (soul_id, user_id, model, source)
+			 VALUES ($3::uuid, $1, $2, 'chat')
 			 RETURNING *`,
 			userID, model, bs.SoulIDFromContext(ctx),
 		).StructScan(&sess)
