@@ -250,9 +250,13 @@ func (p *CompletionProvider) sendOnce(ctx context.Context, req bs.CompletionRequ
 	}, nil
 }
 
-// StreamComplete sends a streaming request. Calls onText for each text chunk.
-// Returns the full CompletionResponse when done (for storage/tool dispatch).
-func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.CompletionRequest, onText func(string)) (*bs.CompletionResponse, error) {
+// StreamComplete sends a streaming request. Dispatches per-event callbacks:
+// cb.OnText for each text part as it arrives, and cb.OnToolUse for each
+// function_call. Gemini delivers function_call parts fully-formed in a single
+// streamed candidate (it does NOT fragment Args across deltas like OpenAI), so
+// each tool call is surfaced live as soon as the part arrives — no end-of-stream
+// flush needed. cb may be nil; each field is independently nil-checked.
+func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.CompletionRequest, cb *bs.StreamCallbacks) (*bs.CompletionResponse, error) {
 	if p.apiKey == "" {
 		return nil, fmt.Errorf("gemini not configured: missing API key")
 	}
@@ -340,14 +344,23 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 			usage = toUsage(chunk.UsageMetadata)
 		}
 
-		// Extract text chunks and call onText
-		for _, p := range cand.Content.Parts {
-			if p.Text != "" && onText != nil {
-				onText(p.Text)
+		// Extract text chunks and fire cb.OnText live.
+		for _, prt := range cand.Content.Parts {
+			if prt.Text != "" && cb != nil && cb.OnText != nil {
+				cb.OnText(prt.Text)
 			}
 		}
 
 		blocks := toContentBlocks(cand.Content)
+		// Gemini delivers function_call parts fully-formed per candidate,
+		// so we can fire cb.OnToolUse as soon as the block lands.
+		if cb != nil && cb.OnToolUse != nil {
+			for _, block := range blocks {
+				if block.Type == "tool_use" {
+					cb.OnToolUse(block.ID, block.Name, block.Input)
+				}
+			}
+		}
 		allBlocks = append(allBlocks, blocks...)
 	}
 

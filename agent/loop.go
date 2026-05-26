@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	bs "github.com/rasimio/blueship/core"
 )
@@ -347,13 +348,17 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 	return nil, fmt.Errorf("agent loop exceeded %d turns with no text output", cfg.MaxTurns)
 }
 
-// RunStream is like Run but streams text chunks via onText callback.
-// Used by voice transport for sentence-level TTS pipelining, and by Telegram
-// for progressive message editing. onText fires for each text chunk from the
-// LLM. onToolUse fires before each tool is executed (nil = ignore).
-// Tool call turns use batch mode; only the final text response is streamed.
-// Returns the reply text, tool traces (for debug/audit), and any error.
-func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, onText func(string), onToolUse func(name string)) (string, []ToolTrace, error) {
+// RunStream is like Run but streams events via cb. cb.OnText fires for each
+// text delta from the LLM; cb.OnToolUse fires when the LLM emits a tool call;
+// cb.OnToolResult fires after the agent loop executes the tool; cb.OnThinking
+// fires for thinking deltas (Anthropic). cb may be nil to suppress all events
+// (degrades to batch-like behavior).
+//
+// Used by voice transport for sentence-level TTS pipelining, by Telegram for
+// progressive message editing, and by the web cabinet for full tool-use
+// inspector rendering. Returns the reply text, tool traces (for debug/audit),
+// and any error.
+func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb *bs.StreamCallbacks) (string, []ToolTrace, error) {
 	streamProvider, ok := a.provider.(bs.StreamCompletionProvider)
 	if !ok {
 		// Fallback to batch if provider doesn't support streaming
@@ -449,8 +454,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 
 		a.logger.Info("calling LLM (stream)", "model", cfg.Model, "tools", len(tools), "messages", len(messages), "turn", turn+1)
 
-		// Stream the LLM call — onText fires for each text chunk
-		resp, err := streamProvider.StreamComplete(ctx, req, onText)
+		resp, err := streamProvider.StreamComplete(ctx, req, cb)
 		if err != nil {
 			return "", nil, fmt.Errorf("LLM API: %w", err)
 		}
@@ -489,8 +493,8 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 			text := accumulated.String()
 			if text == "" {
 				text = "(модель отказалась отвечать на этот запрос — переформулируй / упрости контекст)"
-				if onText != nil {
-					onText(text)
+				if cb != nil && cb.OnText != nil {
+					cb.OnText(text)
 				}
 			}
 			return text, traces, nil
@@ -502,10 +506,12 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, on
 					continue
 				}
 				a.logger.Info("executing tool", "tool", block.Name, "tool_use_id", block.ID)
-				if onToolUse != nil {
-					onToolUse(block.Name)
-				}
+				start := time.Now()
 				result, isError := a.registry.Execute(ctx, block.Name, block.Input)
+				latencyMs := int(time.Since(start) / time.Millisecond)
+				if cb != nil && cb.OnToolResult != nil {
+					cb.OnToolResult(block.ID, result, isError, latencyMs)
+				}
 				inputStr := string(block.Input)
 				if len(inputStr) > 200 {
 					inputStr = inputStr[:200] + "..."

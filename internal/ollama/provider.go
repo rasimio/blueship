@@ -148,9 +148,13 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 	}, nil
 }
 
-// StreamComplete performs a streaming chat completion. Calls onText for each
-// content delta as it arrives. Ollama streams NDJSON (one JSON object per line).
-func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.CompletionRequest, onText func(string)) (*bs.CompletionResponse, error) {
+// StreamComplete performs a streaming chat completion. Dispatches per-event
+// callbacks: cb.OnText for each content delta as it arrives, and cb.OnToolUse
+// for each tool call. Ollama streams NDJSON (one JSON object per line) and
+// surfaces tool calls fully-formed inside a single chunk (they are NOT
+// fragmented across deltas), so we fire cb.OnToolUse as soon as each chunk
+// arrives. cb may be nil; each field is independently nil-checked.
+func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.CompletionRequest, cb *bs.StreamCallbacks) (*bs.CompletionResponse, error) {
 	payload := p.buildRequest(req, true)
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -185,6 +189,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 	var (
 		textBuf    strings.Builder
 		toolCalls  []ollamaToolCall
+		toolIDs    []string // parallel to toolCalls — generated once, reused for the final block
 		usage      bs.Usage
 		doneReason string
 	)
@@ -208,14 +213,26 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		}
 		if chunk.Message.Content != "" {
 			textBuf.WriteString(chunk.Message.Content)
-			if onText != nil {
-				onText(chunk.Message.Content)
+			if cb != nil && cb.OnText != nil {
+				cb.OnText(chunk.Message.Content)
 			}
 		}
-		// Tool calls in Ollama streaming arrive fully-formed in the final
-		// message chunk (they are not streamed incrementally), so append as-is.
+		// Tool calls in Ollama streaming arrive fully-formed in a single
+		// message chunk (they are not streamed incrementally), so we can
+		// fire cb.OnToolUse live as soon as the chunk lands.
 		if len(chunk.Message.ToolCalls) > 0 {
-			toolCalls = append(toolCalls, chunk.Message.ToolCalls...)
+			for _, tc := range chunk.Message.ToolCalls {
+				toolCalls = append(toolCalls, tc)
+				id := generateToolUseID(tc.Function.Name)
+				toolIDs = append(toolIDs, id)
+				if cb != nil && cb.OnToolUse != nil {
+					argsJSON, mErr := json.Marshal(tc.Function.Arguments)
+					if mErr != nil || !json.Valid(argsJSON) {
+						argsJSON = json.RawMessage("{}")
+					}
+					cb.OnToolUse(id, tc.Function.Name, argsJSON)
+				}
+			}
 		}
 		if chunk.Done {
 			doneReason = chunk.DoneReason
@@ -234,14 +251,14 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 	if textBuf.Len() > 0 {
 		blocks = append(blocks, bs.ContentBlock{Type: "text", Text: textBuf.String()})
 	}
-	for _, tc := range toolCalls {
+	for i, tc := range toolCalls {
 		argsJSON, err := json.Marshal(tc.Function.Arguments)
 		if err != nil || !json.Valid(argsJSON) {
 			argsJSON = json.RawMessage("{}")
 		}
 		blocks = append(blocks, bs.ContentBlock{
 			Type:  "tool_use",
-			ID:    generateToolUseID(tc.Function.Name),
+			ID:    toolIDs[i],
 			Name:  tc.Function.Name,
 			Input: argsJSON,
 		})

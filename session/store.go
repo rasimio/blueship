@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -129,6 +130,25 @@ func (s *Store) IsActive(ctx context.Context, sessionID string) (bool, error) {
 // ArchiveSession marks a session as inactive. Satisfies core.MessageStore.
 func (s *Store) ArchiveSession(ctx context.Context, sessionID string) error {
 	return s.Archive(ctx, sessionID)
+}
+
+// LatestAssistantMessageID returns the ID of the most recent assistant message
+// in the session, or "" if none exists. Satisfies core.MessageStore.
+func (s *Store) LatestAssistantMessageID(ctx context.Context, sessionID string) (string, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id::text FROM chat_messages
+		  WHERE session_id = $1 AND role = 'assistant'
+		  ORDER BY created_at DESC LIMIT 1`,
+		sessionID,
+	).Scan(&id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", fmt.Errorf("latest assistant message id: %w", err)
+	}
+	return id, nil
 }
 
 // Archive marks a session as inactive.

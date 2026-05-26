@@ -1,6 +1,9 @@
 package core
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // InboundMessage is a transport-agnostic incoming message.
 type InboundMessage struct {
@@ -35,4 +38,39 @@ type StreamingVoiceSink interface {
 // simply not notified.
 type SpokenTextSink interface {
 	NoteSpokenText(text string)
+}
+
+// ToolUseSink is an optional sink capability for transports that surface
+// LLM tool invocations in their UI (web chat with collapsible tool-call
+// blocks). SendToolUse fires when the LLM emits a tool call; SendToolResult
+// fires after the agent loop executes it. Sinks that don't implement these
+// (Telegram, voice) simply don't get tool events.
+type ToolUseSink interface {
+	SendToolUse(ctx context.Context, id, name string, input json.RawMessage) error
+	SendToolResult(ctx context.Context, useID, output string, isError bool, latencyMs int) error
+}
+
+// TextStreamSink is an optional sink capability for transports that deliver
+// text deltas as they arrive (web SSE). Voice uses StreamingVoiceSink for
+// audio; Telegram batches into progressive message edits; HTTP-chat sends
+// each chunk as an SSE frame. Sinks that don't implement it receive only
+// the final aggregated text via ResponseSink.SendText.
+type TextStreamSink interface {
+	SendTextDelta(ctx context.Context, delta string) error
+}
+
+// MetaSink is an optional sink capability for transports that need to know
+// the session ID / assistant message ID of the current turn (so an upstream
+// relayer can link persisted tool_calls back to the message that owns them).
+// Gateway calls SendMeta twice per turn: once with sessionID before any
+// stream events (messageID="") and once after the loop returns with the
+// freshly-persisted assistant messageID.
+type MetaSink interface {
+	SendMeta(ctx context.Context, sessionID, messageID string) error
+}
+
+// ThinkingSink is an optional sink capability for streaming extended-thinking
+// deltas (Anthropic, Gemini). UI typically renders them collapsed.
+type ThinkingSink interface {
+	SendThinking(ctx context.Context, delta string) error
 }

@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -10,12 +11,27 @@ type CompletionProvider interface {
 	Complete(ctx context.Context, req CompletionRequest) (*CompletionResponse, error)
 }
 
+// StreamCallbacks bundles per-event callbacks for streaming completions. Any
+// field may be nil; providers MUST nil-check before invoking. OnText fires for
+// each text delta. OnToolUse fires once a tool_use block's input JSON is fully
+// assembled (i.e. on content_block_stop for Anthropic, end-of-stream for
+// providers that don't surface partial tool blocks). OnToolResult is invoked
+// by the agent loop after tool execution, not by the provider — providers
+// don't see it. OnThinking fires for each thinking delta where supported.
+type StreamCallbacks struct {
+	OnText       func(delta string)
+	OnToolUse    func(id, name string, input json.RawMessage)
+	OnToolResult func(useID, output string, isError bool, latencyMs int)
+	OnThinking   func(delta string)
+}
+
 // StreamCompletionProvider extends CompletionProvider with streaming support.
-// onText is called for each text chunk as it arrives from the LLM.
-// Returns the full response for storage/tool dispatch after streaming completes.
+// cb may be nil — in that case the provider behaves like Complete but uses the
+// streaming endpoint. Returns the full response for storage/tool dispatch
+// after streaming completes.
 type StreamCompletionProvider interface {
 	CompletionProvider
-	StreamComplete(ctx context.Context, req CompletionRequest, onText func(string)) (*CompletionResponse, error)
+	StreamComplete(ctx context.Context, req CompletionRequest, cb *StreamCallbacks) (*CompletionResponse, error)
 }
 
 // CompletionRequest is the input for CompletionProvider.Complete.

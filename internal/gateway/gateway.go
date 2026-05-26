@@ -1283,6 +1283,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		"blocks", len(blocks),
 	)
 
+	// Wire the session ID into a meta SSE frame so a vaelum-style relayer
+	// can begin attributing persisted tool_calls before any tool fires.
+	// Sinks that don't implement MetaSink (voice, Telegram) get no-op.
+	if ms, ok := sink.(bs.MetaSink); ok {
+		_ = ms.SendMeta(ctx, sess.ID, "")
+	}
+
 	// Collect message text for context injection (msgText already set above for single-block).
 	for _, m := range msgs {
 		if m.text != "" {
@@ -1578,7 +1585,8 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			}
 		}
 
-		reply, _, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, onText, onText, nil, reflexFlush)
+		voiceCb := &bs.StreamCallbacks{OnText: onText}
+		reply, _, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, voiceCb, voiceCb, reflexFlush)
 		if err != nil {
 			if ctx.Err() != nil {
 				g.logger.Info("voice turn cancelled", "chat_id", us.ChatID)
@@ -1636,8 +1644,10 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// Streaming path for Telegram: send placeholder, edit as chunks arrive.
 	tgSink, isTelegram := sink.(*telegramSink)
 	if !isTelegram {
-		// Non-Telegram transports: batch mode.
-		reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, nil, nil, nil)
+		// Non-Telegram transports: text-streaming if sink supports it
+		// (http-chat SSE for the web cabinet), batch otherwise.
+		cortexCb := buildSinkCallbacks(ctx, sink)
+		reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, cortexCb, nil)
 		if err != nil {
 			if ctx.Err() != nil {
 				g.logger.Info("turn cancelled", "chat_id", us.ChatID)
@@ -1648,11 +1658,24 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			return
 		}
 		reply = sanitizeLeakedToolCalls(reply)
+		// Emit a follow-up meta frame with the assistant message_id so the
+		// SSE relayer can link any persisted tool_calls back to that turn.
+		// Only when both sink + store support it; safe to skip otherwise.
+		if ms, ok := sink.(bs.MetaSink); ok {
+			if msgID, lookupErr := g.store.LatestAssistantMessageID(ctx, sess.ID); lookupErr == nil && msgID != "" {
+				_ = ms.SendMeta(ctx, sess.ID, msgID)
+			}
+		}
+		// For text-streaming sinks (web SSE) the reply has already been
+		// delivered chunk-by-chunk via cb.OnText; calling SendText again
+		// here would duplicate the whole response in the rendered bubble.
 		if reply != "" {
 			if len(postActions) > 0 {
 				g.executePostActions(ctx, us, postActions, reply)
 			}
-			sink.SendText(ctx, reply)
+			if _, isStream := sink.(bs.TextStreamSink); !isStream {
+				sink.SendText(ctx, reply)
+			}
 			g.emitTurnCompleted(us, sess)
 		}
 		// LEGACY: sendDebugDump — per-turn debug.md attachment for the
@@ -1735,7 +1758,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		flushEdit()
 	}
 
-	reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, onText, onToolUse, nil)
+	tgCb := &bs.StreamCallbacks{
+		OnText:    onText,
+		OnToolUse: func(_, name string, _ json.RawMessage) { onToolUse(name) },
+	}
+	reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, tgCb, nil)
 	if err != nil {
 		if ctx.Err() != nil {
 			g.logger.Info("turn cancelled", "chat_id", us.ChatID)
@@ -2362,8 +2389,9 @@ func findEscalate(traces []agent.ToolTrace) *escalateArgs {
 // tier streams a reply. If Reflex answers directly (no escalate tool call)
 // that reply is the turn. If Reflex calls escalate, its streamed text was a
 // short spoken filler — the Cortex tier then runs and its answer becomes the
-// turn. reflexOnText is nil for non-voice transports so a filler is never
-// shown as text; cortexOnText / onToolUse drive the transport's own streaming.
+// turn. reflexCb is nil for non-voice transports so a filler is never shown
+// as text; cortexCb drives the transport's own streaming (text deltas,
+// tool_use / tool_result / thinking events for sinks that surface them).
 func (g *Gateway) runInteraction(
 	ctx context.Context,
 	loop *agent.Loop,
@@ -2371,8 +2399,7 @@ func (g *Gateway) runInteraction(
 	cortexCfg agent.RunConfig,
 	reflexSystemPrompt string,
 	content any,
-	reflexOnText, cortexOnText func(string),
-	onToolUse func(string),
+	reflexCb, cortexCb *bs.StreamCallbacks,
 	onReflexDone func(),
 ) (reply string, traces []agent.ToolTrace, escalated bool, err error) {
 	// Legacy path: interaction tier off, or the caller didn't wire it up
@@ -2382,7 +2409,7 @@ func (g *Gateway) runInteraction(
 		if g.deps.Config.Gateway.InteractionTier {
 			g.logger.Warn("interaction tier enabled but not fully wired — running cortex directly")
 		}
-		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexOnText, onToolUse)
+		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
 		return reply, traces, false, err
 	}
 
@@ -2432,7 +2459,7 @@ func (g *Gateway) runInteraction(
 	// Reflex runs against an escalate-only registry subset — if it
 	// hallucinates a cortex tool (memory_search etc.) the registry rejects
 	// it as unknown instead of executing it for real.
-	reflexReply, reflexTraces, rerr := reflexLoop.RunStream(ctx, reflexCfg, content, reflexOnText, nil)
+	reflexReply, reflexTraces, rerr := reflexLoop.RunStream(ctx, reflexCfg, content, reflexCb)
 	if rerr != nil {
 		return "", reflexTraces, false, fmt.Errorf("interaction: reflex: %w", rerr)
 	}
@@ -2479,8 +2506,43 @@ func (g *Gateway) runInteraction(
 			cortexCfg.ReflexGuidance = note
 		}
 	}
-	reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexOnText, onToolUse)
+	reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
 	return reply, traces, true, err
+}
+
+// buildSinkCallbacks composes a *bs.StreamCallbacks from whichever optional
+// streaming interfaces the sink implements. Returns nil if the sink supports
+// no streaming at all (batch mode — only the final aggregated text reaches
+// ResponseSink.SendText after the loop returns).
+//
+// Sinks that participate:
+//   - TextStreamSink → cb.OnText forwards each delta as an SSE/WS frame.
+//   - ToolUseSink → cb.OnToolUse / cb.OnToolResult render LLM tool calls.
+//   - ThinkingSink → cb.OnThinking streams extended-thinking deltas.
+func buildSinkCallbacks(ctx context.Context, sink bs.ResponseSink) *bs.StreamCallbacks {
+	cb := &bs.StreamCallbacks{}
+	any := false
+	if ts, ok := sink.(bs.TextStreamSink); ok {
+		cb.OnText = func(delta string) { _ = ts.SendTextDelta(ctx, delta) }
+		any = true
+	}
+	if tu, ok := sink.(bs.ToolUseSink); ok {
+		cb.OnToolUse = func(id, name string, input json.RawMessage) {
+			_ = tu.SendToolUse(ctx, id, name, input)
+		}
+		cb.OnToolResult = func(useID, output string, isError bool, latencyMs int) {
+			_ = tu.SendToolResult(ctx, useID, output, isError, latencyMs)
+		}
+		any = true
+	}
+	if th, ok := sink.(bs.ThinkingSink); ok {
+		cb.OnThinking = func(delta string) { _ = th.SendThinking(ctx, delta) }
+		any = true
+	}
+	if !any {
+		return nil
+	}
+	return cb
 }
 
 // BargeInEnabled reports whether the barge-in voice path is enabled. The

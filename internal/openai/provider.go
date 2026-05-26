@@ -211,8 +211,13 @@ type streamChunk struct {
 	} `json:"usage,omitempty"`
 }
 
-// StreamComplete sends a streaming completion request. Calls onText for each text chunk.
-func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.CompletionRequest, onText func(string)) (*bs.CompletionResponse, error) {
+// StreamComplete sends a streaming completion request. Dispatches per-event
+// callbacks: cb.OnText for each text delta as it arrives, and cb.OnToolUse
+// once each tool_call's argument JSON is fully assembled (end-of-stream — the
+// OpenAI Chat Completions SSE protocol streams function_call arguments in
+// fragments, so the JSON is only structurally complete after the stream
+// finishes). cb may be nil; each field is independently nil-checked.
+func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.CompletionRequest, cb *bs.StreamCallbacks) (*bs.CompletionResponse, error) {
 	messages := buildMessages(req.System, req.Messages, p.dropImages)
 	tools := buildTools(req.Tools)
 
@@ -272,9 +277,9 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 
 	// Parse SSE stream.
 	var (
-		textBuf   strings.Builder
-		toolCalls []toolCall
-		usage     bs.Usage
+		textBuf    strings.Builder
+		toolCalls  []toolCall
+		usage      bs.Usage
 		stopReason string
 	)
 
@@ -301,12 +306,14 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 
 			if delta.Content != "" {
 				textBuf.WriteString(delta.Content)
-				if onText != nil {
-					onText(delta.Content)
+				if cb != nil && cb.OnText != nil {
+					cb.OnText(delta.Content)
 				}
 			}
 
-			// Accumulate tool calls from deltas.
+			// Accumulate tool calls from deltas. OpenAI streams arguments as
+			// JSON fragments; OnToolUse is fired once the stream ends and each
+			// call's argument JSON is fully assembled (see end of function).
 			for _, tc := range delta.ToolCalls {
 				for len(toolCalls) <= tc.Index() {
 					toolCalls = append(toolCalls, toolCall{})
@@ -353,6 +360,16 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 			Name:  tc.Function.Name,
 			Input: rawArgs,
 		})
+	}
+
+	// Surface fully-assembled tool calls — OpenAI's SSE delivers arguments
+	// piecewise, so this is the earliest the JSON is structurally complete.
+	if cb != nil && cb.OnToolUse != nil {
+		for _, block := range blocks {
+			if block.Type == "tool_use" {
+				cb.OnToolUse(block.ID, block.Name, block.Input)
+			}
+		}
 	}
 
 	return &bs.CompletionResponse{

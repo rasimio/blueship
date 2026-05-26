@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -49,7 +50,7 @@ func TestStreamCompleteText(t *testing.T) {
 	resp, err := streamTestProvider(sse).StreamComplete(
 		context.Background(),
 		bs.CompletionRequest{Model: "claude-sonnet-4-6", MaxTokens: 128},
-		func(s string) { got = append(got, s) },
+		&bs.StreamCallbacks{OnText: func(s string) { got = append(got, s) }},
 	)
 	if err != nil {
 		t.Fatalf("StreamComplete error: %v", err)
@@ -83,16 +84,37 @@ func TestStreamCompleteToolUse(t *testing.T) {
 	)
 
 	var got []string
+	var toolUses []struct {
+		id, name string
+		input    json.RawMessage
+	}
 	resp, err := streamTestProvider(sse).StreamComplete(
 		context.Background(),
 		bs.CompletionRequest{Model: "claude-sonnet-4-6", MaxTokens: 128},
-		func(s string) { got = append(got, s) },
+		&bs.StreamCallbacks{
+			OnText: func(s string) { got = append(got, s) },
+			OnToolUse: func(id, name string, input json.RawMessage) {
+				toolUses = append(toolUses, struct {
+					id, name string
+					input    json.RawMessage
+				}{id, name, input})
+			},
+		},
 	)
 	if err != nil {
 		t.Fatalf("StreamComplete error: %v", err)
 	}
 	if len(got) != 1 || got[0] != "Так, гляну секунду" {
 		t.Fatalf("unexpected onText chunks: %#v", got)
+	}
+	if len(toolUses) != 1 {
+		t.Fatalf("expected 1 OnToolUse callback, got %d: %#v", len(toolUses), toolUses)
+	}
+	if toolUses[0].id != "toolu_1" || toolUses[0].name != "escalate" {
+		t.Fatalf("unexpected OnToolUse args: %+v", toolUses[0])
+	}
+	if string(toolUses[0].input) != `{"reason":"web search"}` {
+		t.Fatalf("unexpected OnToolUse input: %s", toolUses[0].input)
 	}
 	if len(resp.Content) != 2 {
 		t.Fatalf("expected 2 content blocks, got %#v", resp.Content)
@@ -126,10 +148,14 @@ func TestStreamCompleteSkipsThinking(t *testing.T) {
 	)
 
 	var got []string
+	var thinking []string
 	resp, err := streamTestProvider(sse).StreamComplete(
 		context.Background(),
 		bs.CompletionRequest{Model: "claude-sonnet-4-6", MaxTokens: 128, ThinkingBudget: 1024},
-		func(s string) { got = append(got, s) },
+		&bs.StreamCallbacks{
+			OnText:     func(s string) { got = append(got, s) },
+			OnThinking: func(s string) { thinking = append(thinking, s) },
+		},
 	)
 	if err != nil {
 		t.Fatalf("StreamComplete error: %v", err)
@@ -139,6 +165,9 @@ func TestStreamCompleteSkipsThinking(t *testing.T) {
 	}
 	if len(resp.Content) != 1 || resp.Content[0].Text != "visible answer" {
 		t.Fatalf("thinking leaked into content: %#v", resp.Content)
+	}
+	if len(thinking) != 1 || thinking[0] != "secret reasoning" {
+		t.Fatalf("OnThinking did not deliver delta: %#v", thinking)
 	}
 }
 

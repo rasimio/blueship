@@ -34,7 +34,7 @@ func NewCompletionProvider(tokens *TokenStore, timeout time.Duration, backoffs [
 }
 
 // Complete sends a completion request. Codex requires streaming, so this
-// delegates to StreamComplete with a nil onText callback.
+// delegates to StreamComplete with nil callbacks.
 func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
 	return p.StreamComplete(ctx, req, nil)
 }

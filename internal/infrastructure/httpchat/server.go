@@ -132,21 +132,53 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	sink.event("done", "")
 }
 
-// sseSink implements bs.ResponseSink, writing Server-Sent Events.
+// sseSink implements bs.ResponseSink plus the streaming sub-interfaces
+// (TextStreamSink, ToolUseSink, ThinkingSink, MetaSink) used by the vaelum
+// web cabinet to render the tool-use inspector.
+//
+// Frame format (one per "data:" line, terminated by \n\n):
+//
+//	{"type":"text","data":"chunk"}
+//	{"type":"thinking","data":"chunk"}
+//	{"type":"tool_use","id":"toolu_xxx","name":"...","input":{...}}
+//	{"type":"tool_result","tool_use_id":"toolu_xxx","output":"...","is_error":false,"latency_ms":312}
+//	{"type":"meta","session_id":"<uuid>","message_id":"<uuid>"}
+//	{"type":"typing"}
+//	{"type":"done"}
+//	{"type":"error","data":"..."}
 type sseSink struct {
 	mu      sync.Mutex
 	w       http.ResponseWriter
 	flusher http.Flusher
 }
 
-func (s *sseSink) event(kind, data string) {
+// emit writes one SSE frame from an arbitrary JSON-serializable payload.
+// Always sets the "type" field via the caller's payload (the field is
+// expected to be present).
+func (s *sseSink) emit(payload any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	payload, _ := json.Marshal(map[string]string{"type": kind, "data": data})
-	fmt.Fprintf(s.w, "data: %s\n\n", payload)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	fmt.Fprintf(s.w, "data: %s\n\n", data)
 	s.flusher.Flush()
 }
 
+// event is the legacy two-field emit kept for typing/error/done frames.
+func (s *sseSink) event(kind, data string) {
+	if data == "" {
+		s.emit(map[string]string{"type": kind})
+		return
+	}
+	s.emit(map[string]string{"type": kind, "data": data})
+}
+
+// SendText is the batch-mode fallback. The streaming path (cb.OnText →
+// SendTextDelta) is what the gateway actually uses for SSE clients; this
+// only fires when the gateway falls back to a non-streaming provider that
+// has no deltas to emit.
 func (s *sseSink) SendText(ctx context.Context, text string) error {
 	s.event("text", text)
 	return nil
@@ -159,5 +191,66 @@ func (s *sseSink) SendVoice(ctx context.Context, audio []byte) error {
 
 func (s *sseSink) SendTyping(ctx context.Context) error {
 	s.event("typing", "")
+	return nil
+}
+
+// SendTextDelta implements bs.TextStreamSink: each LLM text chunk becomes
+// one SSE "text" frame. The vaelum front concatenates them into the
+// current assistant message bubble.
+func (s *sseSink) SendTextDelta(ctx context.Context, delta string) error {
+	s.event("text", delta)
+	return nil
+}
+
+// SendToolUse implements bs.ToolUseSink: emit a "tool_use" frame with the
+// full assembled input JSON so the front can render a collapsible chip in
+// the running answer.
+func (s *sseSink) SendToolUse(ctx context.Context, id, name string, input json.RawMessage) error {
+	if input == nil || len(input) == 0 || !json.Valid(input) {
+		input = json.RawMessage("{}")
+	}
+	s.emit(map[string]any{
+		"type":  "tool_use",
+		"id":    id,
+		"name":  name,
+		"input": input,
+	})
+	return nil
+}
+
+// SendToolResult implements bs.ToolUseSink: emit a "tool_result" frame
+// after the agent loop executes the tool. The front matches it against
+// the prior tool_use by tool_use_id.
+func (s *sseSink) SendToolResult(ctx context.Context, useID, output string, isError bool, latencyMs int) error {
+	s.emit(map[string]any{
+		"type":        "tool_result",
+		"tool_use_id": useID,
+		"output":      output,
+		"is_error":    isError,
+		"latency_ms":  latencyMs,
+	})
+	return nil
+}
+
+// SendThinking implements bs.ThinkingSink: stream extended-thinking deltas
+// so the front can render a collapsed "thinking…" block in real time.
+func (s *sseSink) SendThinking(ctx context.Context, delta string) error {
+	s.event("thinking", delta)
+	return nil
+}
+
+// SendMeta implements bs.MetaSink: emit a "meta" frame so the vaelum relay
+// can link persisted tool_calls back to the assistant message that owns
+// them. Called once at session bind (messageID=""), once after the loop
+// persists the assistant response (both fields set).
+func (s *sseSink) SendMeta(ctx context.Context, sessionID, messageID string) error {
+	payload := map[string]string{"type": "meta"}
+	if sessionID != "" {
+		payload["session_id"] = sessionID
+	}
+	if messageID != "" {
+		payload["message_id"] = messageID
+	}
+	s.emit(payload)
 	return nil
 }

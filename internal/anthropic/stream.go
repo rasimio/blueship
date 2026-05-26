@@ -17,27 +17,28 @@ import (
 )
 
 // StreamComplete sends a streaming completion request to the Anthropic Messages
-// API, invoking onText for each text delta as it arrives, and returns the fully
-// assembled response once the stream ends (so callers dispatch tool calls
-// exactly as they would for Complete). This makes *Provider satisfy
-// bs.StreamCompletionProvider.
+// API, dispatching per-event callbacks (cb.OnText for text deltas, cb.OnToolUse
+// once a tool_use block's input JSON is fully assembled, cb.OnThinking for
+// thinking deltas), and returns the fully assembled response once the stream
+// ends (so callers dispatch tool calls exactly as they would for Complete).
+// This makes *Provider satisfy bs.StreamCompletionProvider.
 //
 // Streaming works identically over API-key and OAuth auth — it is the same
 // /v1/messages endpoint with "stream":true; only the Authorization header
-// differs. It retries rate_limit/overloaded errors, but only while no text has
-// yet reached onText — once the caller has seen output a retry would duplicate
-// tokens, so the error is surfaced instead.
-func (p *Provider) StreamComplete(ctx context.Context, req bs.CompletionRequest, onText func(string)) (*bs.CompletionResponse, error) {
+// differs. It retries rate_limit/overloaded errors, but only while no text or
+// tool_use has yet been delivered — once the caller has seen output a retry
+// would duplicate events, so the error is surfaced instead.
+func (p *Provider) StreamComplete(ctx context.Context, req bs.CompletionRequest, cb *bs.StreamCallbacks) (*bs.CompletionResponse, error) {
 	var lastErr error
 	for attempt := 0; attempt <= len(p.backoffs); attempt++ {
-		resp, emitted, err := p.streamOnce(ctx, req, onText)
+		resp, emitted, err := p.streamOnce(ctx, req, cb)
 		if err == nil {
 			return resp, nil
 		}
 		lastErr = err
 
 		if emitted {
-			return nil, err // tokens already streamed — a retry would duplicate
+			return nil, err // events already dispatched — a retry would duplicate
 		}
 
 		errMsg := err.Error()
@@ -63,8 +64,8 @@ func (p *Provider) StreamComplete(ctx context.Context, req bs.CompletionRequest,
 }
 
 // streamOnce performs a single streaming attempt. The bool reports whether any
-// text reached onText — once true the request must not be retried.
-func (p *Provider) streamOnce(ctx context.Context, req bs.CompletionRequest, onText func(string)) (*bs.CompletionResponse, bool, error) {
+// text or tool_use reached cb — once true the request must not be retried.
+func (p *Provider) streamOnce(ctx context.Context, req bs.CompletionRequest, cb *bs.StreamCallbacks) (*bs.CompletionResponse, bool, error) {
 	apiReq := apiRequest{
 		Model:     req.Model,
 		MaxTokens: req.MaxTokens,
@@ -129,21 +130,23 @@ func (p *Provider) streamOnce(ctx context.Context, req bs.CompletionRequest, onT
 		return nil, false, fmt.Errorf("anthropic stream API status %d: %s", resp.StatusCode, errBody)
 	}
 
-	return parseAnthropicStream(ctx, resp.Body, onText)
+	return parseAnthropicStream(ctx, resp.Body, cb)
 }
 
-// parseAnthropicStream consumes an Anthropic Messages API SSE stream. It calls
-// onText for each text_delta and assembles the final content blocks: text and
-// tool_use blocks are returned; thinking blocks are dropped (invisible to the
-// user, matching the non-streaming filter in Complete). The bool reports
-// whether any text reached onText.
-func parseAnthropicStream(ctx context.Context, body io.Reader, onText func(string)) (*bs.CompletionResponse, bool, error) {
+// parseAnthropicStream consumes an Anthropic Messages API SSE stream. It
+// dispatches cb.OnText for text deltas, cb.OnThinking for thinking deltas,
+// and cb.OnToolUse once a tool_use block's input JSON is fully assembled
+// (at content_block_stop), then assembles the final content blocks: text and
+// tool_use are returned; thinking blocks are dropped from the response
+// (matching Complete's filter — they're already delivered live via
+// cb.OnThinking). The bool reports whether any text or tool_use reached cb.
+func parseAnthropicStream(ctx context.Context, body io.Reader, cb *bs.StreamCallbacks) (*bs.CompletionResponse, bool, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 
 	// blockState accumulates one content block, keyed by its stream index.
 	type blockState struct {
-		kind     string // "text" | "tool_use"
+		kind     string // "text" | "tool_use" | "thinking"
 		text     strings.Builder
 		toolID   string
 		toolName string
@@ -203,15 +206,20 @@ func parseAnthropicStream(ctx context.Context, body io.Reader, onText func(strin
 			if json.Unmarshal([]byte(data), &ev) != nil {
 				continue
 			}
-			if ev.ContentBlock.Type != "text" && ev.ContentBlock.Type != "tool_use" {
-				continue // thinking / redacted_thinking — not surfaced to the user
+			switch ev.ContentBlock.Type {
+			case "text", "tool_use":
+				blocks[ev.Index] = &blockState{
+					kind:     ev.ContentBlock.Type,
+					toolID:   ev.ContentBlock.ID,
+					toolName: ev.ContentBlock.Name,
+				}
+				ordered = append(ordered, ev.Index)
+			case "thinking", "redacted_thinking":
+				// Track thinking blocks so deltas can stream live via cb.OnThinking.
+				// They are NOT appended to `ordered` — the final response drops
+				// them (Complete does the same filter).
+				blocks[ev.Index] = &blockState{kind: "thinking"}
 			}
-			blocks[ev.Index] = &blockState{
-				kind:     ev.ContentBlock.Type,
-				toolID:   ev.ContentBlock.ID,
-				toolName: ev.ContentBlock.Name,
-			}
-			ordered = append(ordered, ev.Index)
 
 		case "content_block_delta":
 			var ev struct {
@@ -219,6 +227,7 @@ func parseAnthropicStream(ctx context.Context, body io.Reader, onText func(strin
 				Delta struct {
 					Type        string `json:"type"`
 					Text        string `json:"text"`
+					Thinking    string `json:"thinking"`
 					PartialJSON string `json:"partial_json"`
 				} `json:"delta"`
 			}
@@ -227,19 +236,45 @@ func parseAnthropicStream(ctx context.Context, body io.Reader, onText func(strin
 			}
 			st := blocks[ev.Index]
 			if st == nil {
-				continue // delta for an untracked (thinking) block
+				continue
 			}
 			switch ev.Delta.Type {
 			case "text_delta":
 				if ev.Delta.Text != "" {
 					st.text.WriteString(ev.Delta.Text)
-					if onText != nil {
-						onText(ev.Delta.Text)
+					if cb != nil && cb.OnText != nil {
+						cb.OnText(ev.Delta.Text)
 					}
 					emitted = true
 				}
 			case "input_json_delta":
 				st.toolArgs.WriteString(ev.Delta.PartialJSON)
+			case "thinking_delta":
+				if ev.Delta.Thinking != "" && cb != nil && cb.OnThinking != nil {
+					cb.OnThinking(ev.Delta.Thinking)
+				}
+			}
+
+		case "content_block_stop":
+			var ev struct {
+				Index int `json:"index"`
+			}
+			if json.Unmarshal([]byte(data), &ev) != nil {
+				continue
+			}
+			st := blocks[ev.Index]
+			if st == nil || st.kind != "tool_use" {
+				continue
+			}
+			// Tool input is now fully assembled — surface it so a UI can
+			// render the call before agent loop executes it.
+			raw := json.RawMessage(st.toolArgs.String())
+			if !json.Valid(raw) {
+				raw = json.RawMessage("{}")
+			}
+			if cb != nil && cb.OnToolUse != nil {
+				cb.OnToolUse(st.toolID, st.toolName, raw)
+				emitted = true
 			}
 
 		case "message_delta":

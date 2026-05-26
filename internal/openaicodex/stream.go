@@ -12,9 +12,13 @@ import (
 	bs "github.com/rasimio/blueship/core"
 )
 
-// StreamComplete sends a streaming request via the OpenAI Responses API SSE endpoint.
-// Calls onText for each text chunk as it arrives.
-func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.CompletionRequest, onText func(string)) (*bs.CompletionResponse, error) {
+// StreamComplete sends a streaming request via the OpenAI Responses API SSE
+// endpoint. Dispatches per-event callbacks: cb.OnText for each output_text
+// delta as it arrives, and cb.OnToolUse once a function_call's arguments are
+// fully assembled (on response.output_item.done for the function_call — the
+// Responses API streams argument fragments via response.function_call_arguments.delta).
+// cb may be nil; each field is independently nil-checked.
+func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.CompletionRequest, cb *bs.StreamCallbacks) (*bs.CompletionResponse, error) {
 	token, err := p.tokens.AccessToken()
 	if err != nil {
 		return nil, fmt.Errorf("openai-codex auth: %w", err)
@@ -56,10 +60,10 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		return nil, fmt.Errorf("openai-codex stream API returned %d: %s", resp.StatusCode, truncate(string(errBody), 500))
 	}
 
-	return parseSSEStream(resp.Body, onText)
+	return parseSSEStream(resp.Body, cb)
 }
 
-func parseSSEStream(body interface{ Read([]byte) (int, error) }, onText func(string)) (*bs.CompletionResponse, error) {
+func parseSSEStream(body interface{ Read([]byte) (int, error) }, cb *bs.StreamCallbacks) (*bs.CompletionResponse, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 
@@ -99,8 +103,8 @@ func parseSSEStream(body interface{ Read([]byte) (int, error) }, onText func(str
 			}
 			if json.Unmarshal([]byte(data), &ev) == nil && ev.Delta != "" {
 				currentText.WriteString(ev.Delta)
-				if onText != nil {
-					onText(ev.Delta)
+				if cb != nil && cb.OnText != nil {
+					cb.OnText(ev.Delta)
 				}
 			}
 
@@ -150,6 +154,11 @@ func parseSSEStream(body interface{ Read([]byte) (int, error) }, onText func(str
 					Name:  ev.Item.Name,
 					Input: rawArgs,
 				})
+				// Tool input is now fully assembled — surface live so a UI
+				// can render the call before agent loop dispatches it.
+				if cb != nil && cb.OnToolUse != nil {
+					cb.OnToolUse(ev.Item.CallID, ev.Item.Name, rawArgs)
+				}
 				// tool finalized
 				currentToolArgs.Reset()
 			}

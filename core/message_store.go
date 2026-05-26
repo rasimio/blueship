@@ -29,4 +29,10 @@ type MessageStore interface {
 
 	// ArchiveSession marks a session as inactive.
 	ArchiveSession(ctx context.Context, sessionID string) error
+
+	// LatestAssistantMessageID returns the ID of the most recently persisted
+	// assistant message in the session, or "" if none exists. Used by the
+	// gateway to wire the message ID into the meta SSE frame so vaelum can
+	// link persisted tool_calls back to the assistant turn that owns them.
+	LatestAssistantMessageID(ctx context.Context, sessionID string) (string, error)
 }
