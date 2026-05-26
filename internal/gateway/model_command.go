@@ -1,3 +1,14 @@
+//go:build legacy_commands
+
+// model_command.go — the /model command (inline-keyboard role picker) and
+// its callback handler. Parked behind the legacy_commands build tag
+// during the multi-bot Vaelum cutover (2026-05-26). Same rationale as
+// gateway_legacy_commands.go: per-soul model management belongs to the
+// cabinet UI, not the shared bot surface.
+//
+// Restoration: `go build -tags legacy_commands` and uncomment the
+// callback-query dispatch in gateway.go handleUpdate.
+
 package gateway
 
 import (

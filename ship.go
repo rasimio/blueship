@@ -141,6 +141,7 @@ func (s *Ship) Run(ctx context.Context) error {
 	deps.TurnCompletedHook = s.cfg.Gateway.TurnCompletedHook
 	deps.AgentIterationCompletedHook = s.cfg.Gateway.AgentIterationCompletedHook
 	deps.ResolveSoul = s.cfg.Gateway.ResolveSoul
+	deps.ResolveTelegramChat = s.cfg.Gateway.ResolveTelegramChat
 
 	// 2. Auto-migrate runtime tables
 	shipDB, err := deps.DB("ship")
@@ -353,13 +354,16 @@ func (s *Ship) Run(ctx context.Context) error {
 	}
 
 	// 5. Start Gateway. The gateway is the inbound-message router for every
-	// transport (Telegram, WebSocket, future ones). It's needed whenever any
-	// transport is configured — Telegram polling and WS are independent
-	// downstream consumers.
+	// transport (Telegram, WebSocket, future ones). Multi-bot Telegram is
+	// driven by the host's ListBots hook (or legacy BotToken fallback);
+	// the gateway is built as long as ANY transport is configured because
+	// HTTPChat / WebSocket sit on top of the same gateway, and ReloadBots
+	// then decides whether a Telegram fan-in actually runs.
 	var gw *gateway.Gateway
-	telegramConfigured := s.cfg.Transport.Type == "telegram" && s.cfg.Transport.BotToken != ""
+	telegramConfigured := s.cfg.Transport.Telegram.ListBots != nil || s.cfg.Transport.BotToken != ""
 	wsConfigured := s.cfg.Transport.WebSocket.Port > 0
-	if telegramConfigured || wsConfigured {
+	hcConfigured := s.cfg.Transport.HTTPChat.Port > 0
+	if telegramConfigured || wsConfigured || hcConfigured {
 		var err error
 		gw, err = gateway.NewGateway(deps, reg, s.logger)
 		if err != nil {
@@ -367,8 +371,15 @@ func (s *Ship) Run(ctx context.Context) error {
 		}
 	}
 
-	// 5a. Telegram polling — only when bot_token is set.
+	// 5a. Telegram fan-in — populated by ReloadBots from the host's
+	// ListBots source (or BotToken fallback). The fan-in goroutine runs
+	// as long as there is any transport because the periodic reconcile
+	// loop is the seam that picks up bots added at runtime via the
+	// reload signal.
 	if gw != nil && telegramConfigured {
+		if err := gw.ReloadBots(ctx); err != nil {
+			s.logger.Warn("gateway: initial ReloadBots failed", "error", err)
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

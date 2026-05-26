@@ -165,6 +165,15 @@ type Deps struct {
 	// tenant-bound write.
 	ResolveSoul func(ctx context.Context, userID uuid.UUID) (uuid.UUID, error)
 
+	// ResolveTelegramChat maps an inbound Telegram message (bot id,
+	// numeric chat id) to its bound (user, soul). The gateway calls this
+	// on every Telegram update AFTER pairing interception. Hosts return
+	// ErrTelegramChatUnpaired to indicate "no link" so the gateway can
+	// run the unpaired-chat policy (platform greet vs user-bot silence).
+	// Mirrors the field on Config.Gateway; ship.go copies it across at
+	// InitDeps time.
+	ResolveTelegramChat func(ctx context.Context, botID uuid.UUID, tgChatID int64) (userID, soulID uuid.UUID, err error)
+
 	pool *dbPool
 }
 
@@ -198,8 +207,9 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		MessageEncoder:    d.MessageEncoder,
 		TurnCompletedHook: d.TurnCompletedHook,
 		AgentIterationCompletedHook: d.AgentIterationCompletedHook,
-		ResolveSoul:       d.ResolveSoul,
-		pool:              d.pool,
+		ResolveSoul:         d.ResolveSoul,
+		ResolveTelegramChat: d.ResolveTelegramChat,
+		pool:                d.pool,
 	}
 }
 

@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -133,13 +134,75 @@ type OwnerConfig struct {
 // TransportConfig holds transport configuration.
 type TransportConfig struct {
 	Type     string // "telegram"
+
+	// BotToken — DEPRECATED. Single-bot fallback path kept so existing
+	// dev/test configs (and the legacy ArleneKateBot bootstrap) keep
+	// working until the migration to multi-bot is complete. New deployments
+	// supply Telegram.ListBots; the gateway then ignores BotToken with a
+	// warning at startup.
 	BotToken string
+
+	// Telegram carries the multi-bot configuration. When ListBots is
+	// non-nil the gateway maintains an in-memory registry of bots driven
+	// by the host (typically a vaelum.bots SELECT), and ignores BotToken.
+	Telegram TelegramConfig
 
 	// WebSocket server for voice/desktop clients (runs alongside Telegram).
 	WebSocket WebSocketConfig
 
 	// HTTPChat server for the Vaelum web platform (runs alongside Telegram).
 	HTTPChat HTTPChatConfig
+}
+
+// TelegramConfig configures the multi-bot Telegram transport.
+//
+// Vaelum is multi-tenant: the platform bot @VaelumBot routes messages to
+// many souls via per-chat pairings, and any user can register their own
+// bot token to get a dedicated entrypoint. The host owns persistence,
+// authorisation, and token decryption — blueship is given a fully-realised
+// list of (id, kind, owner, plaintext token) tuples and runs a polling
+// goroutine per row.
+type TelegramConfig struct {
+	// ListBots is called at startup and on every reload to enumerate the
+	// bots the gateway should poll. The host is responsible for decrypting
+	// tokens before returning them; blueship never sees ciphertext.
+	// Nil → fall back to single-bot Transport.BotToken (legacy).
+	ListBots func(ctx context.Context) ([]BotConfig, error) `yaml:"-" json:"-"`
+
+	// ReloadInterval controls how often the gateway polls ListBots in the
+	// background (in addition to host-triggered reloads via Gateway.ReloadBots).
+	// Default: 60 seconds. Zero or negative disables background reconcile.
+	ReloadInterval time.Duration
+
+	// ReloadTrigger is the host's poke channel. Sending an empty struct
+	// asks the gateway to reconcile its registry against ListBots
+	// immediately (cabinet add/delete signal). Nil = disabled; the
+	// background reconcile still runs every ReloadInterval.
+	ReloadTrigger chan struct{} `yaml:"-" json:"-"`
+}
+
+// BotConfig describes one Telegram bot the gateway should manage.
+type BotConfig struct {
+	// ID is the host's stable identifier for this bot (typically the
+	// vaelum.bots.id UUID). The gateway uses it as a routing key and in
+	// the pairing query (telegram_pairings.bot_id = $1). uuid.Nil is
+	// reserved for the legacy BotToken fallback path.
+	ID uuid.UUID
+
+	// Kind discriminates routing semantics:
+	//   "platform" — open to any signed-up Vaelum user; unpaired chats
+	//                get a signup greeting.
+	//   "user"     — paired only to the owner; unpaired chats are
+	//                silently ignored.
+	Kind string
+
+	// OwnerUserID is the Vaelum user that owns a "user"-kind bot. For
+	// "platform" bots it is uuid.Nil.
+	OwnerUserID uuid.UUID
+
+	// Token is the raw Telegram bot token used to authenticate against
+	// the Bot API. Decrypted host-side; passed in plaintext to blueship.
+	Token string
 }
 
 // WebSocketConfig configures the optional WebSocket server.
@@ -323,7 +386,26 @@ type GatewayConfig struct {
 	// a misconfiguration — writes then land with a Nil soul and fail
 	// the FK constraint.
 	ResolveSoul func(ctx context.Context, userID uuid.UUID) (uuid.UUID, error) `yaml:"-" json:"-"`
+
+	// ResolveTelegramChat maps a (bot, Telegram chat) pair to its bound
+	// (user, soul). The gateway calls it on every inbound Telegram update
+	// AFTER pairing interception. Host-implemented (typically a
+	// vaelum.bot_links lookup); blueship stays generic.
+	//
+	// Return ErrTelegramChatUnpaired (or any error whose Is-chain reaches
+	// it) to indicate "no link" — the gateway then runs the unpaired-chat
+	// policy (greet+signup on platform bots, ignore on user bots). Other
+	// errors are treated as transient and the message is dropped with a
+	// warning log.
+	ResolveTelegramChat func(ctx context.Context, botID uuid.UUID, tgChatID int64) (userID, soulID uuid.UUID, err error) `yaml:"-" json:"-"`
 }
+
+// ErrTelegramChatUnpaired signals "this Telegram chat is not linked to any
+// Vaelum user on this bot". Hosts return it (or wrap it) from
+// GatewayConfig.ResolveTelegramChat so the gateway can run the
+// unpaired-chat policy instead of treating the lookup as a transient
+// failure.
+var ErrTelegramChatUnpaired = errors.New("blueship: telegram chat not paired")
 
 // applyDefaults fills in zero values with sensible defaults.
 func (c *Config) ApplyDefaults() {
@@ -399,5 +481,10 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Gateway.MaxTurns == 0 {
 		c.Gateway.MaxTurns = 15
+	}
+
+	// Telegram multi-bot
+	if c.Transport.Telegram.ReloadInterval == 0 {
+		c.Transport.Telegram.ReloadInterval = 60 * time.Second
 	}
 }

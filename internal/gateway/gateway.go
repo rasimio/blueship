@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,34 +21,39 @@ import (
 	"github.com/rasimio/blueship/internal/browser"
 	"github.com/rasimio/blueship/internal/openai"
 	"github.com/rasimio/blueship/internal/telegram"
-	"github.com/rasimio/blueship/internal/user"
 	"github.com/rasimio/blueship/session"
 	"github.com/rasimio/blueship/tool"
-	"github.com/rasimio/blueship/version"
 )
 
 // Gateway receives transport updates and routes them through the AgentLoop.
 type Gateway struct {
 	deps     *bs.Deps
 	modules  ModuleRegistry
-	poller   *telegram.Poller
-	tg       *telegram.Client
 	store    *session.Store
 	provider bs.CompletionProvider
 	whisper  *openai.TranscriptionProvider
 	tz       *time.Location
 	logger   *slog.Logger
 
-	// botID and botUsername are populated at startup via telegram getMe so
-	// command handlers can recognise `/reset@<bot>` targeted commands AND
-	// the addressing logic can tell a reply-to-us from a reply-to-someone-else
-	// in group chats with multiple participants. Zero/empty values mean
-	// getMe failed and the group-chat routing degrades gracefully
-	// (address check becomes nickname-only, reply-to-us check always false).
-	botID       int64
-	botUsername string
+	// Multi-bot registry. Populated by ReloadBots from
+	// cfg.Transport.Telegram.ListBots (or legacy cfg.Transport.BotToken
+	// as a single-row fallback). All inbound updates fan into
+	// updatesChan tagged with the receiving bot's id; outbound sends
+	// reach for the bot via UserState.Bot or g.botByTGID for callbacks.
+	// See gateway_bots.go for the lifecycle methods.
+	botsMu      sync.RWMutex
+	bots        map[uuid.UUID]*botInstance
+	botsByTGID  map[int64]*botInstance
+	updatesChan chan taggedUpdate
 
 	systemPrompt string
+
+	// platformGreet is the message sent to unpaired chats that land on a
+	// platform-kind bot. Loaded once at startup from
+	// <Config.Prompts>/telegram_platform_greeting.md; empty falls back to
+	// an in-code default in replyUnpaired.
+	platformGreetMu sync.Mutex
+	platformGreet   string
 
 	// Platform prompt layers for souls in the vaelum tenancy model. Loaded
 	// once from vaelum.platform_prompts and cached by platformPrompts; the
@@ -74,14 +80,14 @@ type Gateway struct {
 // stripping an optional `@<botname>` suffix, and reports whether the command
 // is addressed to this bot. Rules:
 //   - "/reset" → (cmd="/reset", forUs=true)  — no target, everyone matches
-//   - "/reset@LiyaDeusBot" with botUsername="LiyaDeusBot" → (cmd="/reset", forUs=true)
-//   - "/reset@arlene_bot" with botUsername="LiyaDeusBot" → (cmd="/reset", forUs=false)
-//   - "/reset foo" (args) → (cmd="/reset", forUs=true) — we strip args too
+//   - "/reset@LiyaDeusBot" with bot.tgUsername="LiyaDeusBot" → forUs=true
+//   - "/reset@arlene_bot" with bot.tgUsername="LiyaDeusBot" → forUs=false
+//   - "/reset foo" (args) → cmd="/reset" — args stripped
 //
-// If the gateway never learned its own username (getMe failed), every command
-// with a non-empty suffix is treated as addressed (forUs=true) so users still
-// have a working fallback.
-func (g *Gateway) parseCommand(text string) (cmd string, forUs bool) {
+// If we never learned the bot's username (getMe failed), every command
+// with a non-empty suffix is treated as addressed (forUs=true) so users
+// still have a working fallback.
+func (g *Gateway) parseCommand(bi *botInstance, text string) (cmd string, forUs bool) {
 	text = strings.TrimSpace(text)
 	if !strings.HasPrefix(text, "/") {
 		return "", false
@@ -94,7 +100,11 @@ func (g *Gateway) parseCommand(text string) (cmd string, forUs bool) {
 	if i := strings.IndexByte(head, '@'); i >= 0 {
 		target := strings.ToLower(head[i+1:])
 		cmd = head[:i]
-		if g.botUsername == "" || strings.EqualFold(target, g.botUsername) {
+		botName := ""
+		if bi != nil {
+			botName = bi.tgUsername
+		}
+		if botName == "" || strings.EqualFold(target, botName) {
 			return cmd, true
 		}
 		return cmd, false
@@ -115,18 +125,24 @@ func (g *Gateway) parseCommand(text string) (cmd string, forUs bool) {
 // or a vocative "<name>, ..." without the @-mention — is skipped. This keeps
 // the bot quiet in shared rooms unless the user actually invokes it via
 // Telegram's built-in mention or reply UI.
-func (g *Gateway) shouldProcessGroupMessage(msg *telegram.Message, text string) bool {
-	if g.botUsername != "" && text != "" {
-		if strings.Contains(strings.ToLower(text), "@"+strings.ToLower(g.botUsername)) {
+func (g *Gateway) shouldProcessGroupMessage(bi *botInstance, msg *telegram.Message, text string) bool {
+	var botName string
+	var botID int64
+	if bi != nil {
+		botName = bi.tgUsername
+		botID = bi.tgBotID
+	}
+	if botName != "" && text != "" {
+		if strings.Contains(strings.ToLower(text), "@"+strings.ToLower(botName)) {
 			return true
 		}
 	}
 	if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil {
 		rep := msg.ReplyToMessage.From
-		if g.botID != 0 && rep.ID == g.botID {
+		if botID != 0 && rep.ID == botID {
 			return true
 		}
-		if g.botUsername != "" && strings.EqualFold(rep.Username, g.botUsername) {
+		if botName != "" && strings.EqualFold(rep.Username, botName) {
 			return true
 		}
 	}
@@ -145,6 +161,17 @@ type UserState struct {
 	LoopBusy bool
 	debounce *debouncer
 
+	// bot carries the Telegram bot this chat is bound to. Set on
+	// getOrInitTelegramUser; nil for the voice:owner / WS-only paths.
+	// Outbound sends (debug docs, /reset replies, streaming edits) use
+	// bot.client to talk back on the same bot the user pinged.
+	bot *botInstance
+
+	// tgChatID is the numeric Telegram chat id (chatID without the
+	// "telegram:" prefix). Cached on init so command handlers don't have
+	// to re-parse the canonical string for every send.
+	tgChatID int64
+
 	// Emotion state from last reflex prep — used for TTS instruct.
 	LastStrategy string
 
@@ -161,10 +188,12 @@ type ModuleRegistry interface {
 	RegisterAllTools(registry *bs.ToolRegistry, d *bs.Deps)
 }
 
-// NewGateway creates a new gateway. Telegram-specific fields (poller, tg
-// client, bot identity) are only initialized when a bot_token is
-// configured; otherwise the gateway runs in transport-agnostic mode and
-// only serves non-Telegram sinks (WebSocket, future).
+// NewGateway creates a new gateway. The Telegram bot registry starts
+// empty; the caller must invoke ReloadBots(ctx) once after construction
+// to populate it from cfg.Transport.Telegram.ListBots (or the legacy
+// cfg.Transport.BotToken fallback). Without bots registered the gateway
+// runs in transport-agnostic mode and only serves non-Telegram sinks
+// (WebSocket, HTTPChat).
 func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Gateway, error) {
 	cfg := deps.Config
 
@@ -195,28 +224,7 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 		logger:   logger,
 		users:    make(map[string]*UserState),
 	}
-
-	if cfg.Transport.BotToken != "" {
-		gw.poller = telegram.NewPoller(cfg.Transport.BotToken, cfg.Timeouts.TelegramPoll)
-		gw.tg = telegram.NewClient(cfg.Transport.BotToken, cfg.Timeouts.TelegramClient)
-
-		// Fetch bot identity (id + username) so targeted commands like
-		// "/reset@LiyaDeusBot" and reply-based addressing work in group chats
-		// where multiple bots share the same Telegram group. Failure to resolve
-		// is non-fatal — group routing just degrades to legacy "respond to
-		// everything" behaviour.
-		meCtx, meCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer meCancel()
-		if me, err := gw.tg.GetMe(meCtx); err != nil {
-			logger.Warn("telegram getMe failed; group command targeting disabled", "error", err)
-		} else {
-			gw.botID = me.ID
-			gw.botUsername = me.Username
-			logger.Info("telegram bot self", "id", me.ID, "username", me.Username)
-		}
-	} else {
-		logger.Info("gateway initialised without telegram transport (WS-only)")
-	}
+	gw.initBotRegistry()
 
 	// Load system prompts from the agent's prompts directory (Config.Prompts).
 	// Personality lives with the agent, never in the framework.
@@ -226,8 +234,23 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 	if err := gw.loadSystemPrompts(cfg.Prompts); err != nil {
 		return nil, fmt.Errorf("load system prompts: %w", err)
 	}
+	gw.loadPlatformGreet(cfg.Prompts)
 
 	return gw, nil
+}
+
+// loadPlatformGreet reads the greeting shown to unpaired chats on
+// platform-kind bots. Optional: a missing file leaves platformGreet
+// empty and replyUnpaired falls back to a minimal default.
+func (g *Gateway) loadPlatformGreet(dir string) {
+	data, err := os.ReadFile(filepath.Join(dir, "telegram_platform_greeting.md"))
+	if err != nil {
+		g.logger.Info("gateway: telegram_platform_greeting.md not found; using built-in default", "error", err)
+		return
+	}
+	g.platformGreetMu.Lock()
+	g.platformGreet = strings.TrimSpace(string(data))
+	g.platformGreetMu.Unlock()
 }
 
 // loadSystemPrompts composes the system prompt from <key>.md files in
@@ -365,10 +388,23 @@ func (g *Gateway) reflexSystemPromptForSoul(ctx context.Context, soulID uuid.UUI
 }
 
 // tryTelegramPairing checks whether a message is a Vaelum pairing code.
-// If so it links this Telegram account to the platform user behind the
-// code and returns true so the caller stops processing the message.
-// Intercepted before user resolution — the sender is not yet a known user.
-func (g *Gateway) tryTelegramPairing(ctx context.Context, chatID, text string) bool {
+// If so it writes the bot_links row binding (bot, tg_chat, tg_user) to
+// the (user, soul) the code was minted for, and returns true so the
+// caller stops processing the message. Intercepted before user
+// resolution — the sender is not yet a known platform user.
+//
+// The pairing query is scoped by bot_id so a code generated for the
+// platform @VaelumBot is not redeemable on a user-owned bot (and vice
+// versa). The host's pair-code mint API records bot_id at issue time;
+// this is the matching read.
+//
+// soul_id is denormalised onto bot_links to keep the per-message routing
+// (gateway.go getOrInitTelegramUser → ResolveTelegramChat) a single
+// SELECT. We resolve it once here, at pair time, via vaelum.memberships
+// (Phase A invariant: one soul per user). When memberships gains
+// disambiguation in Phase C, this is the seam to add a "which soul should
+// this Telegram chat route to?" step.
+func (g *Gateway) tryTelegramPairing(ctx context.Context, bi *botInstance, chatID string, tgChatID, tgUserID int64, text string) bool {
 	code := strings.TrimSpace(text)
 	if !strings.HasPrefix(code, "pair-") {
 		return false
@@ -377,59 +413,124 @@ func (g *Gateway) tryTelegramPairing(ctx context.Context, chatID, text string) b
 	if err != nil {
 		return false
 	}
-	reply := g.newTelegramSink(chatID)
+	reply := g.newTelegramSink(chatID, bi)
+
+	if bi == nil || bi.id == uuid.Nil {
+		// Legacy single-bot mode (cfg.Transport.BotToken) has no DB row
+		// to scope the query against. The host should migrate to the
+		// multi-bot model before users start pairing; meanwhile, surface
+		// the misconfig rather than silently consume the code.
+		g.logger.Warn("telegram pairing: bot has no host id; cannot scope pairing",
+			"chat_id", chatID)
+		_ = reply.SendText(ctx, "Pairing isn't configured on this bot yet — ask your administrator.")
+		return true
+	}
 
 	var pairingID, userID uuid.UUID
 	err = db.QueryRowContext(ctx,
 		`SELECT id, user_id FROM vaelum.telegram_pairings
-		 WHERE code = $1 AND consumed_at IS NULL AND expires_at > now()`,
-		code).Scan(&pairingID, &userID)
+		 WHERE code = $1 AND bot_id = $2
+		   AND consumed_at IS NULL AND expires_at > now()`,
+		code, bi.id).Scan(&pairingID, &userID)
 	if err != nil {
-		_ = reply.SendText(ctx, "That pairing code is invalid or expired — generate a fresh one in Vaelum settings.")
+		_ = reply.SendText(ctx, "That pairing code is invalid, expired, or for a different bot — generate a fresh one in Vaelum settings.")
+		return true
+	}
+
+	// Resolve the soul this user's chats route to. Phase A: one soul per
+	// user; the first (and only) membership wins. The query mirrors
+	// tenancy.Store.SoulForUser so the same answer lands in bot_links
+	// that ResolveTelegramChat would return at read time.
+	var soulID uuid.UUID
+	if err := db.GetContext(ctx, &soulID,
+		`SELECT soul_id FROM vaelum.memberships
+		  WHERE user_id = $1 ORDER BY created_at LIMIT 1`, userID); err != nil {
+		g.logger.Error("telegram pairing: no membership for user", "user_id", userID, "error", err)
+		_ = reply.SendText(ctx, "Your Vaelum account has no soul yet — finish onboarding first.")
 		return true
 	}
 
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO vaelum.user_identities (user_id, kind, value, verified_at)
-		 VALUES ($1, 'telegram', $2, now())
-		 ON CONFLICT (kind, value) DO NOTHING`,
-		userID, chatID); err != nil {
-		g.logger.Error("telegram pairing: link failed", "error", err)
+		`INSERT INTO vaelum.bot_links (bot_id, tg_chat_id, tg_user_id, user_id, soul_id)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (bot_id, tg_chat_id) DO UPDATE
+		   SET tg_user_id = EXCLUDED.tg_user_id,
+		       user_id    = EXCLUDED.user_id,
+		       soul_id    = EXCLUDED.soul_id,
+		       linked_at  = now()`,
+		bi.id, tgChatID, tgUserID, userID, soulID); err != nil {
+		g.logger.Error("telegram pairing: bot_link insert failed", "error", err)
 		_ = reply.SendText(ctx, "Something went wrong linking your account — try again shortly.")
 		return true
 	}
+
+	// Mirror into user_identities as a side-effect so the cabinet's
+	// "linked accounts" view stays accurate. Routing reads from
+	// bot_links only; this row is for display.
+	_, _ = db.ExecContext(ctx,
+		`INSERT INTO vaelum.user_identities (user_id, kind, value, verified_at)
+		 VALUES ($1, 'telegram', $2, now())
+		 ON CONFLICT (kind, value) DO NOTHING`,
+		userID, chatID)
+
 	_, _ = db.ExecContext(ctx,
 		`UPDATE vaelum.telegram_pairings SET consumed_at = now() WHERE id = $1`, pairingID)
 
-	g.logger.Info("telegram pairing: linked", "chat_id", chatID, "user_id", userID.String())
+	// Drop any cached UserState built before pairing so the next message
+	// goes through getOrInitTelegramUser with the fresh bot_links row.
+	g.mu.Lock()
+	delete(g.users, chatID)
+	g.mu.Unlock()
+
+	g.logger.Info("telegram pairing: linked",
+		"chat_id", chatID,
+		"bot_id", bi.id.String(),
+		"user_id", userID.String(),
+		"soul_id", soulID.String(),
+	)
 	_ = reply.SendText(ctx, "Your Telegram is now linked to your Vaelum account.")
 	return true
 }
 
-// Run starts the polling loop and processes updates. Blocks until ctx is done.
+// Run drives the multi-bot fan-in: every registered bot's poller writes
+// into g.updatesChan tagged with its id; this loop dispatches each
+// tagged update to handleUpdate. The host is expected to have called
+// ReloadBots(ctx) before Run so the registry is non-empty.
+//
+// The periodic reconcile loop runs alongside as a goroutine so the
+// gateway recovers if a host-triggered ReloadBots call was missed
+// (e.g. internal HTTP signal dropped).
 func (g *Gateway) Run(ctx context.Context) {
-	ch := make(chan telegram.Update, 100)
-
-	go g.poller.Run(ctx, ch)
+	go g.runReloadLoop(ctx)
 	g.logger.Info("telegram gateway started")
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case update := <-ch:
-			g.handleUpdate(ctx, update)
+		case tagged := <-g.updatesChan:
+			bi := g.botByID(tagged.botID)
+			if bi == nil {
+				// Bot was unregistered after the poller dequeued this
+				// update but before we dispatched. Drop quietly.
+				continue
+			}
+			g.handleUpdate(ctx, bi, tagged.update)
 		}
 	}
 }
 
-func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
-	// Handle callback queries (inline button presses)
+func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update telegram.Update) {
+	// Handle callback queries (inline button presses).
+	// LEGACY: the /model command's inline-keyboard callbacks land here; the
+	// dispatch is parked behind the `legacy_commands` build tag along with
+	// handleModelCallback in model_command.go. Restoration: rebuild with
+	// `-tags legacy_commands` and uncomment the dispatch below.
 	if cq := update.CallbackQuery; cq != nil {
-		g.tg.AnswerCallbackQuery(ctx, cq.ID)
-		if g.handleModelCallback(ctx, cq) {
-			return
-		}
+		bi.client.AnswerCallbackQuery(ctx, cq.ID)
+		// if g.handleModelCallback(ctx, bi, cq) {
+		// 	return
+		// }
 		return
 	}
 
@@ -444,7 +545,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 	}
 
 	if msg.Document != nil && isTextFile(msg.Document) {
-		content, err := g.tg.DownloadFile(ctx, msg.Document.FileID, 512*1024)
+		content, err := bi.client.DownloadFile(ctx, msg.Document.FileID, 512*1024)
 		if err != nil {
 			g.logger.Warn("failed to download file", "error", err, "file", msg.Document.FileName)
 		} else {
@@ -463,7 +564,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 	// reason over the contents and cite by page. Limit matches
 	// browser.PDFMaxBytes so a giant scan can't blow memory.
 	if msg.Document != nil && isPDFDocument(msg.Document) {
-		content, err := g.tg.DownloadFile(ctx, msg.Document.FileID, browser.PDFMaxBytes)
+		content, err := bi.client.DownloadFile(ctx, msg.Document.FileID, browser.PDFMaxBytes)
 		if err != nil {
 			g.logger.Warn("failed to download pdf", "error", err, "file", msg.Document.FileName)
 		} else if pdfText, pages, err := browser.ExtractPDFText(content); err != nil {
@@ -487,7 +588,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 	}
 
 	if msg.Voice != nil && g.whisper != nil && g.whisper.IsConfigured() {
-		audio, err := g.tg.DownloadFile(ctx, msg.Voice.FileID, 10*1024*1024)
+		audio, err := bi.client.DownloadFile(ctx, msg.Voice.FileID, 10*1024*1024)
 		if err != nil {
 			g.logger.Warn("failed to download voice", "error", err)
 		} else {
@@ -507,7 +608,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 	var images []bs.ContentBlock
 	if len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1] // largest resolution
-		data, err := g.tg.DownloadFile(ctx, photo.FileID, 5*1024*1024)
+		data, err := bi.client.DownloadFile(ctx, photo.FileID, 5*1024*1024)
 		if err != nil {
 			g.logger.Warn("failed to download photo", "error", err, "file_id", photo.FileID)
 		} else {
@@ -548,10 +649,11 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 
 	rawChatID := msg.Chat.ID
 	chatID := tgCanonical(rawChatID)
+	tgUserID := msg.From.ID
 
 	// Vaelum pairing — a "pair-…" message links this Telegram account to a
 	// platform user. Handled before user resolution rejects the sender.
-	if g.tryTelegramPairing(ctx, chatID, text) {
+	if g.tryTelegramPairing(ctx, bi, chatID, rawChatID, tgUserID, text) {
 		return
 	}
 
@@ -561,7 +663,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 	// talk to. Slash commands are handled below via parseCommand regardless
 	// of this filter — commands are their own addressing mechanism.
 	if msg.Chat.Type != "private" && !strings.HasPrefix(text, "/") {
-		if !g.shouldProcessGroupMessage(msg, text) {
+		if !g.shouldProcessGroupMessage(bi, msg, text) {
 			g.logger.Debug("gateway: group message not addressed, skipping",
 				"chat_id", chatID,
 				"chat_type", msg.Chat.Type,
@@ -570,25 +672,35 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 		}
 	}
 
-	if cmd, forUs := g.parseCommand(text); cmd != "" {
-		if !forUs {
-			return
-		}
-		switch cmd {
-		case "/session":
-			go g.handleSessionCommand(ctx, rawChatID)
-			return
-		case "/reset":
-			go g.handleResetCommand(ctx, rawChatID)
-			return
-		case "/model":
-			go g.handleModelCommand(ctx, rawChatID)
-			return
-		case "/voice":
-			go g.handleVoiceCommand(ctx, rawChatID)
-			return
-		}
-	}
+	// LEGACY: single-user / owner-only slash commands. Parked here during
+	// the multi-bot Vaelum cutover (2026-05-26). In the multi-tenant world
+	// the cabinet UI owns session / model / voice management; the bot
+	// surface is for chat only. Restoration: rebuild blueship with
+	// `-tags legacy_commands` (re-enables the handler bodies in
+	// gateway_legacy_commands.go and model_command.go) and uncomment the
+	// block below.
+	//
+	// if cmd, forUs := g.parseCommand(bi, text); cmd != "" {
+	// 	if !forUs {
+	// 		return
+	// 	}
+	// 	switch cmd {
+	// 	case "/session":
+	// 		go g.handleSessionCommand(ctx, rawChatID)
+	// 		return
+	// 	case "/reset":
+	// 		go g.handleResetCommand(ctx, rawChatID)
+	// 		return
+	// 	case "/model":
+	// 		go g.handleModelCommand(ctx, rawChatID)
+	// 		return
+	// 	case "/voice":
+	// 		go g.handleVoiceCommand(ctx, rawChatID)
+	// 		return
+	// 	}
+	// }
+	_ = bi // keep `bi` referenced even when the command dispatch is off
+	_ = g.parseCommand
 	// A2A trace messages are informational broadcasts posted by bots into
 	// a shared visibility chat (e.g. rasim lab). They are never addressed
 	// to anyone — the [a2a-trace] sentinel is the cue. Gateways MUST drop
@@ -600,23 +712,32 @@ func (g *Gateway) handleUpdate(ctx context.Context, update telegram.Update) {
 		return
 	}
 
-	if text == "/debug" {
-		us, err := g.getOrInitUser(ctx, chatID)
-		if err == nil {
-			us.Mu.Lock()
-			us.DebugMode = !us.DebugMode
-			mode := "OFF"
-			if us.DebugMode {
-				mode = "ON"
-			}
-			us.Mu.Unlock()
-			g.tg.SendMessage(ctx, fmt.Sprintf("%d", rawChatID), fmt.Sprintf("Debug mode: %s", mode))
-		}
-		return
-	}
+	// LEGACY: /debug toggle. Same rationale as the other commands above —
+	// the cabinet is the right place for per-soul debug visibility, not
+	// a shared bot. Restoration: uncomment along with the sendDebugDump
+	// invocations in the response path (see `// LEGACY: sendDebugDump`).
+	//
+	// if text == "/debug" {
+	// 	us, err := g.getOrInitTelegramUser(ctx, bi, chatID, rawChatID, tgUserID)
+	// 	if err == nil {
+	// 		us.Mu.Lock()
+	// 		us.DebugMode = !us.DebugMode
+	// 		mode := "OFF"
+	// 		if us.DebugMode {
+	// 			mode = "ON"
+	// 		}
+	// 		us.Mu.Unlock()
+	// 		bi.client.SendMessage(ctx, fmt.Sprintf("%d", rawChatID), fmt.Sprintf("Debug mode: %s", mode))
+	// 	}
+	// 	return
+	// }
 
-	us, err := g.getOrInitUser(ctx, chatID)
+	us, err := g.getOrInitTelegramUser(ctx, bi, chatID, rawChatID, tgUserID)
 	if err != nil {
+		if errors.Is(err, bs.ErrTelegramChatUnpaired) {
+			g.replyUnpaired(ctx, bi, chatID)
+			return
+		}
 		g.logger.Debug("ignored message", "chat_id", chatID, "error", err)
 		return
 	}
@@ -672,65 +793,58 @@ func isTextFile(doc *telegram.Document) bool {
 	return false
 }
 
+// getOrInitUser builds UserState for non-Telegram entry points
+// (voice:owner legacy WS, ProcessInbound). The Telegram path uses
+// getOrInitTelegramUser, which resolves through vaelum.bot_links and
+// stamps the receiving bot onto UserState.
 func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	// Fast path: exact chatID match.
 	if us, ok := g.users[chatID]; ok {
 		return us, nil
+	}
+
+	// Legacy voice:owner — single-tenant fallback used by ws.handleConnectionLegacy
+	// when the device-token auth path is not configured. Resolved against
+	// the public.user_profiles owner row so the dev/test setup keeps
+	// working without a Vaelum membership graph.
+	if chatID != "voice:owner" {
+		return nil, fmt.Errorf("getOrInitUser: chatID %q not supported on multi-bot gateway (Telegram chats route through getOrInitTelegramUser)", chatID)
 	}
 
 	coreDB, err := g.deps.DB("ship")
 	if err != nil {
 		return nil, fmt.Errorf("core DB: %w", err)
 	}
-
-	// Resolve userID from chatID. Unknown users are rejected — no fallback to
-	// owner, which would let any stranger chat as the owner.
 	var userID uuid.UUID
-	if chatID == "voice:owner" {
-		// Legacy single-tenant voice transport (ws.handleConnectionLegacy):
-		// the synthetic "voice:owner" chatID has no user_profiles row, so
-		// resolve it to the configured owner. B4's device-token auth
-		// replaces this bridge.
-		if err = coreDB.GetContext(ctx, &userID,
-			`SELECT id FROM user_profiles WHERE is_owner = true LIMIT 1`); err != nil {
-			return nil, fmt.Errorf("voice transport: no owner in user_profiles: %w", err)
-		}
-	} else {
-		userID, err = user.ResolveByChatID(ctx, coreDB, chatID)
-		if err != nil {
-			g.logger.Info("rejected unknown chat_id", "chat_id", chatID, "error", err)
-			return nil, fmt.Errorf("unknown chat_id %s: not in user_profiles", chatID)
-		}
+	if err := coreDB.GetContext(ctx, &userID,
+		`SELECT id FROM user_profiles WHERE is_owner = true LIMIT 1`); err != nil {
+		return nil, fmt.Errorf("voice transport: no owner in user_profiles: %w", err)
 	}
 
-	var isOwner bool
-	if err := coreDB.GetContext(ctx, &isOwner,
-		`SELECT is_owner FROM user_profiles WHERE id = $1`, userID.String()); err != nil {
-		g.logger.Warn("is_owner lookup failed, defaulting to false", "user_id", userID, "error", err)
-	}
-
-	if !isOwner {
-		g.logger.Info("rejected non-owner message", "chat_id", chatID, "user_id", userID.String())
-		return nil, fmt.Errorf("non-owner user rejected")
-	}
-
-	// Resolve the soul this user routes to. Done here (not in
-	// ProcessInbound) because the Telegram path enters via handleUpdate
-	// → debouncer and never touches ProcessInbound — getOrInitUser is
-	// the one boundary both transports share.
 	var soulID uuid.UUID
 	if g.deps.ResolveSoul != nil {
 		soulID, err = g.deps.ResolveSoul(ctx, userID)
 		if err != nil {
-			g.logger.Error("gateway: soul resolution failed",
+			g.logger.Error("gateway: soul resolution failed (voice)",
 				"chat_id", chatID, "user_id", userID.String(), "error", err)
 			return nil, fmt.Errorf("resolve soul: %w", err)
 		}
 	}
 
+	us := g.buildUserState(chatID, userID, soulID, true, nil, 0)
+	g.users[chatID] = us
+	g.logger.Info("initialized voice user", "chat_id", chatID, "user_id", userID.String())
+
+	return us, nil
+}
+
+// buildUserState assembles a fresh UserState — common scaffolding shared by
+// getOrInitUser (voice:owner) and getOrInitTelegramUser (Telegram).
+// Does NOT register the entry in g.users or set up a debouncer — callers
+// own those steps so each transport can choose its own response sink.
+func (g *Gateway) buildUserState(chatID string, userID, soulID uuid.UUID, isOwner bool, bi *botInstance, tgChatID int64) *UserState {
 	userDeps := g.deps.ForUser(userID, chatID, isOwner)
 	registry := bs.NewToolRegistry()
 	tool.RegisterBuiltinTools(registry, userDeps)
@@ -742,28 +856,99 @@ func (g *Gateway) getOrInitUser(ctx context.Context, chatID string) (*UserState,
 	}
 	g.modules.RegisterAllTools(registry, userDeps)
 
-	us := &UserState{
+	return &UserState{
 		ChatID:   chatID,
 		UserID:   userID,
 		SoulID:   soulID,
 		IsOwner:  isOwner,
 		Registry: registry,
 		Deps:     userDeps,
+		bot:      bi,
+		tgChatID: tgChatID,
+	}
+}
+
+// getOrInitTelegramUser resolves a Telegram chat (received on bot bi) to
+// its (user, soul) via the host-provided ResolveTelegramChat hook
+// (typically a vaelum.bot_links lookup) and assembles a UserState bound
+// to the receiving bot. Returns ErrTelegramChatUnpaired (or any error
+// whose Is-chain reaches it) when the chat has not been paired yet — the
+// caller runs the unpaired-chat policy via replyUnpaired.
+func (g *Gateway) getOrInitTelegramUser(ctx context.Context, bi *botInstance, chatID string, tgChatID, tgUserID int64) (*UserState, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if us, ok := g.users[chatID]; ok {
+		// Cached UserState retains its original bot binding even if a
+		// later message arrives on a different bot — same chat_id across
+		// bots should never happen in practice (Telegram chat IDs are
+		// globally unique), but rebind defensively so outbound sends use
+		// the bot the user most recently pinged.
+		if bi != nil {
+			us.bot = bi
+		}
+		return us, nil
 	}
 
+	if g.deps.ResolveTelegramChat == nil {
+		return nil, fmt.Errorf("gateway: ResolveTelegramChat hook not configured")
+	}
+
+	userID, soulID, err := g.deps.ResolveTelegramChat(ctx, bi.id, tgChatID)
+	if err != nil {
+		if errors.Is(err, bs.ErrTelegramChatUnpaired) {
+			return nil, bs.ErrTelegramChatUnpaired
+		}
+		g.logger.Warn("gateway: ResolveTelegramChat failed",
+			"chat_id", chatID, "bot_id", bi.id.String(), "error", err)
+		return nil, err
+	}
+
+	us := g.buildUserState(chatID, userID, soulID, false, bi, tgChatID)
 	us.debounce = newDebouncer(g.deps.Config.Gateway.DebounceWindow, g.deps.Config.Gateway.DebounceCap, func(msgs []pendingMsg) {
-		sink := g.newTelegramSink(chatID)
+		sink := g.newTelegramSink(chatID, bi)
 		go g.processMessages(ctx, us, msgs, sink)
 	})
 
 	g.users[chatID] = us
-	g.logger.Info("initialized user",
+	g.logger.Info("initialized telegram user",
 		"chat_id", chatID,
+		"bot_id", bi.id.String(),
 		"user_id", userID.String(),
-		"is_owner", isOwner,
+		"soul_id", soulID.String(),
 	)
-
 	return us, nil
+}
+
+// replyUnpaired runs the policy for a Telegram message from a chat the
+// host has not paired yet:
+//   - platform bot: greet + signup link (drives signups);
+//   - user bot:     silent — only the owner is meant to talk to it, and
+//                   we don't want to leak that this token belongs to
+//                   someone in particular.
+//
+// The greeting text lives in <Config.Prompts>/telegram_platform_greeting.md
+// so it can be edited without redeploying the binary; missing file falls
+// back to a minimal in-code line.
+func (g *Gateway) replyUnpaired(ctx context.Context, bi *botInstance, chatID string) {
+	if bi == nil || bi.client == nil {
+		return
+	}
+	if bi.kind == "user" {
+		g.logger.Info("gateway: dropping message on unpaired user-bot chat",
+			"bot_id", bi.id.String(), "chat_id", chatID)
+		return
+	}
+	g.platformGreetMu.Lock()
+	greeting := g.platformGreet
+	g.platformGreetMu.Unlock()
+	if greeting == "" {
+		greeting = "Welcome — sign up at https://vaelum.ai, open Settings → Connect Telegram, " +
+			"and send me the `pair-…` code you get there. I’ll be ready as soon as you do."
+	}
+	if err := bi.client.SendLong(ctx, tgChatID(chatID), greeting); err != nil {
+		g.logger.Warn("gateway: send greeting failed", "error", err, "chat_id", chatID)
+	}
 }
 
 // GetUser returns an existing user state. Returns nil if not initialized.
@@ -810,160 +995,6 @@ func formatRulesAsGuidance(rules []bs.ActiveRule) string {
 	return b.String()
 }
 
-// sendDebugDump builds a full debug dump and sends as txt file via Telegram.
-// No-op for non-Telegram transports (WS-only, etc.) — Telegram is the only
-// sink that supports document attachments today.
-func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx, reflexGuidance, msgText string, preTraces, cortexTraces []agent.ToolTrace, engineRuleCount int) {
-	if g.tg == nil || !g.tg.IsConfigured() {
-		return
-	}
-	var b strings.Builder
-	b.WriteString("\xEF\xBB\xBF") // UTF-8 BOM
-	b.WriteString("=== DEBUG DUMP ===\n")
-	b.WriteString(fmt.Sprintf("Time: %s\n", time.Now().In(g.tz).Format("2006-01-02 15:04:05")))
-	b.WriteString(fmt.Sprintf("User: %s\n\n", us.ChatID))
-
-	// Full Cortex SYSTEM PROMPT — the complete plain text that lands in
-	// the LLM's `system` channel before any conversation history: the
-	// platform preamble, this soul's persona, and the agents layer,
-	// composed from the database. Shown verbatim (no truncation) so we
-	// can answer "what does the model actually see?".
-	b.WriteString("=== SYSTEM PROMPT (full plain text) ===\n")
-	if sp, err := g.systemPromptForSoul(ctx, us.SoulID); err != nil {
-		b.WriteString("(error resolving system prompt: " + err.Error() + ")")
-	} else if sp != "" {
-		b.WriteString(sp)
-	} else {
-		b.WriteString("(empty)")
-	}
-	b.WriteString("\n\n")
-
-	// AME Traces (injected context)
-	b.WriteString("=== AME TRACES (injected context) ===\n")
-	if injectedCtx != "" {
-		b.WriteString(injectedCtx)
-	} else {
-		b.WriteString("(empty)")
-	}
-	b.WriteString("\n\n")
-
-	// Reflex Guidance (matched rules)
-	b.WriteString("=== REFLEX GUIDANCE (active rules) ===\n")
-	if reflexGuidance != "" {
-		b.WriteString(reflexGuidance)
-	} else {
-		b.WriteString("(no rules matched)")
-	}
-	b.WriteString("\n\n")
-
-	// Rule Engine
-	b.WriteString(fmt.Sprintf("=== RULE ENGINE ===\n%d rules matched by structured conditions\n\n", engineRuleCount))
-
-	// Cortex tool definitions (grouped by source)
-	b.WriteString("=== CORTEX TOOLS ===\n")
-	if us.Registry != nil && g.deps.RoleTools != nil {
-		names := g.deps.RoleTools.Get("cortex")
-		defs := us.Registry.DefinitionsForNames(names)
-		local := make([]bs.ToolDefinition, 0)
-		peerDefs := make(map[string][]bs.ToolDefinition)
-		for _, d := range defs {
-			peer := us.Registry.PeerForTool(d.Name)
-			if peer == "" {
-				local = append(local, d)
-			} else {
-				peerDefs[peer] = append(peerDefs[peer], d)
-			}
-		}
-		if len(local) > 0 {
-			b.WriteString("[local]\n")
-			for _, d := range local {
-				desc := strings.TrimSpace(d.Description)
-				if len(desc) > 120 {
-					desc = desc[:120] + "..."
-				}
-				fmt.Fprintf(&b, "  %s: %s\n", d.Name, desc)
-			}
-		}
-		for peer, pd := range peerDefs {
-			fmt.Fprintf(&b, "[%s]\n", peer)
-			for _, d := range pd {
-				desc := strings.TrimSpace(d.Description)
-				if len(desc) > 120 {
-					desc = desc[:120] + "..."
-				}
-				fmt.Fprintf(&b, "  %s: %s\n", d.Name, desc)
-			}
-		}
-		fmt.Fprintf(&b, "(%d tools)\n", len(defs))
-	}
-	b.WriteString("\n")
-
-	// Tool traces
-	b.WriteString("=== TOOL CALLS ===\n")
-	allTraces := append(preTraces, cortexTraces...)
-	if len(allTraces) == 0 {
-		b.WriteString("(no tools called)\n")
-	}
-	for i, t := range allTraces {
-		src := "cortex"
-		if i < len(preTraces) {
-			src = "reflex"
-		}
-		errMark := ""
-		if t.Error {
-			errMark = " [ERROR]"
-		}
-		fmt.Fprintf(&b, "[%s] %s(%s)%s\n", src, t.Name, t.Input, errMark)
-		if t.Output != "" {
-			fmt.Fprintf(&b, "  → %s\n", t.Output)
-		}
-	}
-
-	// Final layout: how Cortex actually sees the input. The gateway
-	// composes prompt = (system) g.systemPrompt | (messages) chat history
-	// where the LAST user message gets the [context]<reflexGuidance>\n\n<injectedCtx>[/context]
-	// prefix glued to the actual user text. AME traces are NOT in the
-	// system channel — they ride in as a prefix to the user message.
-	// This is the single most useful section if you want to know "what
-	// does the model see and where".
-	b.WriteString("=== FINAL CORTEX INPUT LAYOUT ===\n")
-	b.WriteString("system:\n")
-	b.WriteString("  [current_datetime: ...] + <SYSTEM PROMPT shown above>\n\n")
-	b.WriteString("messages: ...прошлая история чата...\n\n")
-	b.WriteString("LAST user message (что Cortex реально видит как user input в этот turn):\n")
-	b.WriteString("---BEGIN---\n")
-	combinedCtx := ""
-	if reflexGuidance != "" && injectedCtx != "" {
-		combinedCtx = reflexGuidance + "\n\n" + injectedCtx
-	} else if reflexGuidance != "" {
-		combinedCtx = reflexGuidance
-	} else {
-		combinedCtx = injectedCtx
-	}
-	if combinedCtx != "" {
-		b.WriteString("[context]\n")
-		b.WriteString(combinedCtx)
-		if !strings.HasSuffix(combinedCtx, "\n") {
-			b.WriteString("\n")
-		}
-		b.WriteString("[/context]\n\n")
-	}
-	if msgText != "" {
-		b.WriteString(msgText)
-	} else {
-		b.WriteString("(empty)")
-	}
-	b.WriteString("\n---END---\n\n")
-
-	// Send as file
-	chatID := us.ChatID
-	if idx := strings.Index(chatID, ":"); idx >= 0 {
-		chatID = chatID[idx+1:]
-	}
-	if err := g.tg.SendDocument(ctx, chatID, "debug.md", []byte(b.String())); err != nil {
-		g.logger.Warn("debug dump send failed", "error", err)
-	}
-}
 
 // sendDebugError sends the actual error via sink when debug mode is on.
 func (g *Gateway) sendDebugError(ctx context.Context, sink bs.ResponseSink, source string, err error) {
@@ -977,16 +1008,22 @@ func (g *Gateway) sendDebugError(ctx context.Context, sink bs.ResponseSink, sour
 
 // notifyOwnerError sends an error to the owner's DM (for background jobs).
 // Only sends when debug mode is on. Does nothing if owner is not initialized.
+//
+// LEGACY: this assumes a single-owner ArleneKateBot deployment. In the
+// multi-bot Vaelum world there is no platform-wide "owner", so the
+// function is a no-op until a per-soul error-notification channel is
+// designed. Restoration: route through the owner's bot via
+// (owner.bot != nil ? owner.bot : g.anyBot()).
 func (g *Gateway) notifyOwnerError(ctx context.Context, source string, err error) {
 	if !g.deps.Config.Gateway.Debug {
 		return
 	}
 	owner := g.GetOwnerUser()
-	if owner == nil {
+	if owner == nil || owner.bot == nil {
 		return
 	}
 	msg := fmt.Sprintf("[%s] %v", source, err)
-	sink := g.newTelegramSink(owner.ChatID)
+	sink := g.newTelegramSink(owner.ChatID, owner.bot)
 	sink.SendText(ctx, msg)
 }
 
@@ -1618,9 +1655,16 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			sink.SendText(ctx, reply)
 			g.emitTurnCompleted(us, sess)
 		}
-		if us.DebugMode || g.deps.Config.Gateway.Debug {
-			go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, msgText, preTraces, cortexTraces, engineRuleCount)
-		}
+		// LEGACY: sendDebugDump — per-turn debug.md attachment for the
+		// owner. Parked with the rest of the legacy commands; restore in
+		// concert with the /debug toggle.
+		// if us.DebugMode || g.deps.Config.Gateway.Debug {
+		// 	go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, msgText, preTraces, cortexTraces, engineRuleCount)
+		// }
+		_ = injectedCtx
+		_ = reflexGuidance
+		_ = engineRuleCount
+		_ = cortexTraces
 		return
 	}
 
@@ -1651,16 +1695,18 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		if time.Since(lastEdit) < editInterval {
 			return
 		}
-		g.tg.EditMessageText(ctx, tgSink.chatID, streamMsgID, text, nil)
+		if tgSink.client != nil {
+			tgSink.client.EditMessageText(ctx, tgSink.chatID, streamMsgID, text, nil)
+		}
 		lastEdit = time.Now()
 	}
 
 	// ensureMsg creates the Telegram message on first content (text or tool).
 	ensureMsg := func(text string) {
-		if streamMsgID != 0 {
+		if streamMsgID != 0 || tgSink.client == nil {
 			return
 		}
-		res, err := g.tg.SendMessage(ctx, fmt.Sprintf("%d", tgSink.chatID), text)
+		res, err := tgSink.client.SendMessage(ctx, fmt.Sprintf("%d", tgSink.chatID), text)
 		if err == nil && res != nil && res.Result.MessageID != 0 {
 			streamMsgID = res.Result.MessageID
 			lastEdit = time.Now()
@@ -1710,9 +1756,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	toolStatus = ""
 	mu.Unlock()
 
-	if streamMsgID != 0 {
+	if streamMsgID != 0 && tgSink.client != nil {
 		// Final edit with complete text
-		g.tg.EditMessageText(ctx, tgSink.chatID, streamMsgID, reply, nil)
+		tgSink.client.EditMessageText(ctx, tgSink.chatID, streamMsgID, reply, nil)
 	} else {
 		// No edits happened (no tools called, fast response) — just send
 		sink.SendText(ctx, reply)
@@ -1733,9 +1779,16 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 
 	g.emitTurnCompleted(us, sess)
 
-	if us.DebugMode || g.deps.Config.Gateway.Debug {
-		go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, msgText, preTraces, cortexTraces, engineRuleCount)
-	}
+	// LEGACY: sendDebugDump — see the dispatch-side comment in handleUpdate.
+	// if us.DebugMode || g.deps.Config.Gateway.Debug {
+	// 	go g.sendDebugDump(ctx, us, injectedCtx, reflexGuidance, msgText, preTraces, cortexTraces, engineRuleCount)
+	// }
+	_ = injectedCtx
+	_ = reflexGuidance
+	_ = engineRuleCount
+	_ = preTraces
+	_ = cortexTraces
+
 	if g.deps.Config.TTS != nil && g.shouldSendVoice(ctx, us, sink) {
 		go g.synthesizeAndSendVoice(ctx, sink, us, reply)
 	}
@@ -1887,27 +1940,47 @@ func (g *Gateway) shouldSendVoice(ctx context.Context, us *UserState, sink bs.Re
 	return g.isVoiceEnabled(ctx, us)
 }
 
-// telegramSink implements bs.ResponseSink for Telegram transport.
+// telegramSink implements bs.ResponseSink for Telegram transport. Each
+// instance is bound to one bot's client at construction so replies land
+// on the bot the user pinged (file IDs, callbacks, and inline keyboards
+// are all bot-scoped in Telegram, so sends must use the same client).
 type telegramSink struct {
 	gw     *Gateway
 	chatID int64
+	client *telegram.Client // never nil in practice; set by newTelegramSink
 }
 
-func (g *Gateway) newTelegramSink(canonicalChatID string) *telegramSink {
-	return &telegramSink{gw: g, chatID: tgChatID(canonicalChatID)}
+// newTelegramSink builds a sink for one Telegram chat on one bot. bi must
+// be non-nil for the sink to actually send anything — the legacy single-bot
+// fallback path keeps bi pointing at the cfg.Transport.BotToken bot.
+func (g *Gateway) newTelegramSink(canonicalChatID string, bi *botInstance) *telegramSink {
+	var client *telegram.Client
+	if bi != nil {
+		client = bi.client
+	}
+	return &telegramSink{gw: g, chatID: tgChatID(canonicalChatID), client: client}
 }
 
 func (s *telegramSink) SendText(ctx context.Context, text string) error {
-	return s.gw.tg.SendLong(ctx, s.chatID, text)
+	if s.client == nil {
+		return fmt.Errorf("telegramSink.SendText: no telegram client (chat %d)", s.chatID)
+	}
+	return s.client.SendLong(ctx, s.chatID, text)
 }
 
 func (s *telegramSink) SendVoice(ctx context.Context, audio []byte) error {
 	chatID := fmt.Sprintf("%d", s.chatID)
-	return s.gw.deps.Sender.SendVoice(ctx, chatID, audio)
+	if s.gw.deps.Sender != nil {
+		return s.gw.deps.Sender.SendVoice(ctx, chatID, audio)
+	}
+	return fmt.Errorf("telegramSink.SendVoice: no MessageSender configured")
 }
 
 func (s *telegramSink) SendTyping(ctx context.Context) error {
-	return s.gw.tg.SendChatAction(ctx, s.chatID, "typing")
+	if s.client == nil {
+		return nil
+	}
+	return s.client.SendChatAction(ctx, s.chatID, "typing")
 }
 
 // tgChatID extracts int64 from canonical "telegram:NNN" string.
@@ -2721,63 +2794,6 @@ func (g *Gateway) GetOrCreateSession(ctx context.Context, us *UserState) (*sessi
 // Timezone returns the configured timezone.
 func (g *Gateway) Timezone() *time.Location { return g.tz }
 
-func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
-	us, err := g.getOrInitUser(ctx, tgCanonical(chatID))
-	if err != nil {
-		g.logger.Debug("session command: ignored", "chat_id", chatID, "error", err)
-		return
-	}
-
-	sess, err := g.GetOrCreateSession(ctx, us)
-	if err != nil {
-		g.logger.Error("session command: session error", "error", err)
-		g.tg.SendLong(ctx, chatID, "Failed to load session.")
-		return
-	}
-
-	buildDate := version.BuildDate
-	if buildDate == "" {
-		buildDate = "dev"
-	}
-	commit := version.Commit
-	if commit == "" {
-		commit = "local"
-	}
-
-	maxContext := g.deps.Config.Limits.MaxContext
-	contextTokens := sess.TokenCount
-	pct := 0
-	if maxContext > 0 {
-		pct = contextTokens * 100 / maxContext
-	}
-
-	ago := time.Since(sess.UpdatedAt).Truncate(time.Second)
-
-	compactK := g.deps.Config.Limits.CompactThreshold / 1000
-	msg := fmt.Sprintf(
-		"🚀 BlueShip %s (%s)\n"+
-			"🧠 Model: %s\n"+
-			"📊 Session: %d msgs · ~%dk tokens\n"+
-			"📚 Context: %dk/%dk (%d%%)\n"+
-			"🧵 %s · updated %s ago\n"+
-			"⚙️ Runtime: telegram · Compact threshold: %dk",
-		buildDate, commit,
-		g.cortexModelDisplay(),
-		sess.MessageCount, sess.TokenCount/1000,
-		contextTokens/1000, maxContext/1000, pct,
-		shortID(sess.ID), ago,
-		compactK,
-	)
-
-	if sess.CompactSummary != nil && *sess.CompactSummary != "" {
-		summaryLen := len(*sess.CompactSummary)
-		msg += fmt.Sprintf("\n📦 Compact: active (%d chars)", summaryLen)
-	}
-
-	if err := g.tg.SendLong(ctx, chatID, msg); err != nil {
-		g.logger.Error("session command: send error", "error", err)
-	}
-}
 
 // cortexModel returns the cortex (response generator) model in "provider:name" format.
 func (g *Gateway) cortexModel() string {
@@ -2886,108 +2902,7 @@ func (g *Gateway) cortexModelDisplay() string {
 	return g.deps.Config.Models.Primary.Name
 }
 
-func (g *Gateway) handleResetCommand(ctx context.Context, chatID int64) {
-	us, err := g.getOrInitUser(ctx, tgCanonical(chatID))
-	if err != nil {
-		g.logger.Debug("reset command: ignored", "chat_id", chatID, "error", err)
-		return
-	}
-	// CRITICAL: bind soul_id to the goroutine context. Without this,
-	// GetOrCreate's WHERE soul_id = $2 filter ran against the zero UUID
-	// and returned no row — every "reset" silently produced phantom
-	// sessions instead of archiving the real chat. user_id alone is not
-	// sufficient: a single user can have multiple souls.
-	ctx = bs.WithSoulID(ctx, us.SoulID)
 
-	// Refresh model config from DB. Role-tool allowlists come from code
-	// (Config.RoleTools); they are not refreshable at runtime.
-	if g.deps.ModelStore != nil {
-		if err := g.deps.ModelStore.Refresh(ctx); err != nil {
-			g.logger.Warn("reset: failed to refresh model config", "error", err)
-		}
-	}
-
-	// Archive current session and create a new one immediately.
-	uid := us.UserID.String()
-	model := g.cortexModelDisplay()
-	sess, err := g.store.GetOrCreate(ctx, uid, g.cortexModel())
-	if err != nil {
-		g.logger.Error("reset: GetOrCreate failed", "chat_id", chatID, "error", err)
-		_ = g.tg.SendLong(ctx, chatID, "Reset failed (session lookup): "+err.Error())
-		return
-	}
-	if sess == nil {
-		g.logger.Error("reset: GetOrCreate returned nil", "chat_id", chatID)
-		_ = g.tg.SendLong(ctx, chatID, "Reset failed (no session)")
-		return
-	}
-	if err := g.store.Archive(ctx, sess.ID); err != nil {
-		// Surfaced (was silently dropped) — Archive returns "session not
-		// found" if the soul_id query mismatch ever recurs, and we want
-		// to see that in Telegram instead of pretending the reset worked.
-		g.logger.Error("reset: archive failed", "chat_id", chatID, "session_id", sess.ID, "error", err)
-		_ = g.tg.SendLong(ctx, chatID, "Reset failed (archive): "+err.Error())
-		return
-	}
-	g.logger.Info("reset: archived session",
-		"chat_id", chatID,
-		"session_id", sess.ID,
-		"messages", sess.MessageCount,
-	)
-
-	// Create new session right away so no race between archive and next
-	// message. Linking via previousID + the source='chat' default inside
-	// CreateWithPrevious means GetOrCreate immediately sees it next turn.
-	newSess, err := g.store.CreateWithPrevious(ctx, uid, g.cortexModel(), sess.ID)
-	if err != nil || newSess == nil {
-		g.logger.Error("reset: create failed", "chat_id", chatID, "error", err)
-		_ = g.tg.SendLong(ctx, chatID, "Reset failed (create new): "+fmt.Sprintf("%v", err))
-		return
-	}
-	g.logger.Info("reset: created new session",
-		"chat_id", chatID,
-		"new_session_id", newSess.ID,
-		"previous_id", sess.ID,
-	)
-
-	msg := fmt.Sprintf(
-		"Session reset.\nModel: %s\nNew session: %s\nArchived: %s (%d msgs)",
-		model, newSess.ID, sess.ID, sess.MessageCount,
-	)
-	if err := g.tg.SendLong(ctx, chatID, msg); err != nil {
-		g.logger.Error("reset command: send error", "error", err)
-	}
-}
-
-func (g *Gateway) handleVoiceCommand(ctx context.Context, chatID int64) {
-	us, err := g.getOrInitUser(ctx, tgCanonical(chatID))
-	if err != nil {
-		return
-	}
-	if g.deps.Users == nil {
-		g.tg.SendLong(ctx, chatID, "Voice: user store not available.")
-		return
-	}
-
-	profile, err := g.deps.Users.GetByID(ctx, us.UserID.String())
-	if err != nil {
-		g.tg.SendLong(ctx, chatID, "Voice: user not found.")
-		return
-	}
-
-	newState := !profile.VoiceEnabled()
-	if err := g.deps.Users.SetPreference(ctx, us.UserID.String(), "voice_enabled", newState); err != nil {
-		g.logger.Error("voice command: set preference error", "error", err)
-		g.tg.SendLong(ctx, chatID, "Voice: failed to update preference.")
-		return
-	}
-
-	msg := "Voice mode: OFF"
-	if newState {
-		msg = "Voice mode: ON"
-	}
-	g.tg.SendLong(ctx, chatID, msg)
-}
 
 func shortID(id string) string {
 	if len(id) > 8 {
