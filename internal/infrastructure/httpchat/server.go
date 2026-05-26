@@ -174,6 +174,18 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	sink := &sseSink{w: w, flusher: flusher}
+
+	// SSE keep-alive: every ~10s emit a comment line so intermediary
+	// proxies (Caddy, Cloudflare, the user's own corp proxy) don't kill
+	// the connection as "stale" during long cortex turns (extended
+	// thinking, slow tool calls) where no real frame goes out for many
+	// seconds. Comment lines start with ':' per the SSE spec and are
+	// invisible to the EventSource client; sseSink.mu serialises them
+	// with real emits.
+	keepAliveCtx, stopKeepAlive := context.WithCancel(r.Context())
+	defer stopKeepAlive()
+	go sink.keepAlive(keepAliveCtx, 10*time.Second)
+
 	if err := s.gw.ProcessInboundForUser(r.Context(), userID, soulID, "vaelum",
 		[]bs.InboundMessage{{Text: req.Text}}, sink); err != nil {
 		s.logger.Warn("httpchat: process error", "error", err)
@@ -335,4 +347,29 @@ func (s *sseSink) SendUsage(ctx context.Context, inputTokens, outputTokens int) 
 		"output_tokens": outputTokens,
 	})
 	return nil
+}
+
+// keepAlive writes an SSE comment line every `interval` until ctx is
+// cancelled. Comment lines (starting with ':') are spec-compliant
+// no-ops on the EventSource client side but keep TCP/proxy state
+// fresh — without them, Caddy / Cloudflare / any L7 proxy can sever
+// the connection mid-cortex-turn when nothing real has flowed for
+// a while (extended thinking, long tool calls), and the browser
+// then sees the stream end prematurely with no text yet.
+func (s *sseSink) keepAlive(ctx context.Context, interval time.Duration) {
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.mu.Lock()
+			_, err := fmt.Fprint(s.w, ": keepalive\n\n")
+			if err == nil {
+				s.flusher.Flush()
+			}
+			s.mu.Unlock()
+		}
+	}
 }
