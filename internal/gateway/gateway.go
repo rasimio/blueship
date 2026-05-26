@@ -1670,9 +1670,14 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	tgSink, isTelegram := sink.(*telegramSink)
 	if !isTelegram {
 		// Non-Telegram transports: text-streaming if sink supports it
-		// (http-chat SSE for the web cabinet), batch otherwise.
+		// (http-chat SSE for the web cabinet), batch otherwise. Both
+		// reflex and cortex use the same callback so reflex-only turns
+		// (where reflex answers without escalating) still stream their
+		// reply — otherwise the web cabinet would see an empty bubble
+		// and fall back to the "(нет ответа)" stalled placeholder
+		// because the reply text never reaches a SendText call.
 		cortexCb := buildSinkCallbacks(ctx, sink)
-		reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, cortexCb, nil)
+		reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, cortexCb, cortexCb, nil)
 		if err != nil {
 			if ctx.Err() != nil {
 				g.logger.Info("turn cancelled", "chat_id", us.ChatID)
