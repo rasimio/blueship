@@ -1364,18 +1364,43 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		}
 	}
 
+	// rp carries the structured reflex pipeline output so we can both feed
+	// the agent loop (InjectedCtx / ReflexGuidance / PostActions) and
+	// surface MemoriesCount + MatchedRules + Strategy to the web cabinet
+	// via a SendContextInfo frame.
+	var rp reflexPipelineResult
 	if reflexGuidance == "" && msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil && g.reflexModel() != "" {
 		// Reflex/Cortex pipeline: structured context → reflex plan → pre-actions → filtered cortex input.
-		var silent bool
-		injectedCtx, reflexGuidance, postActions, preTraces, engineRuleCount, silent = g.runReflexPipeline(ctx, us, msgText, priorContext)
-		if silent {
+		rp = g.runReflexPipeline(ctx, us, msgText, priorContext)
+		if rp.Silent {
 			// Hard rule said "do not respond". Abort the whole turn — no
 			// cortex call, no message sent, no post-actions, no debug dump.
 			return
 		}
+		injectedCtx = rp.InjectedCtx
+		reflexGuidance = rp.ReflexGuidance
+		postActions = rp.PostActions
+		preTraces = rp.PreTraces
+		engineRuleCount = rp.EngineRuleCount
 	} else if msgText != "" && us.Deps != nil && us.Deps.ContextInjector != nil {
 		// Fallback: legacy ContextInjector (no reflex).
 		injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText, priorContext)
+	}
+
+	// Surface the prepared context (AME memories + rule matches + AME
+	// strategy) to streaming sinks so the web cabinet can render a
+	// "🧠 N memories • M rules" chip on the assistant bubble before
+	// any text/tool_use frames arrive. Sinks that don't implement
+	// ContextInfoSink (voice, Telegram) silently skip this.
+	if ci, ok := sink.(bs.ContextInfoSink); ok {
+		_ = ci.SendContextInfo(ctx, bs.ContextInfo{
+			Memories: rp.MemoriesCount,
+			// MatchedRules already covers engine + reflex matches (the
+			// dedup happens inside runReflexPipeline via seenRuleIDs).
+			Rules:        len(rp.MatchedRules),
+			MatchedRules: rp.MatchedRules,
+			Strategy:     rp.Strategy,
+		})
 	}
 
 	// Per-turn tool registry: the soul's native tools plus a fresh
@@ -2026,16 +2051,32 @@ const reflexConfidenceThreshold = 0.7
 const preActionTimeout = 10 * time.Second
 const maxPreActions = 2
 
+// reflexPipelineResult groups everything runReflexPipeline computes so the
+// caller can wire the structured pieces (memories + matched rules +
+// strategy) into the SSE context_info frame, while keeping the prompt
+// glue strings the agent loop actually consumes (injectedCtx /
+// reflexGuidance) in the same envelope.
+type reflexPipelineResult struct {
+	InjectedCtx     string
+	ReflexGuidance  string
+	PostActions     []bs.PostAction
+	PreTraces       []agent.ToolTrace
+	EngineRuleCount int
+	MemoriesCount   int
+	MatchedRules    []bs.MatchedRule
+	Strategy        string
+	Silent          bool
+}
+
 // runReflexPipeline executes the System 1/2 pipeline:
 // 1. ReflexPreparer → structured context (traces + candidate rules)
 // 2. Reflex LLM (Gemini Flash) → plan (matched rules, pre/post actions, tools)
 // 3. Execute pre-actions (web_search etc.) → inject results into context
 // 4. Build cortex context: matched rules + research + AME traces
 //
-// Returns (injectedContext, reflexGuidance, postActions, preTraces, engineRuleCount, silent).
-// When silent=true the caller MUST abort the turn without calling cortex or
-// sending any output — a structured rule with Silent=true matched.
-func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText, priorContext string) (string, string, []bs.PostAction, []agent.ToolTrace, int, bool) {
+// When result.Silent=true the caller MUST abort the turn without calling
+// cortex or sending any output — a structured rule with Silent=true matched.
+func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText, priorContext string) reflexPipelineResult {
 	// Interaction tier: skip the ReflexPreparer entirely. The full AME pass
 	// (memory_associate + scoring + diversity filter + emotion detection)
 	// costs ~3-5 s per turn and the streaming reflex doesn't need it — for
@@ -2047,6 +2088,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		var guidance strings.Builder
 		hasRules := false
 		engineRuleCount := 0
+		var matchedRules []bs.MatchedRule
 		if us.Deps.RuleEngine != nil {
 			engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
 				UserID:  us.Deps.UserID.String(),
@@ -2057,7 +2099,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 				if r.Silent {
 					g.logger.Info("rule engine: silent rule matched, aborting turn",
 						"rule_id", r.ID, "trigger", r.Trigger, "chat_id", us.ChatID)
-					return "", "", nil, nil, 0, true
+					return reflexPipelineResult{Silent: true}
 				}
 			}
 			for _, r := range engineRules {
@@ -2066,6 +2108,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 					hasRules = true
 				}
 				fmt.Fprintf(&guidance, "WHEN: %s\nDO: %s\n\n", r.Trigger, r.Action)
+				matchedRules = append(matchedRules, bs.MatchedRule{
+					ID: r.ID, Trigger: r.Trigger, Action: r.Action, Source: "engine",
+				})
 			}
 			engineRuleCount = len(engineRules)
 			if engineRuleCount > 0 {
@@ -2075,12 +2120,16 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		if hasRules {
 			guidance.WriteString("[/active rules]")
 		}
-		return "", guidance.String(), nil, nil, engineRuleCount, false
+		return reflexPipelineResult{
+			ReflexGuidance:  guidance.String(),
+			EngineRuleCount: engineRuleCount,
+			MatchedRules:    matchedRules,
+		}
 	}
 
 	rc := us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText, priorContext)
 	if rc == nil {
-		return "", "", nil, nil, 0, false
+		return reflexPipelineResult{}
 	}
 
 	// Store emotional strategy for TTS instruct mapping.
@@ -2137,7 +2186,11 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 
 	if g.reflexPlanTemplate == "" {
 		g.logger.Warn("reflex-plan prompt not in DB, skipping reflex")
-		return rc.FullContext, "", nil, nil, 0, false
+		return reflexPipelineResult{
+			InjectedCtx:   rc.FullContext,
+			MemoriesCount: rc.MemoriesCount,
+			Strategy:      rc.Strategy,
+		}
 	}
 	notesBlock := rc.ActiveNotes
 	if notesBlock == "" {
@@ -2219,6 +2272,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	var guidance strings.Builder
 	var hasRules bool
 	seenRuleIDs := make(map[string]bool)
+	var matchedRulesInfo []bs.MatchedRule
 
 	// 0. Disambiguation: reflex detected multiple plausible tools.
 	if reflexResult.Intent == "clarification_needed" && len(reflexResult.ClarificationOptions) > 0 {
@@ -2254,6 +2308,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 					hasRules = true
 				}
 				fmt.Fprintf(&guidance, "WHEN: %s\nDO: %s\n\n", r.Trigger, r.Action)
+				matchedRulesInfo = append(matchedRulesInfo, bs.MatchedRule{
+					ID: r.ID, Trigger: r.Trigger, Action: r.Action, Source: "reflex",
+				})
 			}
 		}
 	}
@@ -2280,7 +2337,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 					"trigger", r.Trigger,
 					"chat_id", us.ChatID,
 				)
-				return "", "", nil, nil, 0, true
+				return reflexPipelineResult{Silent: true}
 			}
 		}
 
@@ -2294,6 +2351,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 				hasRules = true
 			}
 			fmt.Fprintf(&guidance, "WHEN: %s\nDO: %s\n\n", r.Trigger, r.Action)
+			matchedRulesInfo = append(matchedRulesInfo, bs.MatchedRule{
+				ID: r.ID, Trigger: r.Trigger, Action: r.Action, Source: "engine",
+			})
 
 			// Execute rule-prescribed pre_actions.
 			for _, pa := range r.PreActions {
@@ -2355,7 +2415,16 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		}
 	}
 
-	return formattedTraces, guidance.String(), reflexResult.PostActions, preTraces, engineRuleCount, false
+	return reflexPipelineResult{
+		InjectedCtx:     formattedTraces,
+		ReflexGuidance:  guidance.String(),
+		PostActions:     reflexResult.PostActions,
+		PreTraces:       preTraces,
+		EngineRuleCount: engineRuleCount,
+		MemoriesCount:   rc.MemoriesCount,
+		MatchedRules:    matchedRulesInfo,
+		Strategy:        rc.Strategy,
+	}
 }
 
 // escalateArgs is the parsed input of an escalate tool call.
@@ -2851,6 +2920,45 @@ func (g *Gateway) GetOrCreateSession(ctx context.Context, us *UserState) (*sessi
 		_ = g.deps.ModelStore.Refresh(ctx)
 	}
 	return g.store.GetOrCreate(ctx, us.UserID.String(), g.cortexModelDisplay())
+}
+
+// ResetSession archives the active (user, soul) chat session and opens a
+// fresh one in its place. The chat_messages rows stay on disk — history
+// rendering and AME recall still see them — but the LLM-side context
+// window starts blank, so the next turn begins a new thread. Mirrors
+// the Telegram /reset command's behaviour for HTTP / web callers.
+//
+// Caller MUST pin the soul on ctx via bs.WithSoulID; without it
+// GetOrCreate cross-pollinates sessions across souls.
+func (g *Gateway) ResetSession(ctx context.Context, userID string) (oldID, newID string, err error) {
+	if g.deps.ModelStore != nil {
+		_ = g.deps.ModelStore.Refresh(ctx)
+	}
+	sess, err := g.store.GetOrCreate(ctx, userID, g.cortexModelDisplay())
+	if err != nil {
+		return "", "", fmt.Errorf("reset: get session: %w", err)
+	}
+	if sess == nil {
+		return "", "", fmt.Errorf("reset: no session for user %s", userID)
+	}
+	oldID = sess.ID
+	if err := g.store.Archive(ctx, sess.ID); err != nil {
+		return oldID, "", fmt.Errorf("reset: archive: %w", err)
+	}
+	newSess, err := g.store.CreateWithPrevious(ctx, userID, g.cortexModel(), sess.ID)
+	if err != nil {
+		return oldID, "", fmt.Errorf("reset: create new: %w", err)
+	}
+	if newSess == nil {
+		return oldID, "", fmt.Errorf("reset: create returned nil")
+	}
+	g.logger.Info("reset: archived + recreated session",
+		"user_id", userID,
+		"old_session_id", oldID,
+		"new_session_id", newSess.ID,
+		"messages_in_old", sess.MessageCount,
+	)
+	return oldID, newSess.ID, nil
 }
 
 // Timezone returns the configured timezone.

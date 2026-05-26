@@ -30,6 +30,7 @@ type Server struct {
 	port   int
 	token  string
 	extras func(*http.ServeMux)
+	reset  func(ctx context.Context, userID string) (string, string, error)
 	logger *slog.Logger
 }
 
@@ -37,15 +38,20 @@ type Server struct {
 // token is the shared service token vaelum must present; empty disables
 // auth. extras, when non-nil, is called once during Run with the server's
 // mux so the host can mount additional routes (they share the bearer
-// middleware).
-func NewServer(gw *gateway.Gateway, port int, token string, extras func(*http.ServeMux), logger *slog.Logger) *Server {
-	return &Server{gw: gw, port: port, token: token, extras: extras, logger: logger}
+// middleware). reset, when non-nil, exposes POST /api/internal/chat/reset
+// — vaelum's web cabinet calls it to archive the active session and
+// open a fresh one (equivalent of the Telegram /reset command).
+func NewServer(gw *gateway.Gateway, port int, token string, extras func(*http.ServeMux), reset func(context.Context, string) (string, string, error), logger *slog.Logger) *Server {
+	return &Server{gw: gw, port: port, token: token, extras: extras, reset: reset, logger: logger}
 }
 
 // Run starts the HTTP server. Blocks until ctx is done.
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /chat", s.handleChat)
+	if s.reset != nil {
+		mux.HandleFunc("POST /api/internal/chat/reset", s.handleReset)
+	}
 	if s.extras != nil {
 		s.extras(mux)
 	}
@@ -90,6 +96,50 @@ type chatRequest struct {
 	UserID string `json:"user_id"`
 	SoulID string `json:"soul_id"`
 	Text   string `json:"text"`
+}
+
+type resetRequest struct {
+	UserID string `json:"user_id"`
+	SoulID string `json:"soul_id"`
+}
+
+type resetResponse struct {
+	OldSessionID string `json:"old_session_id"`
+	NewSessionID string `json:"new_session_id"`
+}
+
+// handleReset archives the active (user, soul) chat session and creates
+// a new one in its place. Soul is pinned on ctx so session.Store's
+// soul-keyed lookup hits the right thread; the underlying gateway call
+// returns the old + new session IDs for confirmation to the caller.
+func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
+	var req resetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	userID, err := uuid.Parse(req.UserID)
+	if err != nil {
+		http.Error(w, "invalid user_id", http.StatusBadRequest)
+		return
+	}
+	soulID, err := uuid.Parse(req.SoulID)
+	if err != nil {
+		http.Error(w, "invalid soul_id", http.StatusBadRequest)
+		return
+	}
+
+	ctx := bs.WithSoulID(r.Context(), soulID)
+	oldID, newID, err := s.reset(ctx, userID.String())
+	if err != nil {
+		s.logger.Warn("httpchat: reset failed", "user_id", userID, "soul_id", soulID, "err", err)
+		http.Error(w, "reset failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resetResponse{OldSessionID: oldID, NewSessionID: newID})
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -250,6 +300,25 @@ func (s *sseSink) SendMeta(ctx context.Context, sessionID, messageID string) err
 	}
 	if messageID != "" {
 		payload["message_id"] = messageID
+	}
+	s.emit(payload)
+	return nil
+}
+
+// SendContextInfo implements bs.ContextInfoSink: emit a "context_info"
+// frame so the cabinet can render a "🧠 N memories • M rules" chip on
+// each assistant turn. Fired once per turn before any text/tool events.
+func (s *sseSink) SendContextInfo(ctx context.Context, info bs.ContextInfo) error {
+	payload := map[string]any{
+		"type":     "context_info",
+		"memories": info.Memories,
+		"rules":    info.Rules,
+	}
+	if info.Strategy != "" {
+		payload["strategy"] = info.Strategy
+	}
+	if len(info.MatchedRules) > 0 {
+		payload["matched_rules"] = info.MatchedRules
 	}
 	s.emit(payload)
 	return nil

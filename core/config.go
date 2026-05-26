@@ -234,6 +234,14 @@ type HTTPChatConfig struct {
 	// arlene's `/api/internal/memory/associate` endpoint that proxies AME
 	// search from the Vaelum cabinet.
 	Extras func(*http.ServeMux) `yaml:"-" json:"-"`
+
+	// Reset, when non-nil, exposes POST /api/internal/chat/reset on the
+	// httpchat mux. Vaelum's web cabinet calls it (relayed via
+	// /api/chat/reset) to archive the active (user, soul) chat session
+	// and open a fresh one — equivalent of the Telegram /reset command
+	// for HTTP callers. Wired by blueship.Ship after the gateway is built;
+	// the host doesn't set it.
+	Reset func(ctx context.Context, userID string) (oldSessionID, newSessionID string, err error) `yaml:"-" json:"-"`
 }
 
 // ModelRef identifies a model and its provider.

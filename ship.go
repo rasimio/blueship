@@ -401,9 +401,13 @@ func (s *Ship) Run(ctx context.Context) error {
 
 	// 6b. Start HTTP/SSE chat server (Vaelum web platform). The host's
 	// optional Extras callback mounts additional internal-API routes on
-	// the same port/token (arlene uses this for AME associate).
+	// the same port/token (arlene uses this for AME associate). Reset
+	// is wired here so vaelum gets the same archive+new-session behaviour
+	// as the Telegram /reset command without having to reach into the
+	// gateway directly from the host package.
 	if hcCfg := s.cfg.Transport.HTTPChat; hcCfg.Port > 0 && gw != nil {
-		hcSrv := httpchat.NewServer(gw, hcCfg.Port, hcCfg.Token, hcCfg.Extras, s.logger)
+		hcCfg.Reset = gw.ResetSession
+		hcSrv := httpchat.NewServer(gw, hcCfg.Port, hcCfg.Token, hcCfg.Extras, hcCfg.Reset, s.logger)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

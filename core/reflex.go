@@ -117,4 +117,9 @@ type ReflexContext struct {
 	ContextTokens int
 	// Degraded indicates if emotion detection was unavailable.
 	Degraded bool
+	// MemoriesCount is the number of AME traces injected into FormattedTraces /
+	// FullContext (after diversity filter, before reflex classification).
+	// Surfaced to the web cabinet so the chat UI can render a chip
+	// "🧠 N memories • M rules" alongside each assistant turn.
+	MemoriesCount int
 }
