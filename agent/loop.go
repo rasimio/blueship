@@ -459,6 +459,13 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			return "", nil, fmt.Errorf("LLM API: %w", err)
 		}
 
+		// Per-turn usage report: web sinks render a live token-window
+		// indicator that climbs as the session grows. Telegram / voice
+		// sinks set OnUsage = nil and the call is a no-op.
+		if cb != nil && cb.OnUsage != nil {
+			cb.OnUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens)
+		}
+
 		a.logger.Info("LLM response",
 			"stop_reason", resp.StopReason,
 			"input_tokens", resp.Usage.InputTokens,

@@ -112,3 +112,13 @@ type MatchedRule struct {
 type ThinkingSink interface {
 	SendThinking(ctx context.Context, delta string) error
 }
+
+// UsageSink is an optional sink capability for transports that surface
+// per-turn LLM token usage (input + output). The web cabinet uses it to
+// render a live "context window" chip that climbs as the conversation
+// grows, so the user can see when they're approaching the model's
+// context limit and reach for the Reset button. Fires once per cortex
+// turn after the LLM response lands.
+type UsageSink interface {
+	SendUsage(ctx context.Context, inputTokens, outputTokens int) error
+}

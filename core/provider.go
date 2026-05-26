@@ -18,11 +18,17 @@ type CompletionProvider interface {
 // providers that don't surface partial tool blocks). OnToolResult is invoked
 // by the agent loop after tool execution, not by the provider — providers
 // don't see it. OnThinking fires for each thinking delta where supported.
+// OnUsage fires once per LLM turn after the response is fully assembled,
+// reporting the input/output token counts the provider returned. The agent
+// loop dispatches it (not the provider) so a single per-turn callsite covers
+// every provider uniformly; the web cabinet uses it to render a live
+// context-window indicator that grows turn by turn.
 type StreamCallbacks struct {
 	OnText       func(delta string)
 	OnToolUse    func(id, name string, input json.RawMessage)
 	OnToolResult func(useID, output string, isError bool, latencyMs int)
 	OnThinking   func(delta string)
+	OnUsage      func(inputTokens, outputTokens int)
 }
 
 // StreamCompletionProvider extends CompletionProvider with streaming support.

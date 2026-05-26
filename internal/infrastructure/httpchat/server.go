@@ -323,3 +323,16 @@ func (s *sseSink) SendContextInfo(ctx context.Context, info bs.ContextInfo) erro
 	s.emit(payload)
 	return nil
 }
+
+// SendUsage implements bs.UsageSink: emit a "usage" frame with the
+// cortex turn's token counts. The cabinet's window-size chip
+// (next to the Reset button) reads it to show "🪟 N tokens" — a
+// live indicator of how much the LLM context has grown.
+func (s *sseSink) SendUsage(ctx context.Context, inputTokens, outputTokens int) error {
+	s.emit(map[string]any{
+		"type":          "usage",
+		"input_tokens":  inputTokens,
+		"output_tokens": outputTokens,
+	})
+	return nil
+}

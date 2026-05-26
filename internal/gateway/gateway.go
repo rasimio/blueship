@@ -2608,6 +2608,10 @@ func buildSinkCallbacks(ctx context.Context, sink bs.ResponseSink) *bs.StreamCal
 		cb.OnThinking = func(delta string) { _ = th.SendThinking(ctx, delta) }
 		any = true
 	}
+	if us, ok := sink.(bs.UsageSink); ok {
+		cb.OnUsage = func(input, output int) { _ = us.SendUsage(ctx, input, output) }
+		any = true
+	}
 	if !any {
 		return nil
 	}
