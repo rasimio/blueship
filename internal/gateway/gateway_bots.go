@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -293,24 +295,53 @@ func (g *Gateway) SendToUser(ctx context.Context, userID uuid.UUID, text string)
 	if err != nil {
 		return fmt.Errorf("send to user: db unavailable: %w", err)
 	}
-	var row struct {
-		BotID    uuid.UUID `db:"bot_id"`
-		TGChatID int64     `db:"tg_chat_id"`
-	}
-	err = db.GetContext(ctx, &row,
-		`SELECT bot_id, tg_chat_id
-		   FROM vaelum.bot_links
-		  WHERE user_id = $1
-		  ORDER BY linked_at DESC
-		  LIMIT 1`, userID)
+
+	// Resolve the PRIMARY (user, tg_chat) — the one recorded on
+	// user_profiles.chat_id. That row is the first pairing event
+	// (set by blueship's pairing-consume UPDATE on user_profiles) and
+	// represents the channel the user actually checks. Multi-pairing
+	// is real: a user may have linked several Telegram accounts (e.g.
+	// a personal one + a throw-away tester) — pushing proactive
+	// notifications to a stale "latest" link surfaces as Forbidden if
+	// that throw-away account blocked the bot.
+	//
+	// chat_id is stored as a transport-prefixed string: "telegram:NNN".
+	// Other prefixes (vaelum:..., voice:...) mean "user never paired a
+	// real TG channel" — return errNoLink so the caller can skip
+	// silently rather than try and fail.
+	var primaryChatID string
+	err = db.GetContext(ctx, &primaryChatID,
+		`SELECT chat_id FROM user_profiles WHERE id = $1`, userID)
 	if err != nil {
-		return fmt.Errorf("send to user %s: no bot link: %w", userID, err)
+		return fmt.Errorf("send to user %s: no profile: %w", userID, err)
 	}
-	bi := g.botByID(row.BotID)
+	const tgPrefix = "telegram:"
+	if !strings.HasPrefix(primaryChatID, tgPrefix) {
+		return fmt.Errorf("send to user %s: primary channel is %q, not telegram", userID, primaryChatID)
+	}
+	tgChatIDStr := strings.TrimPrefix(primaryChatID, tgPrefix)
+	tgChatID, parseErr := strconv.ParseInt(tgChatIDStr, 10, 64)
+	if parseErr != nil {
+		return fmt.Errorf("send to user %s: malformed chat_id %q: %w", userID, primaryChatID, parseErr)
+	}
+
+	// Find the bot that owns this (user, tg_chat) pairing. We could
+	// rely on the unique index on (bot_id, tg_chat_id) but the same
+	// tg_chat may be linked via different bots; scoping by user_id
+	// keeps us on this user's own bot.
+	var botID uuid.UUID
+	err = db.GetContext(ctx, &botID,
+		`SELECT bot_id FROM vaelum.bot_links
+		  WHERE user_id = $1 AND tg_chat_id = $2
+		  ORDER BY linked_at DESC LIMIT 1`, userID, tgChatID)
+	if err != nil {
+		return fmt.Errorf("send to user %s: no bot link for primary chat %d: %w", userID, tgChatID, err)
+	}
+	bi := g.botByID(botID)
 	if bi == nil {
-		return fmt.Errorf("send to user %s: bot %s not loaded", userID, row.BotID)
+		return fmt.Errorf("send to user %s: bot %s not loaded", userID, botID)
 	}
-	return bi.client.SendLong(ctx, row.TGChatID, text)
+	return bi.client.SendLong(ctx, tgChatID, text)
 }
 
 // runReloadLoop reconciles the bot registry against the host's source
