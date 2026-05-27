@@ -776,19 +776,38 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	})
 }
 
-// hasImageContent reports whether a user-message payload carries at
-// least one image content block. Used by runInteraction to decide
-// whether to skip the text-only reflex tier and go straight to a
-// vision-capable cortex. Anything that isn't a []bs.ContentBlock (plain
-// text strings, etc.) is treated as "no image".
-func hasImageContent(content any) bool {
-	blocks, ok := content.([]bs.ContentBlock)
-	if !ok {
-		return false
-	}
-	for _, b := range blocks {
-		if b.Type == "image" {
-			return true
+// hasHeavyContent reports whether a user-message payload is unsuited
+// for the fast reflex tier. Two cases collapse to the same action:
+//   1. Any image block — the codex provider's text-only serializer
+//      silently drops image content, so reflex never sees the bytes
+//      and either hallucinates a description or routes wrong.
+//   2. Total text past ~16 KiB (≈ 4K tokens, double reflex's
+//      MessageBudget) — the chatgpt.com codex endpoint returns a
+//      misleading 400 ("expected a string, but got an object") on
+//      inputs it can't handle. PDF and text-doc attachments inline
+//      as a single huge text block in the daemon's /chat handler
+//      and trip this on the first user turn that carries them.
+//
+// Either way the right move is to skip the fast tier and run cortex
+// (claude-opus-4-7) directly — it has the context budget for the
+// turn and would have been called via escalation anyway.
+func hasHeavyContent(content any) bool {
+	const heavyTextBytes = 16 << 10 // 16 KiB ≈ 4K tokens
+	switch v := content.(type) {
+	case string:
+		return len(v) > heavyTextBytes
+	case []bs.ContentBlock:
+		textBytes := 0
+		for _, b := range v {
+			if b.Type == "image" {
+				return true
+			}
+			if b.Type == "text" {
+				textBytes += len(b.Text)
+				if textBytes > heavyTextBytes {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -2499,21 +2518,21 @@ func (g *Gateway) runInteraction(
 		return reply, traces, false, err
 	}
 
-	// Image bypass: the reflex tier runs a text-only provider (openai-codex
-	// gpt-5.5 in production), whose request serializer silently drops
-	// `image` content blocks. With nothing to ground its answer on, reflex
-	// either hallucinates a description or answers the caption alone and
-	// never escalates — so the vision-capable cortex (claude-opus-4-7)
-	// never sees the bytes. Skip the fast tier when any image is attached
-	// and go straight to cortex with the full content, including its
-	// base64 image blocks. Persist the user turn once, exactly the
-	// interaction-tier append-once pattern below.
-	if hasImageContent(content) {
+	// Heavy-content bypass: the reflex tier (openai-codex gpt-5.5) is
+	// sized for short routing turns and chokes on either image bytes
+	// (silently dropped by its text-only serializer) or oversized
+	// text inputs (codex backend returns a confusing 400). PDFs and
+	// large text-doc attachments inline as one huge text block in the
+	// daemon's /chat handler and trip the size case. See
+	// hasHeavyContent for the precise rule. Skip reflex and run
+	// cortex directly with the full content; persist the user turn
+	// once, matching the interaction-tier append-once pattern below.
+	if hasHeavyContent(content) {
 		if err = g.store.Append(ctx, cortexCfg.SessionID, bs.Message{Role: "user", Content: content}); err != nil {
-			return "", nil, false, fmt.Errorf("interaction: append user message (image bypass): %w", err)
+			return "", nil, false, fmt.Errorf("interaction: append user message (heavy bypass): %w", err)
 		}
 		cortexCfg.SkipUserAppend = true
-		g.logger.Info("interaction: image content present, bypassing reflex tier", "session_id", cortexCfg.SessionID)
+		g.logger.Info("interaction: heavy content, bypassing reflex tier", "session_id", cortexCfg.SessionID)
 		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
 		return reply, traces, true, err
 	}
