@@ -174,7 +174,37 @@ func ExtractPDFText(data []byte) (string, int, error) {
 		out = out[:PDFTextHeadCap] + "\n\n[truncated — pull more via a more specific URL or page-range request]"
 	}
 	out = fixCp1251Mojibake(out)
+	out = stripUnsupportedChars(out)
 	return out, pageCount, nil
+}
+
+// stripUnsupportedChars removes characters that downstream storage
+// (PostgreSQL jsonb) refuses. The hard offender is the NUL byte —
+// ledongthuc/pdf occasionally emits 0x00 when a font's encoding map
+// has gaps, and a literal NUL lands in the JSON envelope that
+// jsonb rejects with "unsupported Unicode escape sequence" (22P05).
+// We also strip the other non-tab/newline C0 controls (0x01–0x08,
+// 0x0B–0x0C, 0x0E–0x1F) because they're rare in real PDF text and
+// occasionally trip naive renderers; tab / line feed / carriage
+// return are preserved so layout-relevant whitespace survives.
+func stripUnsupportedChars(s string) string {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == 0 || (c > 0 && c < 0x20 && c != '\t' && c != '\n' && c != '\r') {
+			goto rewrite
+		}
+	}
+	return s
+rewrite:
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == 0 || (c > 0 && c < 0x20 && c != '\t' && c != '\n' && c != '\r') {
+			continue
+		}
+		out = append(out, c)
+	}
+	return string(out)
 }
 
 // fixCp1251Mojibake repairs a frequent failure of ledongthuc/pdf: when

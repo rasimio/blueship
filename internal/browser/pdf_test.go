@@ -53,3 +53,25 @@ func TestFixCp1251Mojibake(t *testing.T) {
 		})
 	}
 }
+
+func TestStripUnsupportedChars(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"plain ascii", "Hello, world", "Hello, world"},
+		{"keeps tab newline cr", "a\tb\nc\rd", "a\tb\nc\rd"},
+		{"strips nul", "before\x00after", "beforeafter"},
+		{"strips multiple nuls", "a\x00b\x00c", "abc"},
+		{"strips other c0 controls", "x\x01y\x07z\x1Fw", "xyzw"},
+		{"keeps cyrillic", "Привет мир", "Привет мир"},
+		{"empty stays empty", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := stripUnsupportedChars(c.in)
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
