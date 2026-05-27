@@ -683,35 +683,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		}
 	}
 
-	// LEGACY: single-user / owner-only slash commands. Parked here during
-	// the multi-bot Vaelum cutover (2026-05-26). In the multi-tenant world
-	// the cabinet UI owns session / model / voice management; the bot
-	// surface is for chat only. Restoration: rebuild blueship with
-	// `-tags legacy_commands` (re-enables the handler bodies in
-	// gateway_legacy_commands.go and model_command.go) and uncomment the
-	// block below.
-	//
-	// if cmd, forUs := g.parseCommand(bi, text); cmd != "" {
-	// 	if !forUs {
-	// 		return
-	// 	}
-	// 	switch cmd {
-	// 	case "/session":
-	// 		go g.handleSessionCommand(ctx, rawChatID)
-	// 		return
-	// 	case "/reset":
-	// 		go g.handleResetCommand(ctx, rawChatID)
-	// 		return
-	// 	case "/model":
-	// 		go g.handleModelCommand(ctx, rawChatID)
-	// 		return
-	// 	case "/voice":
-	// 		go g.handleVoiceCommand(ctx, rawChatID)
-	// 		return
-	// 	}
-	// }
-	_ = bi // keep `bi` referenced even when the command dispatch is off
-	_ = g.parseCommand
+	_ = bi // keep `bi` referenced even when the broader command dispatch is off
 	// A2A trace messages are informational broadcasts posted by bots into
 	// a shared visibility chat (e.g. rasim lab). They are never addressed
 	// to anyone — the [a2a-trace] sentinel is the cue. Gateways MUST drop
@@ -750,6 +722,34 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 			return
 		}
 		g.logger.Debug("ignored message", "chat_id", chatID, "error", err)
+		return
+	}
+
+	// /reset — multi-tenant: archive the active (user, soul) chat session
+	// and open a fresh one via the same gateway method the cabinet's web
+	// reset button uses, so Telegram and HTTP/SSE stay behaviourally
+	// identical. Other legacy single-user slash commands (/session,
+	// /model, /voice) remain parked behind the `legacy_commands` build
+	// tag — those don't fit the multi-bot Vaelum world.
+	if cmd, forUs := g.parseCommand(bi, text); cmd == "/reset" && forUs {
+		go func() {
+			rctx := bs.WithSoulID(context.Background(), us.SoulID)
+			oldID, newID, rerr := g.ResetSession(rctx, us.UserID.String())
+			if rerr != nil {
+				g.logger.Warn("telegram /reset failed",
+					"chat_id", us.ChatID, "user_id", us.UserID, "error", rerr)
+				if bi != nil && bi.client != nil {
+					_, _ = bi.client.SendMessage(rctx, fmt.Sprintf("%d", rawChatID), "Reset failed.")
+				}
+				return
+			}
+			g.logger.Info("telegram /reset done",
+				"chat_id", us.ChatID, "user_id", us.UserID,
+				"old_session_id", oldID, "new_session_id", newID)
+			if bi != nil && bi.client != nil {
+				_, _ = bi.client.SendMessage(rctx, fmt.Sprintf("%d", rawChatID), "Session reset. New thread.")
+			}
+		}()
 		return
 	}
 
