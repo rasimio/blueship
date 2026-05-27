@@ -22,6 +22,13 @@ type Session struct {
 	Active           bool      `db:"active" json:"active"`
 	Source           string    `db:"source" json:"source"`
 	SourceID         *string   `db:"source_id" json:"source_id,omitempty"`
+	// LastInputTokens carries the most recent cortex input_tokens for
+	// this session — populated by agent.Loop after every LLM call via
+	// MessageStore.RecordLastInputTokens. Nullable: pre-migration rows
+	// and brand-new sessions have no value yet. Required as a struct
+	// field so sqlx.StructScan on `RETURNING *` Inserts can map the
+	// migration-047 column.
+	LastInputTokens  *int      `db:"last_input_tokens" json:"last_input_tokens,omitempty"`
 	CreatedAt        time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
 }
