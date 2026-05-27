@@ -881,8 +881,17 @@ func (g *Gateway) resolveInlineAttachmentRefs(ctx context.Context, us *UserState
 				},
 			})
 		case "pdf":
-			// Inline a small note + the extracted text; cortex sees
-			// it the same way it sees a fresh PDF upload.
+			// Prefer the host-supplied source (markdown for
+			// host-generated PDFs) over re-extracting from the
+			// rendered bytes — chromedp font subsets aren't
+			// readable by ledongthuc/pdf and produce mojibake.
+			if rec.SourceText != "" {
+				blocks = append(blocks, bs.ContentBlock{
+					Type: "text",
+					Text: fmt.Sprintf("[ref: %s — pdf, markdown source]\n%s", rec.Name, rec.SourceText),
+				})
+				continue
+			}
 			text, _, perr := browser.ExtractPDFText(data)
 			if perr != nil {
 				blocks = append(blocks, bs.ContentBlock{

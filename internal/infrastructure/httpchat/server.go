@@ -258,7 +258,22 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	defer stopKeepAlive()
 	go sink.keepAlive(keepAliveCtx, 10*time.Second)
 
-	if err := s.gw.ProcessInboundForUser(r.Context(), userID, soulID, "vaelum",
+	// Decouple the turn's work context from the request context. A
+	// browser refresh / tab close / network blip used to cascade
+	// into the agent loop as `context canceled`, killing the
+	// generation half-way and abandoning the assistant message
+	// (chat_messages append happens at the END of the loop, after
+	// the cancel had already fired). With WithoutCancel the work
+	// completes server-side regardless — the user can refresh and
+	// see the persisted reply on next history load. The 5-minute
+	// hard cap stops genuinely stuck turns from running forever.
+	workCtx, workCancel := context.WithTimeout(
+		context.WithoutCancel(r.Context()),
+		5*time.Minute,
+	)
+	defer workCancel()
+
+	if err := s.gw.ProcessInboundForUser(workCtx, userID, soulID, "vaelum",
 		[]bs.InboundMessage{{Text: text, Images: images}}, sink); err != nil {
 		s.logger.Warn("httpchat: process error", "error", err)
 		sink.event("error", err.Error())

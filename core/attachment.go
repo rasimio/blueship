@@ -33,16 +33,23 @@ type AttachmentSink interface {
 
 // AttachmentRecord carries metadata for a resolved attachment —
 // enough for a transport to decide between SendPhoto vs SendDocument
-// and render a sensible filename.
+// and render a sensible filename. SourceText is optional and only
+// populated for rows whose canonical content lives somewhere other
+// than the bytes the disk store holds (today: PDFs the host
+// generated from markdown, where the markdown is the human-readable
+// source and the rendered PDF font subset can't be re-decoded
+// cleanly). Empty SourceText falls back to extracting from the
+// bytes the caller already has.
 type AttachmentRecord struct {
-	ID        uuid.UUID
-	UserID    uuid.UUID
-	SoulID    uuid.UUID
-	Name      string
-	Mime      string
-	Kind      string // "image" | "pdf" | "text"
-	Size      int64
-	CreatedAt int64 // unix seconds; transport-agnostic
+	ID         uuid.UUID
+	UserID     uuid.UUID
+	SoulID     uuid.UUID
+	Name       string
+	Mime       string
+	Kind       string // "image" | "pdf" | "text"
+	Size       int64
+	CreatedAt  int64 // unix seconds; transport-agnostic
+	SourceText string
 }
 
 // AttachmentSendSink is the optional transport-side capability for
