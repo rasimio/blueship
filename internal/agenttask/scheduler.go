@@ -35,6 +35,13 @@ type Scheduler struct {
 	handlers         map[string]core.AgentHandler
 	strategyHandlers map[string]core.AgentHandler
 	registry         *core.ToolRegistry
+	// registryBuilder, when non-nil, builds a fresh per-task tool
+	// registry bound to the task's user deps. Required for multi-tenant
+	// hosts so per-tool closures (notes/memory/etc) read d.UserID =
+	// task.UserID rather than the global Deps zero-value. Hosts that
+	// don't need tenancy may leave it nil — the scheduler falls back to
+	// the shared global registry.
+	registryBuilder  func(userDeps *core.Deps) *core.ToolRegistry
 	msgStore         core.MessageStore
 	deps             *core.Deps
 	notify           func(ctx context.Context, userID uuid.UUID, text string)
@@ -53,6 +60,13 @@ type Scheduler struct {
 // of nil DB / missing peer cache rows.
 func (s *Scheduler) SetStatusCallback(cb func(ctx context.Context, task core.AgentTask)) {
 	s.onStatusChange = cb
+}
+
+// SetRegistryBuilder installs a per-task tool-registry builder. Called
+// by the host once after construction. See the field comment on
+// Scheduler for the rationale.
+func (s *Scheduler) SetRegistryBuilder(b func(userDeps *core.Deps) *core.ToolRegistry) {
+	s.registryBuilder = b
 }
 
 // NewScheduler creates an agent task scheduler.
@@ -192,14 +206,25 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		return
 	}
 
-	// Build scoped tool registry.
+	// Build per-task tool registry. When the host installed a
+	// registryBuilder we rebuild every iteration so per-tool closures
+	// see d.UserID = task.UserID (required for multi-tenant hosts —
+	// without this, every tool that does `d.UserID.String()` queries
+	// the wrong tenant and silently returns the global-deps-empty-uuid
+	// owner's rows). Without a builder we fall back to the shared
+	// global registry — fine for single-tenant agents.
+	baseRegistry := s.registry
+	if s.registryBuilder != nil {
+		userDeps := s.deps.ForUser(task.UserID, "agent_task:"+task.ID.String(), false)
+		baseRegistry = s.registryBuilder(userDeps)
+	}
 	var registry *core.ToolRegistry
 	if len(task.Tools) > 0 {
-		registry = s.registry.SubsetForNames(task.Tools)
+		registry = baseRegistry.SubsetForNames(task.Tools)
 	} else if tools := handler.DefaultTools(); len(tools) > 0 {
-		registry = s.registry.SubsetForNames(tools)
+		registry = baseRegistry.SubsetForNames(tools)
 	} else {
-		registry = s.registry
+		registry = baseRegistry
 	}
 
 	agentDeps := core.AgentDeps{

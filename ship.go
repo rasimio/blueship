@@ -330,6 +330,26 @@ func (s *Ship) Run(ctx context.Context) error {
 
 		agentSched = agenttask.NewScheduler(taskStore, s.handlers, s.strategyHandlers, globalRegistry, msgStore, deps, notifyFn, s.logger)
 
+		// Per-task tool registry: a fresh registry bound to each task's
+		// owner_user_id so per-tool closures capture d.UserID =
+		// task.UserID. Without this, the scheduler reused globalRegistry
+		// whose tools captured the zero-value Deps — every notes /
+		// memory / personal tool returned the global owner's data (or
+		// empty for multi-tenant hosts), so heartbeat for non-owner
+		// souls saw no notes and stayed silent forever.
+		agentSched.SetRegistryBuilder(func(userDeps *core.Deps) *core.ToolRegistry {
+			r := core.NewToolRegistry()
+			tool.RegisterBuiltinTools(r, userDeps)
+			if err := tool.RegisterBrowserTools(r, userDeps); err != nil {
+				s.logger.Warn("agent-tasks: per-task browser tools registration failed", "error", err)
+			}
+			if err := tool.RegisterAgentTaskTools(r, userDeps); err != nil {
+				s.logger.Warn("agent-tasks: per-task agent_task tools registration failed", "error", err)
+			}
+			reg.RegisterAllTools(r, userDeps)
+			return r
+		})
+
 		// Built-in delegate callback emitter: when a task that came from
 		// a peer (progress.delegated_from set) reaches a terminal status,
 		// notify the origin via /a2a/callback so they can wake their
