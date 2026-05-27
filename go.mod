@@ -16,6 +16,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0
 	golang.org/x/net v0.49.0
+	golang.org/x/text v0.37.0
 	nhooyr.io/websocket v1.8.17
 )
 

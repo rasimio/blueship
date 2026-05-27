@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ledongthuc/pdf"
+	"golang.org/x/text/encoding/charmap"
 )
 
 // PDF text extraction lives next to browser.Fetch because PDFs commonly
@@ -172,7 +173,65 @@ func ExtractPDFText(data []byte) (string, int, error) {
 	if len(out) > PDFTextHeadCap {
 		out = out[:PDFTextHeadCap] + "\n\n[truncated — pull more via a more specific URL or page-range request]"
 	}
+	out = fixCp1251Mojibake(out)
 	return out, pageCount, nil
+}
+
+// fixCp1251Mojibake repairs a frequent failure of ledongthuc/pdf: when
+// a PDF embeds a Cyrillic font with a Windows-1251 single-byte
+// encoding and no /ToUnicode CMap, the library emits each byte as a
+// matching latin-1 rune. The resulting "text" is valid UTF-8 but
+// reads as gibberish — every Russian letter shows as a Western
+// accented character (П → Ï, р → ð, etc.).
+//
+// Detection: count runes in U+0080-U+00FF. If a meaningful share of
+// the text falls in that band and there's no actual Cyrillic
+// codepoint present, treat it as latin-1-misencoded cp1251. Decode
+// the runes back to single bytes, run them through the Windows-1251
+// table, return the UTF-8 result. Pure-ASCII strings or strings
+// already containing proper Cyrillic are returned untouched.
+//
+// We don't try cp1252 / KOI8-R here — cp1251 covers the vast
+// majority of Russian PDFs we'll see, and adding more guesses risks
+// flipping correctly-encoded Western text into garbage.
+func fixCp1251Mojibake(s string) string {
+	if s == "" {
+		return s
+	}
+	suspect, total := 0, 0
+	for _, r := range s {
+		if r >= 0x0400 && r <= 0x04FF {
+			// Real Cyrillic present — text is already Unicode-correct.
+			return s
+		}
+		if r > 0xFF {
+			// Anything outside latin-1 (other scripts, emoji, etc.)
+			// means the source is multi-encoded — bail rather than
+			// risk corrupting it.
+			return s
+		}
+		total++
+		if r >= 0x80 {
+			suspect++
+		}
+	}
+	// Heuristic: a Russian PDF misencoded as latin-1 has a very high
+	// share of upper-half bytes (every Cyrillic letter is U+0080–
+	// U+00FF). A piece of Western text with a sprinkle of accents
+	// stays under ~25%. The 30% threshold catches the former cleanly
+	// while leaving "café résumé" alone.
+	if suspect < 3 || suspect*100/total < 30 {
+		return s
+	}
+	raw := make([]byte, 0, len(s))
+	for _, r := range s {
+		raw = append(raw, byte(r))
+	}
+	decoded, err := charmap.Windows1251.NewDecoder().Bytes(raw)
+	if err != nil {
+		return s
+	}
+	return string(decoded)
 }
 
 // fetchPDF downloads a PDF URL and returns its extracted text. Caller
