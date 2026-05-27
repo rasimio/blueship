@@ -7,9 +7,27 @@ import (
 )
 
 // Message represents a message in LLM conversation format (role + content).
+//
+// The extra fields below are relational metadata persisted on the
+// chat_messages row but invisible to the LLM (providers serialise
+// Role + Content only). They live on this struct rather than on a
+// separate "session message" wrapper so the gateway can hand a
+// single value to both the agent loop (LLM facing) and the session
+// store (DB facing) without copy-conversion.
 type Message struct {
 	Role    string `json:"role"`
 	Content any    `json:"content"` // string | []ContentBlock — normalized to []ContentBlock on storage
+	// ReplyToMessageID, when non-empty, marks this row as a reply to
+	// the named chat_messages.id. The session store writes the
+	// column on append; the cabinet's history endpoint joins the
+	// parent row by it to render a relational reply-quote chip.
+	// Empty for non-reply turns.
+	ReplyToMessageID string `json:"-"`
+	// TGMessageID is the Telegram-side message id of an inbound
+	// user message. Lets the gateway resolve a future
+	// `msg.ReplyToMessage.MessageID` into our chat_messages.id when
+	// the same chat replies to it. 0 = not from Telegram or unknown.
+	TGMessageID int64 `json:"-"`
 }
 
 // ContentBlock is an element of the content array in LLM API messages.

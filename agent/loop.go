@@ -30,6 +30,16 @@ type RunConfig struct {
 	Model          string
 	MaxTokens      int
 	MaxTurns       int
+	// ReplyToMessageID, when non-empty, is stamped on the user
+	// message row at append time so the cabinet's history endpoint
+	// can render a relational reply-quote chip pointing at the
+	// parent. Empty for non-reply turns.
+	ReplyToMessageID string
+	// TGMessageID is the Telegram-side id of this inbound user
+	// message. Stamped on the row so a future Telegram reply
+	// targeting it can be resolved into our chat_messages.id via
+	// session.Store.LookupByTGMessageID. 0 = not from Telegram.
+	TGMessageID int64
 	// InjectedContext is prepended to the first user turn (not stored in session).
 	// Used for automatic memory/context injection before the LLM call.
 	InjectedContext string
@@ -129,7 +139,12 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 
 	// 1. Append user message (unless the caller already persisted it).
 	if !cfg.SkipUserAppend {
-		if err := a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: userMessage}); err != nil {
+		if err := a.store.Append(ctx, cfg.SessionID, bs.Message{
+			Role:             "user",
+			Content:          userMessage,
+			ReplyToMessageID: cfg.ReplyToMessageID,
+			TGMessageID:      cfg.TGMessageID,
+		}); err != nil {
 			return nil, fmt.Errorf("append user message: %w", err)
 		}
 	}
@@ -377,7 +392,12 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	}
 
 	if !cfg.SkipUserAppend {
-		if err := a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: userMessage}); err != nil {
+		if err := a.store.Append(ctx, cfg.SessionID, bs.Message{
+			Role:             "user",
+			Content:          userMessage,
+			ReplyToMessageID: cfg.ReplyToMessageID,
+			TGMessageID:      cfg.TGMessageID,
+		}); err != nil {
 			return "", nil, fmt.Errorf("append user message: %w", err)
 		}
 	}

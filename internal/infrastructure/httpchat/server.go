@@ -101,6 +101,13 @@ type chatRequest struct {
 	SoulID      string           `json:"soul_id"`
 	Text        string           `json:"text"`
 	Attachments []chatAttachment `json:"attachments,omitempty"`
+	// ReplyToMessageID, when set, is the uuid of the cabinet
+	// chat_messages row this turn replies to. The gateway stamps it
+	// onto the new user row's reply_to_message_id column so the
+	// cabinet's history endpoint can render a relational reply-
+	// quote chip. Empty for non-reply turns; Telegram replies use
+	// the gateway's tg_message_id index instead.
+	ReplyToMessageID string `json:"reply_to_message_id,omitempty"`
 }
 
 // chatAttachment is one file attached to a cabinet message. The caller
@@ -274,7 +281,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	defer workCancel()
 
 	if err := s.gw.ProcessInboundForUser(workCtx, userID, soulID, "vaelum",
-		[]bs.InboundMessage{{Text: text, Images: images}}, sink); err != nil {
+		[]bs.InboundMessage{{
+			Text:             text,
+			Images:           images,
+			ReplyToMessageID: req.ReplyToMessageID,
+		}}, sink); err != nil {
 		s.logger.Warn("httpchat: process error", "error", err)
 		sink.event("error", err.Error())
 	}

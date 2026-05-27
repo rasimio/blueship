@@ -807,11 +807,16 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		return
 	}
 
+	var replyToTGID int
+	if msg.ReplyToMessage != nil {
+		replyToTGID = msg.ReplyToMessage.MessageID
+	}
 	us.debounce.Add(pendingMsg{
-		text:           text,
-		images:         images,
-		messageID:      msg.MessageID,
-		rawAttachments: rawAttachments,
+		text:               text,
+		images:             images,
+		messageID:          msg.MessageID,
+		rawAttachments:     rawAttachments,
+		replyToTGMessageID: replyToTGID,
 	})
 }
 
@@ -1378,7 +1383,11 @@ func (g *Gateway) ProcessInboundForUser(ctx context.Context, userID, soulID uuid
 		if m.Text == "" && len(m.Images) == 0 {
 			continue
 		}
-		pending = append(pending, pendingMsg{text: m.Text, images: m.Images})
+		pending = append(pending, pendingMsg{
+			text:             m.Text,
+			images:           m.Images,
+			replyToMessageID: m.ReplyToMessageID,
+		})
 	}
 	if len(pending) == 0 {
 		return nil
@@ -1774,18 +1783,47 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		cortexTemp = g.deps.ModelStore.Get("cortex").Temperature
 	}
 
+	// Reply metadata: the first pendingMsg in the batch carries
+	// the user-visible reply target. Cabinet-originated replies set
+	// replyToMessageID directly (the frontend knows the parent
+	// uuid). Telegram-originated replies set replyToTGMessageID and
+	// we resolve it via the session store's tg_message_id index.
+	// TGMessageID of the inbound message itself is stamped on the
+	// new row so future Telegram replies pointing at it can be
+	// resolved the same way.
+	var replyToMessageID string
+	var tgMessageID int64
+	if len(msgs) > 0 {
+		first := msgs[0]
+		if first.messageID != 0 {
+			tgMessageID = int64(first.messageID)
+		}
+		if first.replyToMessageID != "" {
+			replyToMessageID = first.replyToMessageID
+		} else if first.replyToTGMessageID != 0 {
+			if parentID, lerr := g.store.LookupByTGMessageID(ctx, sess.ID, int64(first.replyToTGMessageID)); lerr == nil {
+				replyToMessageID = parentID
+			} else {
+				g.logger.Warn("reply: tg parent lookup failed",
+					"session_id", sess.ID, "tg_id", first.replyToTGMessageID, "err", lerr)
+			}
+		}
+	}
+
 	runCfg := agent.RunConfig{
-		SessionID:       sess.ID,
-		SystemPrompt:    systemWithTime,
-		CompactSummary:  derefString(sess.CompactSummary),
-		Model:           g.cortexModel(),
-		MaxTokens:       g.deps.Config.Limits.MaxOutputTokens,
-		MaxTurns:        g.deps.Config.Gateway.MaxTurns,
-		InjectedContext: injectedCtx,
-		ReflexGuidance:  reflexGuidance,
-		Role:            "cortex",
-		Temperature:     cortexTemp,
-		AllowedTools:    g.allowedToolsForSoul(ctx, us.SoulID, turnRegistry),
+		SessionID:        sess.ID,
+		SystemPrompt:     systemWithTime,
+		CompactSummary:   derefString(sess.CompactSummary),
+		Model:            g.cortexModel(),
+		MaxTokens:        g.deps.Config.Limits.MaxOutputTokens,
+		MaxTurns:         g.deps.Config.Gateway.MaxTurns,
+		InjectedContext:  injectedCtx,
+		ReflexGuidance:   reflexGuidance,
+		Role:             "cortex",
+		Temperature:      cortexTemp,
+		AllowedTools:     g.allowedToolsForSoul(ctx, us.SoulID, turnRegistry),
+		ReplyToMessageID: replyToMessageID,
+		TGMessageID:      tgMessageID,
 	}
 
 	// Voice transport: use streaming LLM with inline sentence-level TTS.
@@ -2829,7 +2867,12 @@ func (g *Gateway) runInteraction(
 	// cortex directly with the full content; persist the user turn
 	// once, matching the interaction-tier append-once pattern below.
 	if hasHeavyContent(content) {
-		if err = g.store.Append(ctx, cortexCfg.SessionID, bs.Message{Role: "user", Content: content}); err != nil {
+		if err = g.store.Append(ctx, cortexCfg.SessionID, bs.Message{
+			Role:             "user",
+			Content:          content,
+			ReplyToMessageID: cortexCfg.ReplyToMessageID,
+			TGMessageID:      cortexCfg.TGMessageID,
+		}); err != nil {
 			return "", nil, false, fmt.Errorf("interaction: append user message (heavy bypass): %w", err)
 		}
 		cortexCfg.SkipUserAppend = true
@@ -3461,6 +3504,16 @@ type pendingMsg struct {
 	// model and the sink needs raw bytes — decoding back would mean
 	// allocating twice. Empty on text-only turns.
 	rawAttachments []rawAttachment
+	// replyToTGMessageID is the Telegram message id of the parent
+	// when the user replied via Telegram. processMessages resolves
+	// this to our chat_messages.id via the session store before
+	// stamping the new row's reply_to_message_id column.
+	replyToTGMessageID int
+	// replyToMessageID is a directly-supplied parent uuid. Set by
+	// the cabinet path (where the frontend knows the parent id
+	// natively); 0 / empty for Telegram inbound. When both are set
+	// the direct id wins.
+	replyToMessageID string
 }
 
 // rawAttachment is one inbound file held by pendingMsg until the

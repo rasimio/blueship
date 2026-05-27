@@ -11,6 +11,14 @@ type InboundMessage struct {
 	Audio    []byte         // raw audio for STT (nil if text-only)
 	Images   []ContentBlock // image content blocks
 	ReplyCtx string         // quoted reply context (optional)
+	// ReplyToMessageID, when non-empty, is the chat_messages.id of
+	// the parent this message replies to. Set by transports that
+	// know the parent id natively (the cabinet's swipe-to-reply
+	// carries it in the JSON payload). Telegram resolves its
+	// reply.MessageID into our id inside the gateway via the
+	// session store's tg_message_id index — that path doesn't use
+	// this field.
+	ReplyToMessageID string
 }
 
 // ResponseSink delivers pipeline output back to the user via the originating transport.

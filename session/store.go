@@ -189,7 +189,7 @@ func (s *Store) Archive(ctx context.Context, sessionID string) error {
 func (s *Store) Append(ctx context.Context, sessionID string, msg bs.Message) error {
 	blocks := bs.NormalizeContent(msg.Content)
 	tokens := bs.EstimateTokens(blocks)
-	_, err := s.appendInternal(ctx, sessionID, msg.Role, blocks, nil, tokens)
+	_, err := s.appendInternal(ctx, sessionID, msg, blocks, nil, tokens)
 	return err
 }
 
@@ -197,7 +197,7 @@ func (s *Store) Append(ctx context.Context, sessionID string, msg bs.Message) er
 // Satisfies core.MessageStore.
 func (s *Store) AppendWithTokens(ctx context.Context, sessionID string, msg bs.Message, tokens int) error {
 	blocks := bs.NormalizeContent(msg.Content)
-	_, err := s.appendInternal(ctx, sessionID, msg.Role, blocks, nil, tokens)
+	_, err := s.appendInternal(ctx, sessionID, msg, blocks, nil, tokens)
 	return err
 }
 
@@ -205,16 +205,42 @@ func (s *Store) AppendWithTokens(ctx context.Context, sessionID string, msg bs.M
 func (s *Store) AppendReturning(ctx context.Context, sessionID string, msg bs.Message) (*Message, error) {
 	blocks := bs.NormalizeContent(msg.Content)
 	tokens := bs.EstimateTokens(blocks)
-	return s.appendInternal(ctx, sessionID, msg.Role, blocks, nil, tokens)
+	return s.appendInternal(ctx, sessionID, msg, blocks, nil, tokens)
 }
 
-func (s *Store) appendInternal(ctx context.Context, sessionID, role string, blocks []bs.ContentBlock, toolUseID *string, tokens int) (*Message, error) {
+// LookupByTGMessageID finds the chat_messages row id for a Telegram
+// reply target. session-scoped so a tg_message_id from another chat
+// (same numeric value, different conversation) doesn't false-match.
+// Returns ("", nil) when not found — caller treats that as "parent
+// pre-dates the relational reply path" and falls back to the inline
+// text quote.
+func (s *Store) LookupByTGMessageID(ctx context.Context, sessionID string, tgMessageID int64) (string, error) {
+	if tgMessageID == 0 {
+		return "", nil
+	}
+	var id string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id::text FROM chat_messages
+		  WHERE session_id = $1 AND tg_message_id = $2
+		  ORDER BY created_at DESC LIMIT 1`,
+		sessionID, tgMessageID,
+	).Scan(&id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", fmt.Errorf("lookup tg message: %w", err)
+	}
+	return id, nil
+}
+
+func (s *Store) appendInternal(ctx context.Context, sessionID string, msg bs.Message, blocks []bs.ContentBlock, toolUseID *string, tokens int) (*Message, error) {
 	contentJSON, err := json.Marshal(blocks)
 	if err != nil {
 		return nil, fmt.Errorf("marshal content: %w", err)
 	}
 
-	if toolUseID == nil && role == "user" {
+	if toolUseID == nil && msg.Role == "user" {
 		for _, b := range blocks {
 			if b.Type == "tool_result" && b.ToolUseID != "" {
 				id := b.ToolUseID
@@ -222,6 +248,18 @@ func (s *Store) appendInternal(ctx context.Context, sessionID, role string, bloc
 				break
 			}
 		}
+	}
+
+	// Relational reply metadata. Nullable on both ends — empty
+	// string and zero TGMessageID land as NULL so non-reply turns
+	// don't pollute the column.
+	var replyTo any
+	if msg.ReplyToMessageID != "" {
+		replyTo = msg.ReplyToMessageID
+	}
+	var tgMID any
+	if msg.TGMessageID != 0 {
+		tgMID = msg.TGMessageID
 	}
 
 	tx, err := s.db.BeginTxx(ctx, nil)
@@ -232,10 +270,13 @@ func (s *Store) appendInternal(ctx context.Context, sessionID, role string, bloc
 
 	var m Message
 	err = tx.QueryRowxContext(ctx,
-		`INSERT INTO chat_messages (soul_id, session_id, role, content, tool_use_id, token_estimate)
-		 VALUES ($6::uuid, $1, $2, $3, $4, $5)
+		`INSERT INTO chat_messages
+		    (soul_id, session_id, role, content, tool_use_id, token_estimate,
+		     reply_to_message_id, tg_message_id)
+		 VALUES ($6::uuid, $1, $2, $3, $4, $5, $7, $8)
 		 RETURNING id, session_id, role, content, tool_use_id, token_estimate, created_at`,
-		sessionID, role, contentJSON, toolUseID, tokens, bs.SoulIDFromContext(ctx),
+		sessionID, msg.Role, contentJSON, toolUseID, tokens, bs.SoulIDFromContext(ctx),
+		replyTo, tgMID,
 	).StructScan(&m)
 	if err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
