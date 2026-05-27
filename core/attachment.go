@@ -29,6 +29,13 @@ import (
 type AttachmentSink interface {
 	Save(ctx context.Context, p AttachmentParams) (id uuid.UUID, err error)
 	Get(ctx context.Context, userID, soulID, id uuid.UUID) (*AttachmentRecord, []byte, error)
+	// ListForMessage returns the attachment ids linked to a specific
+	// chat_messages row, scoped to (userID, soulID). Used by the
+	// gateway's reply-context expander: when the user replies to an
+	// older message that carried attachments, those parent files are
+	// pulled back into the current turn's content so the model can
+	// reason about them, not just the inline text snippet.
+	ListForMessage(ctx context.Context, userID, soulID, messageID uuid.UUID) ([]uuid.UUID, error)
 }
 
 // AttachmentRecord carries metadata for a resolved attachment —

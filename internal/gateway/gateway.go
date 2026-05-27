@@ -859,12 +859,31 @@ func (g *Gateway) resolveInlineAttachmentRefs(ctx context.Context, us *UserState
 		return blocks
 	}
 
+	ids := make([]uuid.UUID, 0, len(seen))
 	for id := range seen {
+		ids = append(ids, id)
+	}
+	blocks = append(blocks, g.attachmentBlocksByIDs(ctx, us, ids, "ref")...)
+	return blocks
+}
+
+// attachmentBlocksByIDs resolves a set of attachment ids via the
+// host's CDN and renders each as one content block — image vision
+// block for picture kinds, fenced text dump for files. `labelPrefix`
+// is the bracket tag the resulting text blocks carry ("ref" for
+// inline-UUID resolution, "reply-attached" for the reply-context
+// expander), so cortex reads the same syntax in two cases and
+// distinguishes provenance. Unknown / foreign ids are skipped
+// silently — caller has already done a tenancy check via Get.
+func (g *Gateway) attachmentBlocksByIDs(ctx context.Context, us *UserState, ids []uuid.UUID, labelPrefix string) []bs.ContentBlock {
+	if g.deps.AttachmentSink == nil || us.UserID == uuid.Nil || us.SoulID == uuid.Nil {
+		return nil
+	}
+	out := make([]bs.ContentBlock, 0, len(ids))
+	for _, id := range ids {
 		rec, data, err := g.deps.AttachmentSink.Get(ctx, us.UserID, us.SoulID, id)
 		if err != nil {
-			// Foreign or unknown UUID — leave silently; the user
-			// might have meant something else entirely.
-			g.logger.Debug("inline attachment ref: not resolved",
+			g.logger.Debug("attachment block: not resolved",
 				"chat_id", us.ChatID, "id", id, "err", err)
 			continue
 		}
@@ -877,7 +896,7 @@ func (g *Gateway) resolveInlineAttachmentRefs(ctx context.Context, us *UserState
 			if media == "" {
 				media = "image/jpeg"
 			}
-			blocks = append(blocks, bs.ContentBlock{
+			out = append(out, bs.ContentBlock{
 				Type: "image",
 				Source: &bs.ImageSource{
 					Type:      "base64",
@@ -886,37 +905,37 @@ func (g *Gateway) resolveInlineAttachmentRefs(ctx context.Context, us *UserState
 				},
 			})
 		case "pdf":
-			// Prefer the host-supplied source (markdown for
-			// host-generated PDFs) over re-extracting from the
-			// rendered bytes — chromedp font subsets aren't
-			// readable by ledongthuc/pdf and produce mojibake.
+			// Prefer the host-supplied source (markdown for host-
+			// generated PDFs) over re-extracting from the rendered
+			// bytes — chromedp font subsets aren't readable by
+			// ledongthuc/pdf and produce mojibake.
 			if rec.SourceText != "" {
-				blocks = append(blocks, bs.ContentBlock{
+				out = append(out, bs.ContentBlock{
 					Type: "text",
-					Text: fmt.Sprintf("[ref: %s — pdf, markdown source]\n%s", rec.Name, rec.SourceText),
+					Text: fmt.Sprintf("[%s: %s — pdf, markdown source]\n%s", labelPrefix, rec.Name, rec.SourceText),
 				})
 				continue
 			}
 			text, _, perr := browser.ExtractPDFText(data)
 			if perr != nil {
-				blocks = append(blocks, bs.ContentBlock{
+				out = append(out, bs.ContentBlock{
 					Type: "text",
-					Text: fmt.Sprintf("[ref: %s — pdf extract failed: %v]", rec.Name, perr),
+					Text: fmt.Sprintf("[%s: %s — pdf extract failed: %v]", labelPrefix, rec.Name, perr),
 				})
 				continue
 			}
-			blocks = append(blocks, bs.ContentBlock{
+			out = append(out, bs.ContentBlock{
 				Type: "text",
-				Text: fmt.Sprintf("[ref: %s — pdf]\n%s", rec.Name, text),
+				Text: fmt.Sprintf("[%s: %s — pdf]\n%s", labelPrefix, rec.Name, text),
 			})
 		case "text":
-			blocks = append(blocks, bs.ContentBlock{
+			out = append(out, bs.ContentBlock{
 				Type: "text",
-				Text: fmt.Sprintf("[ref: %s]\n```\n%s\n```", rec.Name, string(data)),
+				Text: fmt.Sprintf("[%s: %s]\n```\n%s\n```", labelPrefix, rec.Name, string(data)),
 			})
 		}
 	}
-	return blocks
+	return out
 }
 
 // attachMarkerRE matches the `[attached: UUID]` sentinel the
@@ -1530,6 +1549,35 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// UUIDs (foreign id, plain UUIDs the user happens to mention)
 	// are silently passed through.
 	blocks = g.resolveInlineAttachmentRefs(ctx, us, blocks)
+
+	// Reply-parent attachment expansion (cabinet path only — the
+	// frontend hands us a uuid for replyToMessageID before session
+	// creation). When the user replies to an older message that
+	// carried images / files, pull those parent attachments back
+	// into the current turn so cortex can see them, not just the
+	// inline `[reply to:…snippet…]` prefix. Telegram replies take
+	// a separate code path (replyToTGMessageID needs a session-id
+	// lookup) and aren't covered here yet.
+	if g.deps.AttachmentSink != nil && len(msgs) > 0 && msgs[0].replyToMessageID != "" {
+		parentID, perr := uuid.Parse(msgs[0].replyToMessageID)
+		if perr == nil {
+			attIDs, lerr := g.deps.AttachmentSink.ListForMessage(ctx, us.UserID, us.SoulID, parentID)
+			if lerr != nil {
+				g.logger.Warn("reply-attachments: list failed",
+					"chat_id", us.ChatID, "parent_id", parentID, "err", lerr)
+			} else if len(attIDs) > 0 {
+				parentBlocks := g.attachmentBlocksByIDs(ctx, us, attIDs, "reply-attached")
+				if len(parentBlocks) > 0 {
+					// Prepend so the parent's files arrive before the
+					// user's typed text — cortex parses the context
+					// "this file ← my reply about it" in order.
+					blocks = append(parentBlocks, blocks...)
+					g.logger.Info("reply-attachments: inlined parent files",
+						"chat_id", us.ChatID, "parent_id", parentID, "count", len(parentBlocks))
+				}
+			}
+		}
+	}
 
 	var content any
 	var msgText string
