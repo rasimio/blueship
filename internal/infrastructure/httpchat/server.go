@@ -11,16 +11,20 @@ package httpchat
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/rasimio/blueship/attachment"
 	bs "github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/internal/browser"
 	"github.com/rasimio/blueship/internal/gateway"
 )
 
@@ -93,9 +97,32 @@ func (s *Server) requireBearer(next http.Handler) http.Handler {
 }
 
 type chatRequest struct {
-	UserID string `json:"user_id"`
-	SoulID string `json:"soul_id"`
-	Text   string `json:"text"`
+	UserID      string           `json:"user_id"`
+	SoulID      string           `json:"soul_id"`
+	Text        string           `json:"text"`
+	Attachments []chatAttachment `json:"attachments,omitempty"`
+}
+
+// chatAttachment is one file attached to a cabinet message. The caller
+// (vaelum backend) classifies kind from the source MimeType + filename
+// so the daemon can route images to the vision content path and
+// text/PDF docs to the in-prompt text inline path, matching how the
+// Telegram gateway handles the equivalent message shape.
+type chatAttachment struct {
+	// Kind is "image" | "pdf" | "text". Unknown kinds are ignored —
+	// callers should pre-filter rather than dump unknown bytes at us.
+	Kind string `json:"kind"`
+	// MimeType for images is forwarded verbatim into the vision block;
+	// for PDFs/text it's diagnostic only.
+	MimeType string `json:"mime_type"`
+	// Name is the original filename, surfaced in the rendered text
+	// header ([file: x.go] / [pdf: y.pdf — N pages]) so the model can
+	// cite the source.
+	Name string `json:"name"`
+	// DataB64 is the raw bytes, base64-standard-encoded. Capped server
+	// side by the request body limit (we don't enforce a per-file cap
+	// beyond that — vaelum already rejects oversized uploads).
+	DataB64 string `json:"data_b64"`
 }
 
 type resetRequest struct {
@@ -158,9 +185,54 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid soul_id", http.StatusBadRequest)
 		return
 	}
-	if req.Text == "" {
-		http.Error(w, "empty text", http.StatusBadRequest)
+	if req.Text == "" && len(req.Attachments) == 0 {
+		http.Error(w, "empty message", http.StatusBadRequest)
 		return
+	}
+
+	text := req.Text
+	var images []bs.ContentBlock
+	for _, att := range req.Attachments {
+		data, derr := base64.StdEncoding.DecodeString(att.DataB64)
+		if derr != nil {
+			s.logger.Warn("httpchat: bad base64 attachment", "name", att.Name, "kind", att.Kind, "err", derr)
+			continue
+		}
+		switch att.Kind {
+		case "image":
+			// Rebuild media_type from the actual bytes — vaelum may
+			// forward a mistyped MIME (octet-stream from a renamed
+			// upload, etc), and Anthropic's vision API rejects
+			// requests where declared media_type and bytes disagree.
+			media := attachment.MimeForImage(data)
+			if media == "" {
+				s.logger.Warn("httpchat: image kind but no signature match", "name", att.Name)
+				continue
+			}
+			images = append(images, bs.ContentBlock{
+				Type: "image",
+				Source: &bs.ImageSource{
+					Type:      "base64",
+					MediaType: media,
+					Data:      att.DataB64,
+				},
+			})
+		case "pdf":
+			pdfText, pages, perr := browser.ExtractPDFText(data)
+			if perr != nil {
+				s.logger.Warn("httpchat: pdf extract failed", "name", att.Name, "size", len(data), "err", perr)
+				text = appendInlineFile(text, fmt.Sprintf("[pdf: %s — extraction failed: %v]", att.Name, perr))
+			} else {
+				text = appendInlineFile(text, fmt.Sprintf("[pdf: %s — %d pages]%s", att.Name, pages, pdfText))
+			}
+		case "text":
+			// Mirror Telegram's text-doc inlining: fenced code block keeps the
+			// model honest about where the file starts and ends, the filename
+			// gives it something to cite.
+			text = appendInlineFile(text, fmt.Sprintf("[file: %s]\n```\n%s\n```", att.Name, strings.ReplaceAll(string(data), "\r\n", "\n")))
+		default:
+			s.logger.Warn("httpchat: unknown attachment kind", "kind", att.Kind, "name", att.Name)
+		}
 	}
 
 	flusher, ok := w.(http.Flusher)
@@ -187,11 +259,22 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	go sink.keepAlive(keepAliveCtx, 10*time.Second)
 
 	if err := s.gw.ProcessInboundForUser(r.Context(), userID, soulID, "vaelum",
-		[]bs.InboundMessage{{Text: req.Text}}, sink); err != nil {
+		[]bs.InboundMessage{{Text: text, Images: images}}, sink); err != nil {
 		s.logger.Warn("httpchat: process error", "error", err)
 		sink.event("error", err.Error())
 	}
 	sink.event("done", "")
+}
+
+// appendInlineFile glues an attached text/PDF rendering onto whatever
+// the user typed, separating with a blank line so the model sees two
+// distinct passages rather than a wall of text. Empty existing text
+// (image-only or doc-only turn) skips the leading newlines.
+func appendInlineFile(existing, addition string) string {
+	if existing == "" {
+		return addition
+	}
+	return existing + "\n\n" + addition
 }
 
 // sseSink implements bs.ResponseSink plus the streaming sub-interfaces

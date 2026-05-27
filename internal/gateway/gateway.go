@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rasimio/blueship/agent"
+	"github.com/rasimio/blueship/attachment"
 	bs "github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/browser"
 	"github.com/rasimio/blueship/internal/openai"
@@ -555,45 +556,57 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		text = msg.Caption
 	}
 
-	if msg.Document != nil && isTextFile(msg.Document) {
-		content, err := bi.client.DownloadFile(ctx, msg.Document.FileID, 512*1024)
+	// Document attachments — single ingest path through the shared
+	// content-based classifier (blueship/attachment.Kind). Downloads
+	// up to the cross-kind max, then dispatches by sniffed kind so
+	// an image-as-document (e.g. PNG sent uncompressed) lands in the
+	// vision lane, a renamed PDF still reaches the extractor, and
+	// any UTF-8 text — including languages the old whitelist missed
+	// (.cpp, .rs, .kt, Dockerfile, files without extensions) — gets
+	// inlined as a fenced block.
+	var docImage *bs.ContentBlock
+	if msg.Document != nil {
+		data, err := bi.client.DownloadFile(ctx, msg.Document.FileID, attachment.MaxAnyBytes)
 		if err != nil {
-			g.logger.Warn("failed to download file", "error", err, "file", msg.Document.FileName)
+			g.logger.Warn("failed to download document", "error", err, "file", msg.Document.FileName)
 		} else {
-			fileText := fmt.Sprintf("[file: %s]\n```\n%s\n```", msg.Document.FileName, string(content))
-			if text != "" {
-				text = text + "\n\n" + fileText
+			kind := attachment.Kind(msg.Document.MimeType, msg.Document.FileName, data)
+			if cap := attachment.MaxBytesForKind(kind); cap > 0 && int64(len(data)) > cap {
+				g.logger.Warn("document over kind cap", "file", msg.Document.FileName, "kind", kind, "size", len(data), "cap", cap)
+				text = appendDocInline(text, fmt.Sprintf("[file: %s — too large (%d bytes; %s cap is %d)]", msg.Document.FileName, len(data), kind, cap))
 			} else {
-				text = fileText
-			}
-		}
-	}
-
-	// PDF attachments — extract text via the same pure-Go decoder
-	// browser_fetch uses for web-found PDFs. The file lands in the
-	// turn as `[pdf: filename.pdf]\n--- Page 1 ---\n…` so cortex can
-	// reason over the contents and cite by page. Limit matches
-	// browser.PDFMaxBytes so a giant scan can't blow memory.
-	if msg.Document != nil && isPDFDocument(msg.Document) {
-		content, err := bi.client.DownloadFile(ctx, msg.Document.FileID, browser.PDFMaxBytes)
-		if err != nil {
-			g.logger.Warn("failed to download pdf", "error", err, "file", msg.Document.FileName)
-		} else if pdfText, pages, err := browser.ExtractPDFText(content); err != nil {
-			g.logger.Warn("failed to extract pdf text", "error", err, "file", msg.Document.FileName, "size", len(content))
-			// Surface the failure to cortex so it can ask the user for a
-			// different file rather than silently "reading" nothing.
-			fileText := fmt.Sprintf("[pdf: %s — extraction failed: %v]", msg.Document.FileName, err)
-			if text != "" {
-				text = text + "\n\n" + fileText
-			} else {
-				text = fileText
-			}
-		} else {
-			fileText := fmt.Sprintf("[pdf: %s — %d pages]%s", msg.Document.FileName, pages, pdfText)
-			if text != "" {
-				text = text + "\n\n" + fileText
-			} else {
-				text = fileText
+				switch kind {
+				case "image":
+					// Always source media_type from the bytes; a renamed
+					// PNG sent as a Document arrives with a stale or
+					// missing MIME header, and Anthropic vision refuses
+					// requests where declared media_type disagrees with
+					// the bytes.
+					media := attachment.MimeForImage(data)
+					if media == "" {
+						g.logger.Warn("document classified as image but no signature match", "file", msg.Document.FileName)
+						break
+					}
+					docImage = &bs.ContentBlock{
+						Type: "image",
+						Source: &bs.ImageSource{
+							Type:      "base64",
+							MediaType: media,
+							Data:      base64.StdEncoding.EncodeToString(data),
+						},
+					}
+				case "pdf":
+					if pdfText, pages, perr := browser.ExtractPDFText(data); perr != nil {
+						g.logger.Warn("failed to extract pdf text", "error", perr, "file", msg.Document.FileName, "size", len(data))
+						text = appendDocInline(text, fmt.Sprintf("[pdf: %s — extraction failed: %v]", msg.Document.FileName, perr))
+					} else {
+						text = appendDocInline(text, fmt.Sprintf("[pdf: %s — %d pages]%s", msg.Document.FileName, pages, pdfText))
+					}
+				case "text":
+					text = appendDocInline(text, fmt.Sprintf("[file: %s]\n```\n%s\n```", msg.Document.FileName, strings.ReplaceAll(string(data), "\r\n", "\n")))
+				default:
+					g.logger.Info("ignoring unsupported document", "file", msg.Document.FileName, "mime", msg.Document.MimeType)
+				}
 			}
 		}
 	}
@@ -617,9 +630,12 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	}
 
 	var images []bs.ContentBlock
+	if docImage != nil {
+		images = append(images, *docImage)
+	}
 	if len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1] // largest resolution
-		data, err := bi.client.DownloadFile(ctx, photo.FileID, 5*1024*1024)
+		data, err := bi.client.DownloadFile(ctx, photo.FileID, attachment.MaxImageBytes)
 		if err != nil {
 			g.logger.Warn("failed to download photo", "error", err, "file_id", photo.FileID)
 		} else {
@@ -760,48 +776,33 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	})
 }
 
-// isPDFDocument identifies Telegram document attachments that should
-// be routed through the PDF text extractor. Trusts mime type when set
-// to application/pdf; falls back to filename extension because Telegram
-// clients don't always populate mime_type for forwarded files.
-func isPDFDocument(doc *telegram.Document) bool {
-	if doc == nil || doc.FileID == "" {
+// hasImageContent reports whether a user-message payload carries at
+// least one image content block. Used by runInteraction to decide
+// whether to skip the text-only reflex tier and go straight to a
+// vision-capable cortex. Anything that isn't a []bs.ContentBlock (plain
+// text strings, etc.) is treated as "no image".
+func hasImageContent(content any) bool {
+	blocks, ok := content.([]bs.ContentBlock)
+	if !ok {
 		return false
 	}
-	if strings.HasPrefix(strings.ToLower(doc.MimeType), "application/pdf") {
-		return true
-	}
-	if strings.HasSuffix(strings.ToLower(doc.FileName), ".pdf") {
-		return true
-	}
-	return false
-}
-
-func isTextFile(doc *telegram.Document) bool {
-	if doc == nil || doc.FileID == "" {
-		return false
-	}
-	mime := doc.MimeType
-	if strings.HasPrefix(mime, "text/") {
-		return true
-	}
-	switch mime {
-	case "application/json", "application/xml", "application/javascript",
-		"application/x-yaml", "application/yaml", "application/toml",
-		"application/x-sh", "application/sql", "application/csv":
-		return true
-	}
-	name := strings.ToLower(doc.FileName)
-	for _, ext := range []string{
-		".txt", ".md", ".json", ".yaml", ".yml", ".toml", ".xml",
-		".csv", ".sql", ".sh", ".py", ".go", ".js", ".ts", ".html",
-		".css", ".log", ".env", ".cfg", ".conf", ".ini", ".properties",
-	} {
-		if strings.HasSuffix(name, ext) {
+	for _, b := range blocks {
+		if b.Type == "image" {
 			return true
 		}
 	}
 	return false
+}
+
+// appendDocInline glues an attached document rendering onto whatever
+// the user typed, separating with a blank line so the model sees two
+// distinct passages rather than a wall of text. Empty existing text
+// (a doc-only turn) skips the leading newlines.
+func appendDocInline(existing, addition string) string {
+	if existing == "" {
+		return addition
+	}
+	return existing + "\n\n" + addition
 }
 
 // getOrInitUser builds UserState for non-Telegram entry points
@@ -2496,6 +2497,25 @@ func (g *Gateway) runInteraction(
 		}
 		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
 		return reply, traces, false, err
+	}
+
+	// Image bypass: the reflex tier runs a text-only provider (openai-codex
+	// gpt-5.5 in production), whose request serializer silently drops
+	// `image` content blocks. With nothing to ground its answer on, reflex
+	// either hallucinates a description or answers the caption alone and
+	// never escalates — so the vision-capable cortex (claude-opus-4-7)
+	// never sees the bytes. Skip the fast tier when any image is attached
+	// and go straight to cortex with the full content, including its
+	// base64 image blocks. Persist the user turn once, exactly the
+	// interaction-tier append-once pattern below.
+	if hasImageContent(content) {
+		if err = g.store.Append(ctx, cortexCfg.SessionID, bs.Message{Role: "user", Content: content}); err != nil {
+			return "", nil, false, fmt.Errorf("interaction: append user message (image bypass): %w", err)
+		}
+		cortexCfg.SkipUserAppend = true
+		g.logger.Info("interaction: image content present, bypassing reflex tier", "session_id", cortexCfg.SessionID)
+		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
+		return reply, traces, true, err
 	}
 
 	// Derive the Reflex (interaction-tier) config from the Cortex config:
