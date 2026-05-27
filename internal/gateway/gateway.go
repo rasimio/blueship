@@ -563,8 +563,12 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	// vision lane, a renamed PDF still reaches the extractor, and
 	// any UTF-8 text — including languages the old whitelist missed
 	// (.cpp, .rs, .kt, Dockerfile, files without extensions) — gets
-	// inlined as a fenced block.
+	// inlined as a fenced block. Raw bytes also accumulate in
+	// rawAttachments so processMessages can hand them off to the
+	// AttachmentSink — that's what makes Telegram-originated files
+	// show up as chips in the cabinet on reload.
 	var docImage *bs.ContentBlock
+	var rawAttachments []rawAttachment
 	if msg.Document != nil {
 		data, err := bi.client.DownloadFile(ctx, msg.Document.FileID, attachment.MaxAnyBytes)
 		if err != nil {
@@ -595,6 +599,9 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 							Data:      base64.StdEncoding.EncodeToString(data),
 						},
 					}
+					rawAttachments = append(rawAttachments, rawAttachment{
+						name: msg.Document.FileName, mime: media, kind: "image", data: data,
+					})
 				case "pdf":
 					if pdfText, pages, perr := browser.ExtractPDFText(data); perr != nil {
 						g.logger.Warn("failed to extract pdf text", "error", perr, "file", msg.Document.FileName, "size", len(data))
@@ -602,8 +609,18 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 					} else {
 						text = appendDocInline(text, fmt.Sprintf("[pdf: %s — %d pages]%s", msg.Document.FileName, pages, pdfText))
 					}
+					rawAttachments = append(rawAttachments, rawAttachment{
+						name: msg.Document.FileName, mime: "application/pdf", kind: "pdf", data: data,
+					})
 				case "text":
 					text = appendDocInline(text, fmt.Sprintf("[file: %s]\n```\n%s\n```", msg.Document.FileName, strings.ReplaceAll(string(data), "\r\n", "\n")))
+					mime := msg.Document.MimeType
+					if mime == "" {
+						mime = "text/plain"
+					}
+					rawAttachments = append(rawAttachments, rawAttachment{
+						name: msg.Document.FileName, mime: mime, kind: "text", data: data,
+					})
 				default:
 					g.logger.Info("ignoring unsupported document", "file", msg.Document.FileName, "mime", msg.Document.MimeType)
 				}
@@ -639,13 +656,33 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		if err != nil {
 			g.logger.Warn("failed to download photo", "error", err, "file_id", photo.FileID)
 		} else {
+			// Telegram clients re-encode photos as JPEG before
+			// upload — even a PNG sent through the photo lane
+			// arrives as image/jpeg. MimeForImage confirms from
+			// the bytes; on the rare miss, fall back to JPEG
+			// since that's what Telegram actually sent.
+			media := attachment.MimeForImage(data)
+			if media == "" {
+				media = "image/jpeg"
+			}
 			images = append(images, bs.ContentBlock{
 				Type: "image",
 				Source: &bs.ImageSource{
 					Type:      "base64",
-					MediaType: "image/jpeg",
+					MediaType: media,
 					Data:      base64.StdEncoding.EncodeToString(data),
 				},
+			})
+			// Telegram photos have no filename. Pick a stable one
+			// derived from the file id so the cabinet chip has
+			// something to render and downloads land with a
+			// reasonable name.
+			name := "telegram-photo"
+			if photo.FileID != "" {
+				name = "tg-" + photo.FileID + ".jpg"
+			}
+			rawAttachments = append(rawAttachments, rawAttachment{
+				name: name, mime: media, kind: "image", data: data,
 			})
 		}
 	}
@@ -770,9 +807,10 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	}
 
 	us.debounce.Add(pendingMsg{
-		text:      text,
-		images:    images,
-		messageID: msg.MessageID,
+		text:           text,
+		images:         images,
+		messageID:      msg.MessageID,
+		rawAttachments: rawAttachments,
 	})
 }
 
@@ -1313,6 +1351,40 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		"messages", len(msgs),
 		"blocks", len(blocks),
 	)
+
+	// Push raw attachment bytes to the host CDN once the session id
+	// is known. The cabinet history endpoint joins on session_id, so
+	// stamping here is what makes a Telegram-originated photo / PDF
+	// show up as a chip in the web UI. Failures are warn-and-continue
+	// — the LLM still has the bytes via chat_messages, the user just
+	// loses the cabinet chip.
+	if g.deps.AttachmentSink != nil {
+		sessID, perr := uuid.Parse(sess.ID)
+		if perr != nil {
+			g.logger.Warn("attachment sink: session id parse failed",
+				"session_id", sess.ID, "err", perr)
+		} else {
+			for _, m := range msgs {
+				for _, a := range m.rawAttachments {
+					if len(a.data) == 0 {
+						continue
+					}
+					if _, aerr := g.deps.AttachmentSink.Save(ctx, bs.AttachmentParams{
+						UserID:    us.UserID,
+						SoulID:    us.SoulID,
+						SessionID: sessID,
+						Name:      a.name,
+						Mime:      a.mime,
+						Kind:      a.kind,
+						Data:      a.data,
+					}); aerr != nil {
+						g.logger.Warn("attachment sink save failed",
+							"chat_id", us.ChatID, "name", a.name, "kind", a.kind, "err", aerr)
+					}
+				}
+			}
+		}
+	}
 
 	// Wire the session ID into a meta SSE frame so a vaelum-style relayer
 	// can begin attributing persisted tool_calls before any tool fires.
@@ -3153,6 +3225,24 @@ type pendingMsg struct {
 	text      string
 	images    []bs.ContentBlock
 	messageID int
+	// rawAttachments is the per-turn list of files we want to push
+	// into the host's CDN (vaelum.chat_attachments + disk store) once
+	// the session id is known. We keep the bytes here, not in the
+	// images slice, because images travel base64-encoded for the
+	// model and the sink needs raw bytes — decoding back would mean
+	// allocating twice. Empty on text-only turns.
+	rawAttachments []rawAttachment
+}
+
+// rawAttachment is one inbound file held by pendingMsg until the
+// debouncer flushes and the gateway has a session id to stamp it
+// with. Kind is the same lane vocabulary as elsewhere ("image" /
+// "pdf" / "text").
+type rawAttachment struct {
+	name string
+	mime string
+	kind string
+	data []byte
 }
 
 type debouncer struct {

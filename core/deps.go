@@ -131,6 +131,18 @@ type Deps struct {
 	// Runs non-blocking in background. Implementations handle their own DB, embeddings, emotions.
 	MessageEncoder func(ctx context.Context, userID, message string)
 
+	// AttachmentSink, when set, receives every file that lands on an
+	// inbound transport (Telegram photo, Telegram document, cabinet
+	// upload). The host implementation owns where the bytes live —
+	// typical wiring is a content-addressed disk store + a metadata
+	// row in vaelum.chat_attachments — so the cabinet's chat history
+	// can show a chip with a download link regardless of which
+	// transport originally produced the file. Nil leaves attachments
+	// transport-local: the LLM still sees them via chat_messages,
+	// but the cabinet won't surface a chip on reload for anything
+	// that didn't arrive through the cabinet's own /api/chat path.
+	AttachmentSink AttachmentSink
+
 	// TurnCompletedHook is called after the gateway finishes sending an
 	// assistant reply for a turn (both batch and streaming paths). The
 	// implementation receives the user UUID and session UUID and is
