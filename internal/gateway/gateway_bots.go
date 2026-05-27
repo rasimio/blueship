@@ -276,6 +276,43 @@ func (g *Gateway) telegramEnabled() bool {
 	return len(g.bots) > 0
 }
 
+// SendToUser delivers a free-form message to a platform user via the
+// Telegram bot they paired against (vaelum.bot_links → bot_id +
+// tg_chat_id). Returns nil if the user has no link (caller may fall
+// back to a different sink or skip silently). Returns the bot's send
+// error verbatim — including the dreaded 403 "Forbidden: bot was
+// blocked" so the agent-task scheduler can log it intelligibly.
+//
+// Used by scheduler.notify so agent-task replies (heartbeat, etc) go
+// through the SAME bot the user is talking to, not the legacy
+// cfg.Transport.BotToken — a Vaelum user who paired with @VaelumBot
+// must not receive proactive messages from the host owner's private
+// @ArleneKateBot (the user has never opened a chat with it).
+func (g *Gateway) SendToUser(ctx context.Context, userID uuid.UUID, text string) error {
+	db, err := g.deps.DB("ship")
+	if err != nil {
+		return fmt.Errorf("send to user: db unavailable: %w", err)
+	}
+	var row struct {
+		BotID    uuid.UUID `db:"bot_id"`
+		TGChatID int64     `db:"tg_chat_id"`
+	}
+	err = db.GetContext(ctx, &row,
+		`SELECT bot_id, tg_chat_id
+		   FROM vaelum.bot_links
+		  WHERE user_id = $1
+		  ORDER BY linked_at DESC
+		  LIMIT 1`, userID)
+	if err != nil {
+		return fmt.Errorf("send to user %s: no bot link: %w", userID, err)
+	}
+	bi := g.botByID(row.BotID)
+	if bi == nil {
+		return fmt.Errorf("send to user %s: bot %s not loaded", userID, row.BotID)
+	}
+	return bi.client.SendLong(ctx, row.TGChatID, text)
+}
+
 // runReloadLoop reconciles the bot registry against the host's source
 // of truth on two triggers:
 //   - periodic: every cfg.Transport.Telegram.ReloadInterval (default

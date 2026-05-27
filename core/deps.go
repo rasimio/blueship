@@ -174,6 +174,17 @@ type Deps struct {
 	// InitDeps time.
 	ResolveTelegramChat func(ctx context.Context, botID uuid.UUID, tgChatID int64) (userID, soulID uuid.UUID, err error)
 
+	// SendToUser is a per-user Telegram sender that picks the right
+	// bot from vaelum.bot_links (multi-bot host pattern). Wired by
+	// ship.go after the Gateway is built so the agent-task scheduler
+	// can deliver heartbeat/inner-thought Notify through the bot the
+	// user is actually talking to — not the legacy Transport.BotToken
+	// which is the host owner's private bot. Returns the underlying
+	// telegram-API error so callers can recognise 403 "Forbidden" etc.
+	// Nil = host hasn't set it up; caller must fall back to legacy
+	// deps.Sender.
+	SendToUser func(ctx context.Context, userID uuid.UUID, text string) error
+
 	pool *dbPool
 }
 
@@ -209,6 +220,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		AgentIterationCompletedHook: d.AgentIterationCompletedHook,
 		ResolveSoul:         d.ResolveSoul,
 		ResolveTelegramChat: d.ResolveTelegramChat,
+		SendToUser:          d.SendToUser,
 		pool:                d.pool,
 	}
 }

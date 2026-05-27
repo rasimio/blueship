@@ -297,7 +297,7 @@ func (s *Ship) Run(ctx context.Context) error {
 
 		// Notification callback: append to chat session (so cortex sees it) + send to Telegram.
 		var notifyFn func(ctx context.Context, userID uuid.UUID, text string)
-		if deps.Sender != nil && deps.Users != nil {
+		if deps.Users != nil {
 			notifyFn = func(ctx context.Context, userID uuid.UUID, text string) {
 				profile, err := deps.Users.GetByID(ctx, userID.String())
 				if err != nil {
@@ -317,13 +317,26 @@ func (s *Ship) Run(ctx context.Context) error {
 					})
 				}
 
-				// Send to Telegram.
-				chatID := profile.ChatID
-				if idx := strings.Index(chatID, ":"); idx >= 0 {
-					chatID = chatID[idx+1:]
-				}
-				if err := deps.Sender.SendLong(ctx, chatID, text); err != nil {
-					s.logger.Warn("agent-tasks: notify failed", "error", err)
+				// Send to Telegram. Prefer the per-user multi-bot
+				// sender wired by the gateway — it reads the user's
+				// actual paired bot from vaelum.bot_links and sends
+				// through it. Without this the legacy Transport.BotToken
+				// (host owner's private bot) was used for everyone,
+				// which surfaces as "403 Forbidden: bot was blocked"
+				// for every platform user who never opened that bot
+				// (they paired with @VaelumBot, not @ArleneKateBot).
+				if deps.SendToUser != nil {
+					if err := deps.SendToUser(ctx, userID, text); err != nil {
+						s.logger.Warn("agent-tasks: notify failed", "error", err)
+					}
+				} else if deps.Sender != nil {
+					chatID := profile.ChatID
+					if idx := strings.Index(chatID, ":"); idx >= 0 {
+						chatID = chatID[idx+1:]
+					}
+					if err := deps.Sender.SendLong(ctx, chatID, text); err != nil {
+						s.logger.Warn("agent-tasks: notify failed", "error", err)
+					}
 				}
 			}
 		}
@@ -389,6 +402,10 @@ func (s *Ship) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("create gateway: %w", err)
 		}
+		// Wire the gateway's per-user/per-bot sender so the agent-task
+		// scheduler can deliver Notify via the SAME bot the user paired
+		// with, instead of the legacy single-bot Transport.BotToken.
+		deps.SendToUser = gw.SendToUser
 	}
 
 	// 5a. Telegram fan-in — populated by ReloadBots from the host's
