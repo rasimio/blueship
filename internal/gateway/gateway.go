@@ -815,6 +815,96 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	})
 }
 
+// uuidInTextRE matches any plausible attachment UUID inside user
+// text — used by resolveInlineAttachmentRefs so a user can paste an
+// id ("прочти abc-…", "что на картинке abc-…") and the gateway
+// inlines the file as if it had been attached natively. The pattern
+// is the standard 8-4-4-4-12 hex shape; tenant-scoped lookups in
+// Sink.Get drop the rare false positive (a random UUID the user
+// mentioned for unrelated reasons) without leaking anything.
+var uuidInTextRE = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
+
+// resolveInlineAttachmentRefs scans text blocks in the user's turn
+// for attachment UUIDs, resolves each via the host's AttachmentSink,
+// and appends the resulting content as additional blocks (image for
+// kind=image, fenced text for kind=pdf/text). The triggering text
+// itself stays in place so the model can still understand the
+// user's question ("что на картинке UUID" reads naturally with the
+// image attached). De-dups by id so a UUID mentioned twice doesn't
+// produce two copies of the file.
+func (g *Gateway) resolveInlineAttachmentRefs(ctx context.Context, us *UserState, blocks []bs.ContentBlock) []bs.ContentBlock {
+	if g.deps.AttachmentSink == nil || us.UserID == uuid.Nil || us.SoulID == uuid.Nil {
+		return blocks
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, b := range blocks {
+		if b.Type != "text" || b.Text == "" {
+			continue
+		}
+		matches := uuidInTextRE.FindAllString(b.Text, -1)
+		for _, m := range matches {
+			id, perr := uuid.Parse(strings.ToLower(m))
+			if perr != nil || seen[id] {
+				continue
+			}
+			seen[id] = true
+		}
+	}
+	if len(seen) == 0 {
+		return blocks
+	}
+
+	for id := range seen {
+		rec, data, err := g.deps.AttachmentSink.Get(ctx, us.UserID, us.SoulID, id)
+		if err != nil {
+			// Foreign or unknown UUID — leave silently; the user
+			// might have meant something else entirely.
+			g.logger.Debug("inline attachment ref: not resolved",
+				"chat_id", us.ChatID, "id", id, "err", err)
+			continue
+		}
+		if rec == nil || len(data) == 0 {
+			continue
+		}
+		switch rec.Kind {
+		case "image":
+			media := rec.Mime
+			if media == "" {
+				media = "image/jpeg"
+			}
+			blocks = append(blocks, bs.ContentBlock{
+				Type: "image",
+				Source: &bs.ImageSource{
+					Type:      "base64",
+					MediaType: media,
+					Data:      base64.StdEncoding.EncodeToString(data),
+				},
+			})
+		case "pdf":
+			// Inline a small note + the extracted text; cortex sees
+			// it the same way it sees a fresh PDF upload.
+			text, _, perr := browser.ExtractPDFText(data)
+			if perr != nil {
+				blocks = append(blocks, bs.ContentBlock{
+					Type: "text",
+					Text: fmt.Sprintf("[ref: %s — pdf extract failed: %v]", rec.Name, perr),
+				})
+				continue
+			}
+			blocks = append(blocks, bs.ContentBlock{
+				Type: "text",
+				Text: fmt.Sprintf("[ref: %s — pdf]\n%s", rec.Name, text),
+			})
+		case "text":
+			blocks = append(blocks, bs.ContentBlock{
+				Type: "text",
+				Text: fmt.Sprintf("[ref: %s]\n```\n%s\n```", rec.Name, string(data)),
+			})
+		}
+	}
+	return blocks
+}
+
 // attachMarkerRE matches the `[attached: UUID]` sentinel the
 // attachment_include tool emits. The gateway's post-loop dispatcher
 // (dispatchAttachmentMarkers) rewrites these into transport-native
@@ -1412,6 +1502,16 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			blocks = append(blocks, bs.ContentBlock{Type: "text", Text: m.text})
 		}
 	}
+
+	// Attachment-reference resolution: if the user pasted an
+	// attachment UUID into their message ("прочти файл abc-…", "что
+	// на картинке abc-…"), look it up via the host's AttachmentSink
+	// and inline the bytes — image as a vision block, pdf/text as a
+	// fenced inline. Cortex then sees the file as if the user had
+	// just attached it, no tool roundtrip required. Non-matching
+	// UUIDs (foreign id, plain UUIDs the user happens to mention)
+	// are silently passed through.
+	blocks = g.resolveInlineAttachmentRefs(ctx, us, blocks)
 
 	var content any
 	var msgText string
