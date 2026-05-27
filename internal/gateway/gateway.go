@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -812,6 +813,103 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		messageID:      msg.MessageID,
 		rawAttachments: rawAttachments,
 	})
+}
+
+// attachMarkerRE matches the `[attached: UUID]` sentinel the
+// attachment_include tool emits. The gateway's post-loop dispatcher
+// (dispatchAttachmentMarkers) rewrites these into transport-native
+// file sends — for Telegram, a SendPhoto / SendDocument per marker;
+// for the cabinet, the marker stays in the text and the history
+// endpoint resolves it into an attachment MessagePart at read time.
+var attachMarkerRE = regexp.MustCompile(`(?i)\[attached:\s*([0-9a-f-]{36})\s*\]`)
+
+// dispatchAttachmentMarkers walks the assistant's reply text, looks
+// up every `[attached: UUID]` reference against the host's
+// AttachmentSink, and either:
+//
+//   - ships the bytes out the current sink (when the sink implements
+//     AttachmentSendSink — Telegram does), then strips the marker
+//     from the text so the user doesn't see the raw sentinel;
+//   - leaves the marker in place when the sink can't send files
+//     directly (cabinet's SSE sink) — vaelum's history endpoint
+//     parses the marker on read and emits an attachment chip.
+//
+// Unknown / foreign UUIDs are stripped silently so a hallucinated
+// marker doesn't leak a sentinel into chat. Sink errors are warn-
+// logged but don't fail the turn — the text reply still goes out.
+func (g *Gateway) dispatchAttachmentMarkers(ctx context.Context, us *UserState, sink bs.ResponseSink, reply string) string {
+	if reply == "" || g.deps.AttachmentSink == nil {
+		return reply
+	}
+	matches := attachMarkerRE.FindAllStringSubmatchIndex(reply, -1)
+	if len(matches) == 0 {
+		return reply
+	}
+	sender, sendable := sink.(bs.AttachmentSendSink)
+	if !sendable {
+		// Cabinet path: keep markers, history endpoint will resolve.
+		return reply
+	}
+
+	// Collect ids we need (de-duped) so a marker repeated twice
+	// doesn't double-send.
+	seen := map[uuid.UUID]bool{}
+	var ids []uuid.UUID
+	for _, m := range matches {
+		idStr := strings.ToLower(reply[m[2]:m[3]])
+		id, perr := uuid.Parse(idStr)
+		if perr != nil {
+			continue
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+
+	for _, id := range ids {
+		rec, data, err := g.deps.AttachmentSink.Get(ctx, us.UserID, us.SoulID, id)
+		if err != nil {
+			g.logger.Warn("attachment marker: resolve failed",
+				"chat_id", us.ChatID, "id", id, "err", err)
+			continue
+		}
+		if rec == nil {
+			continue
+		}
+		if err := sender.SendAttachment(ctx, *rec, data); err != nil {
+			g.logger.Warn("attachment marker: send failed",
+				"chat_id", us.ChatID, "id", id, "err", err)
+		}
+	}
+
+	cleaned := attachMarkerRE.ReplaceAllString(reply, "")
+	// Collapse the blank lines a stripped sentinel leaves behind so
+	// the message text reads naturally on the user's side.
+	return collapseBlankLinesGateway(cleaned)
+}
+
+// collapseBlankLinesGateway is the gateway-local copy of the same
+// helper vaelum's buildParts uses; lives here so the gateway doesn't
+// take a vaelum-side import.
+func collapseBlankLinesGateway(s string) string {
+	lines := strings.Split(s, "\n")
+	out := lines[:0]
+	blank := 0
+	for _, ln := range lines {
+		ln = strings.TrimRight(ln, " \t\r")
+		if ln == "" {
+			blank++
+			if blank > 1 {
+				continue
+			}
+		} else {
+			blank = 0
+		}
+		out = append(out, ln)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
 // hasHeavyContent reports whether a user-message payload is unsuited
@@ -1791,6 +1889,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			return
 		}
 		reply = sanitizeLeakedToolCalls(reply)
+		reply = g.dispatchAttachmentMarkers(ctx, us, sink, reply)
 		// Emit a follow-up meta frame with the assistant message_id so the
 		// SSE relayer can link any persisted tool_calls back to that turn.
 		// Only when both sink + store support it; safe to skip otherwise.
@@ -1907,6 +2006,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	reply = sanitizeLeakedToolCalls(reply)
+	reply = g.dispatchAttachmentMarkers(ctx, us, sink, reply)
 	if reply == "" {
 		return
 	}
@@ -2141,6 +2241,26 @@ func (s *telegramSink) SendTyping(ctx context.Context) error {
 		return nil
 	}
 	return s.client.SendChatAction(ctx, s.chatID, "typing")
+}
+
+// SendAttachment implements bs.AttachmentSendSink. Routes by kind:
+// images go through SendPhoto so TG renders the gallery preview,
+// PDFs and text-shaped docs go through SendDocument so the chat
+// shows a file icon with the filename. Unknown kinds fall back to
+// SendDocument — a download is always better than nothing.
+func (s *telegramSink) SendAttachment(ctx context.Context, rec bs.AttachmentRecord, data []byte) error {
+	if s.client == nil {
+		return fmt.Errorf("telegramSink.SendAttachment: no telegram client (chat %d)", s.chatID)
+	}
+	chatID := fmt.Sprintf("%d", s.chatID)
+	name := rec.Name
+	if name == "" {
+		name = "file"
+	}
+	if rec.Kind == "image" {
+		return s.client.SendPhoto(ctx, chatID, name, rec.Mime, data, "")
+	}
+	return s.client.SendDocument(ctx, chatID, name, rec.Mime, data)
 }
 
 // tgChatID extracts int64 from canonical "telegram:NNN" string.

@@ -346,28 +346,66 @@ func (c *Client) SendVoice(ctx context.Context, chatID string, audio []byte) err
 	return nil
 }
 
-// SendDocument sends a file (bytes) as a Telegram document.
-func (c *Client) SendDocument(ctx context.Context, chatID string, filename string, data []byte) error {
+// SendDocument sends a file (bytes) as a Telegram document. mime is
+// the source Content-Type; empty defaults to application/octet-stream
+// so a renamed binary doesn't get rendered as text. The Telegram bot
+// API doesn't strictly require the form-field content type — it
+// sniffs from the bytes — but setting it correctly lets the
+// recipient client pick the right preview affordance.
+func (c *Client) SendDocument(ctx context.Context, chatID string, filename, mime string, data []byte) error {
+	return c.sendFile(ctx, chatID, "sendDocument", "document", filename, mime, data, nil)
+}
+
+// SendPhoto sends an image as a Telegram photo — gets the inline
+// gallery preview, swipe-to-zoom, etc., as opposed to the file-icon
+// affordance SendDocument produces. Falls back to SendDocument when
+// the image is too large for the photo endpoint (TG caps photos at
+// 10 MB whereas documents go to 50 MB) so a 12 MB PNG from the
+// cabinet still reaches the user. `caption` is optional; pass empty
+// for a bare photo send.
+func (c *Client) SendPhoto(ctx context.Context, chatID string, filename, mime string, data []byte, caption string) error {
+	if len(data) > 10*1024*1024 {
+		return c.SendDocument(ctx, chatID, filename, mime, data)
+	}
+	extra := map[string]string{}
+	if caption != "" {
+		extra["caption"] = caption
+	}
+	return c.sendFile(ctx, chatID, "sendPhoto", "photo", filename, mime, data, extra)
+}
+
+// sendFile is the multipart-upload core shared by SendDocument and
+// SendPhoto. method is the Telegram API method ("sendDocument" /
+// "sendPhoto"), field is the form-field name TG expects for the
+// payload ("document" / "photo"), and extra carries any non-binary
+// fields (e.g. caption).
+func (c *Client) sendFile(ctx context.Context, chatID, method, field, filename, mime string, data []byte, extra map[string]string) error {
 	if !c.IsConfigured() {
 		return fmt.Errorf("telegram bot not configured")
+	}
+	if mime == "" {
+		mime = "application/octet-stream"
 	}
 
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 	_ = w.WriteField("chat_id", chatID)
+	for k, v := range extra {
+		_ = w.WriteField(k, v)
+	}
 	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="document"; filename="%s"`, filename))
-	h.Set("Content-Type", "text/plain; charset=utf-8")
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, field, filename))
+	h.Set("Content-Type", mime)
 	part, err := w.CreatePart(h)
 	if err != nil {
 		return fmt.Errorf("create form file: %w", err)
 	}
 	if _, err := part.Write(data); err != nil {
-		return fmt.Errorf("write document: %w", err)
+		return fmt.Errorf("write %s: %w", field, err)
 	}
 	w.Close()
 
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendDocument", c.token)
+	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/%s", c.token, method)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, &body)
 	if err != nil {
 		return err
@@ -382,7 +420,7 @@ func (c *Client) SendDocument(ctx context.Context, chatID string, filename strin
 
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("sendDocument: status %d: %s", resp.StatusCode, string(errBody))
+		return fmt.Errorf("%s: status %d: %s", method, resp.StatusCode, string(errBody))
 	}
 	return nil
 }
