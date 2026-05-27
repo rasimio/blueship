@@ -142,6 +142,7 @@ func (s *Ship) Run(ctx context.Context) error {
 	deps.AgentIterationCompletedHook = s.cfg.Gateway.AgentIterationCompletedHook
 	deps.ResolveSoul = s.cfg.Gateway.ResolveSoul
 	deps.ResolveTelegramChat = s.cfg.Gateway.ResolveTelegramChat
+	deps.AttachmentSink = s.cfg.Gateway.AttachmentSink
 
 	// 2. Auto-migrate runtime tables
 	shipDB, err := deps.DB("ship")

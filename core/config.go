@@ -406,6 +406,13 @@ type GatewayConfig struct {
 	// errors are treated as transient and the message is dropped with a
 	// warning log.
 	ResolveTelegramChat func(ctx context.Context, botID uuid.UUID, tgChatID int64) (userID, soulID uuid.UUID, err error) `yaml:"-" json:"-"`
+
+	// AttachmentSink, when set, receives every photo / document a
+	// transport produces (Telegram, web cabinet uploads via the
+	// gateway path, …). Ship.Run propagates this into deps so the
+	// gateway can call it on every turn after the session id is
+	// known. Nil = no CDN, the LLM still sees the bytes inline.
+	AttachmentSink AttachmentSink `yaml:"-" json:"-"`
 }
 
 // ErrTelegramChatUnpaired signals "this Telegram chat is not linked to any
