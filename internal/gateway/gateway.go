@@ -473,6 +473,17 @@ func (g *Gateway) tryTelegramPairing(ctx context.Context, bi *botInstance, chatI
 		 ON CONFLICT (kind, value) DO NOTHING`,
 		userID, chatID)
 
+	// Promote the user's blueship.user_profiles.chat_id from the Vaelum
+	// placeholder (`vaelum:<uuid>`) to the real `telegram:<chat_id>` so
+	// the agent-task scheduler's notify path can deliver via Telegram.
+	// Without this, every Notify after pairing still hits a placeholder
+	// chat_id and Sender.SendLong fails. ON CONFLICT-style UPSERT keyed
+	// on id keeps this idempotent across re-pairing.
+	_, _ = db.ExecContext(ctx,
+		`UPDATE user_profiles SET chat_id = $2, updated_at = now()
+		 WHERE id = $1`,
+		userID, chatID)
+
 	_, _ = db.ExecContext(ctx,
 		`UPDATE vaelum.telegram_pairings SET consumed_at = now() WHERE id = $1`, pairingID)
 
