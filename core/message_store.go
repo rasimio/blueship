@@ -35,4 +35,11 @@ type MessageStore interface {
 	// gateway to wire the message ID into the meta SSE frame so vaelum can
 	// link persisted tool_calls back to the assistant turn that owns them.
 	LatestAssistantMessageID(ctx context.Context, sessionID string) (string, error)
+
+	// RecordLastInputTokens persists the most recent cortex input token
+	// count onto the session so the web cabinet can render the token-
+	// window chip immediately on page load (not only after the first
+	// live `usage` SSE frame). Called from the agent loop after every
+	// LLM call. No-op on empty sessionID.
+	RecordLastInputTokens(ctx context.Context, sessionID string, inputTokens int) error
 }

@@ -132,6 +132,23 @@ func (s *Store) ArchiveSession(ctx context.Context, sessionID string) error {
 	return s.Archive(ctx, sessionID)
 }
 
+// RecordLastInputTokens stamps the most recent cortex input_tokens onto
+// the session. Surfaced by /api/chat/history so the cabinet's token-
+// window chip has a value to show on page load. Satisfies core.MessageStore.
+func (s *Store) RecordLastInputTokens(ctx context.Context, sessionID string, inputTokens int) error {
+	if sessionID == "" || inputTokens <= 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE chat_sessions SET last_input_tokens = $1, updated_at = NOW() WHERE id = $2`,
+		inputTokens, sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("record last_input_tokens: %w", err)
+	}
+	return nil
+}
+
 // LatestAssistantMessageID returns the ID of the most recent assistant message
 // in the session, or "" if none exists. Satisfies core.MessageStore.
 func (s *Store) LatestAssistantMessageID(ctx context.Context, sessionID string) (string, error) {

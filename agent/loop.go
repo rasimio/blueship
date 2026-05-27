@@ -466,6 +466,16 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			cb.OnUsage(resp.Usage.InputTokens, resp.Usage.OutputTokens)
 		}
 
+		// Persist last input_tokens onto the session so /api/chat/history
+		// can serve it to the web cabinet on page load (before the first
+		// live `usage` SSE frame of the visit). Non-fatal on error —
+		// just means the chip starts empty until the next turn.
+		if resp.Usage.InputTokens > 0 {
+			if perr := a.store.RecordLastInputTokens(ctx, cfg.SessionID, resp.Usage.InputTokens); perr != nil {
+				a.logger.Warn("record last_input_tokens failed", "error", perr)
+			}
+		}
+
 		a.logger.Info("LLM response",
 			"stop_reason", resp.StopReason,
 			"input_tokens", resp.Usage.InputTokens,
