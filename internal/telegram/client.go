@@ -187,6 +187,31 @@ func (c *Client) EditMessageText(ctx context.Context, chatID int64, messageID in
 	return err
 }
 
+// EditMessageReplyMarkup replaces only the inline keyboard of an
+// existing message — leaves the text body untouched. Used by the
+// onboarding traits picker so each tap flips one button between
+// "[ ] trait" and "[✓] trait" without re-sending the whole message
+// (avoids chat clutter and keeps the same message_id for the next
+// tap). Passing nil/empty rows clears the keyboard, matching the
+// Telegram Bot API's editMessageReplyMarkup with an empty
+// inline_keyboard array.
+func (c *Client) EditMessageReplyMarkup(ctx context.Context, chatID int64, messageID int, rows [][]InlineKeyboardButton) error {
+	if !c.IsConfigured() {
+		return fmt.Errorf("telegram bot not configured")
+	}
+	payload := map[string]any{
+		"chat_id":    chatID,
+		"message_id": messageID,
+	}
+	if rows != nil {
+		payload["reply_markup"] = map[string]any{"inline_keyboard": rows}
+	} else {
+		payload["reply_markup"] = map[string]any{"inline_keyboard": []any{}}
+	}
+	_, err := c.postJSON(ctx, "editMessageReplyMarkup", payload)
+	return err
+}
+
 // AnswerCallbackQuery answers a callback query (removes loading spinner).
 func (c *Client) AnswerCallbackQuery(ctx context.Context, callbackID string) error {
 	if !c.IsConfigured() {

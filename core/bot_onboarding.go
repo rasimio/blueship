@@ -2,9 +2,18 @@ package core
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 )
+
+// ErrBotOnboardingAlreadyDone is the sentinel a CompleteOnboarding
+// implementation returns when the Telegram user already has a soul.
+// The gateway maps this to a polite "you already have an assistant"
+// terminal line and clears the FSM row, rather than retrying. Mirrors
+// the web onboarding.ErrAlreadyDone in spirit (different repo, same
+// shape) so the bot and the cabinet surface the same outcome.
+var ErrBotOnboardingAlreadyDone = errors.New("bot onboarding: user already has a soul")
 
 // BotOnboarding is the host-supplied hook that drives a fresh Telegram
 // user through account creation entirely inside the chat — a /start
@@ -47,7 +56,32 @@ type BotOnboarding interface {
 	// Returns the new user and soul ids so the caller can stash them on
 	// UserState and the cortex turn immediately resumes for the same
 	// inbound message — no re-pairing round trip.
+	//
+	// LEGACY (v1 preset flow): used by the original two-step "ask_name →
+	// pick preset" FSM. The four-step web-parity flow uses
+	// CompleteOnboarding instead; CreateAccount stays in the interface so
+	// older hosts that haven't migrated still build.
 	CreateAccount(ctx context.Context, in BotOnboardingAccount) (userID, soulID uuid.UUID, err error)
+
+	// CompleteOnboarding finalises the four-step web-parity FSM
+	// (name → voice → traits + description → confirm). The host
+	// implementation mints the user + identity + organisation, then
+	// hands the persona payload (voice_id, character_tags,
+	// character_description) to the same onboarding.UseCase.Complete the
+	// web wizard's POST /api/onboarding/complete invokes — so a bot-born
+	// tenant and a web-born tenant land in vaelum.souls with the same
+	// row shape.
+	//
+	// The host MUST also write vaelum.bot_links + the
+	// blueship.user_profiles mirror so subsequent inbound from this chat
+	// routes through ResolveTelegramChat without a re-pairing round trip
+	// (the gateway already does this once CreateAccount returns; the
+	// CompleteOnboarding path matches that behaviour).
+	//
+	// Returns the new (userID, soulID) so the gateway can drop any
+	// cached UserState before the next inbound resolves the fresh
+	// identity.
+	CompleteOnboarding(ctx context.Context, in BotOnboardingComplete) (userID, soulID uuid.UUID, err error)
 
 	// ClearState removes the FSM row after CreateAccount commits (or
 	// when the user aborts the flow). Idempotent: missing row is not an
@@ -86,4 +120,26 @@ type BotOnboardingAccount struct {
 	TGChatID   int64
 	Name       string // user-supplied display name; also used as soul name
 	SoulPreset string // "arlene_style" | "custom" (v1: both fall back to arlene_style)
+}
+
+// BotOnboardingComplete is the payload CompleteOnboarding needs to mint
+// a fresh tenant from the four-step web-parity FSM. Mirrors the
+// onboarding.Input shape the web wizard's POST /api/onboarding/complete
+// already speaks, plus the Telegram routing bits (BotID, TGUserID,
+// TGChatID) the host needs to write vaelum.bot_links so subsequent
+// inbound resolves the new (user, soul) without a re-pairing round trip.
+//
+// All four persona fields are forwarded verbatim to
+// onboarding.UseCase.Complete; the host MUST NOT silently mutate them
+// (no "fall back to default voice", no "drop empty description") —
+// validation happens upstream in the FSM dispatcher so the host stays a
+// simple write path.
+type BotOnboardingComplete struct {
+	BotID                uuid.UUID
+	TGUserID             int64
+	TGChatID             int64
+	Name                 string   // soul name (also used as display_name)
+	VoiceID              string   // one of "clear" | "warm" | "quiet"; never empty after FSM validation
+	CharacterTags        []string // up to 5 entries from the 16-trait palette
+	CharacterDescription string   // up to 400 chars, trimmed; may be empty
 }
