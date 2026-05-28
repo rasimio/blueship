@@ -654,6 +654,19 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	// 	return
 	// }
 
+	// Deep-link "Approve in bot" auth. The cabinet's "Login via
+	// Telegram App" button points at https://t.me/<bot>?start=login_<TOKEN>
+	// which Telegram delivers to us as /start login_<TOKEN>. We hand the
+	// token to the host's CompleteDeeplinkLogin, send the resulting
+	// confirmation/error line, and STOP — the cabinet's poll will pick
+	// up the approval next tick. Must run before maybeRunBotOnboarding
+	// because the FSM treats every /start as either welcome-back or the
+	// start of in-chat onboarding, neither of which makes sense for an
+	// auth-approval click.
+	if g.maybeRunDeeplinkLogin(ctx, bi, rawChatID, tgUserID, text) {
+		return
+	}
+
 	// Inline bot onboarding: when the host has wired Deps.BotOnboarding,
 	// intercept messages from chats with no vaelum.user_identities row
 	// and run the in-chat account-creation FSM. The hook checks pairing
