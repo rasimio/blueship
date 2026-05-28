@@ -276,12 +276,15 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 	routerModel := deps.Config.Models.Primary.ForRouter()
 	displayModel := deps.Config.Models.Primary.Name
+	var roleEffort, roleThinkingMode string
 	if deps.ModelStore != nil {
 		if m := deps.ModelStore.ForRouter(modelRole); m != "" {
 			routerModel = m
 		}
 		if ref := deps.ModelStore.Get(modelRole); ref.Name != "" {
 			displayModel = ref.Name
+			roleEffort = ref.Effort
+			roleThinkingMode = ref.ThinkingMode
 		}
 	}
 
@@ -458,6 +461,8 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		MaxTokens:       deps.Config.Limits.MaxOutputTokens,
 		MaxTurns:        deps.Config.Gateway.MaxTurns,
 		Role:            modelRole,
+		Effort:          roleEffort,
+		ThinkingMode:    roleThinkingMode,
 	}, msg)
 	if err != nil {
 		return core.IterationResult{}, fmt.Errorf("agent loop: %w", err)

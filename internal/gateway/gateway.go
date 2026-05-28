@@ -2958,10 +2958,20 @@ func (g *Gateway) runInteraction(
 	// AllowedTools cleared — reflex's only tool is the system `escalate`
 	// sentinel, which must not be dropped by the per-soul cabinet allowlist.
 	reflexCfg.AllowedTools = nil
+	// Reasoning controls are NEVER inherited from cortex: reflex is
+	// latency-critical and runs a different model. cortex's adaptive
+	// thinking / xhigh effort copied via `reflexCfg := cortexCfg` would
+	// 400 a model that lacks adaptive thinking (e.g. haiku) and otherwise
+	// burn slow xhigh reasoning on a classifier. Cleared here, then set
+	// from the reflex model_config row below.
+	reflexCfg.ThinkingMode = ""
+	reflexCfg.Effort = ""
 	if g.deps.ModelStore != nil {
 		ref := g.deps.ModelStore.Get("reflex")
 		reflexCfg.MaxTokens = ref.MaxTokens
 		reflexCfg.Temperature = ref.Temperature
+		reflexCfg.ThinkingMode = ref.ThinkingMode
+		reflexCfg.Effort = ref.Effort
 		// Per-role thinking budget: 0 in DB = disabled. -1 forces the
 		// agent loop's chooseThinkingBudget to ignore the global default.
 		// Without this, reflex inherited cortex's 4096-token thinking
