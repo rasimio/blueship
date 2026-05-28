@@ -389,122 +389,6 @@ func (g *Gateway) reflexSystemPromptForSoul(ctx context.Context, soulID uuid.UUI
 	return strings.Join([]string{preamble, persona}, "\n\n"), nil
 }
 
-// tryTelegramPairing checks whether a message is a Vaelum pairing code.
-// If so it writes the bot_links row binding (bot, tg_chat, tg_user) to
-// the (user, soul) the code was minted for, and returns true so the
-// caller stops processing the message. Intercepted before user
-// resolution — the sender is not yet a known platform user.
-//
-// The pairing query is scoped by bot_id so a code generated for the
-// platform @VaelumBot is not redeemable on a user-owned bot (and vice
-// versa). The host's pair-code mint API records bot_id at issue time;
-// this is the matching read.
-//
-// soul_id is denormalised onto bot_links to keep the per-message routing
-// (gateway.go getOrInitTelegramUser → ResolveTelegramChat) a single
-// SELECT. We resolve it once here, at pair time, via vaelum.memberships
-// (Phase A invariant: one soul per user). When memberships gains
-// disambiguation in Phase C, this is the seam to add a "which soul should
-// this Telegram chat route to?" step.
-func (g *Gateway) tryTelegramPairing(ctx context.Context, bi *botInstance, chatID string, tgChatID, tgUserID int64, text string) bool {
-	code := strings.TrimSpace(text)
-	if !strings.HasPrefix(code, "pair-") {
-		return false
-	}
-	db, err := g.deps.DB("ship")
-	if err != nil {
-		return false
-	}
-	reply := g.newTelegramSink(chatID, bi)
-
-	if bi == nil || bi.id == uuid.Nil {
-		// Legacy single-bot mode (cfg.Transport.BotToken) has no DB row
-		// to scope the query against. The host should migrate to the
-		// multi-bot model before users start pairing; meanwhile, surface
-		// the misconfig rather than silently consume the code.
-		g.logger.Warn("telegram pairing: bot has no host id; cannot scope pairing",
-			"chat_id", chatID)
-		_ = reply.SendText(ctx, "Pairing isn't configured on this bot yet — ask your administrator.")
-		return true
-	}
-
-	var pairingID, userID uuid.UUID
-	err = db.QueryRowContext(ctx,
-		`SELECT id, user_id FROM vaelum.telegram_pairings
-		 WHERE code = $1 AND bot_id = $2
-		   AND consumed_at IS NULL AND expires_at > now()`,
-		code, bi.id).Scan(&pairingID, &userID)
-	if err != nil {
-		_ = reply.SendText(ctx, "That pairing code is invalid, expired, or for a different bot — generate a fresh one in Vaelum settings.")
-		return true
-	}
-
-	// Resolve the soul this user's chats route to. Phase A: one soul per
-	// user; the first (and only) membership wins. The query mirrors
-	// tenancy.Store.SoulForUser so the same answer lands in bot_links
-	// that ResolveTelegramChat would return at read time.
-	var soulID uuid.UUID
-	if err := db.GetContext(ctx, &soulID,
-		`SELECT soul_id FROM vaelum.memberships
-		  WHERE user_id = $1 ORDER BY created_at LIMIT 1`, userID); err != nil {
-		g.logger.Error("telegram pairing: no membership for user", "user_id", userID, "error", err)
-		_ = reply.SendText(ctx, "Your Vaelum account has no soul yet — finish onboarding first.")
-		return true
-	}
-
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO vaelum.bot_links (bot_id, tg_chat_id, tg_user_id, user_id, soul_id)
-		 VALUES ($1, $2, $3, $4, $5)
-		 ON CONFLICT (bot_id, tg_chat_id) DO UPDATE
-		   SET tg_user_id = EXCLUDED.tg_user_id,
-		       user_id    = EXCLUDED.user_id,
-		       soul_id    = EXCLUDED.soul_id,
-		       linked_at  = now()`,
-		bi.id, tgChatID, tgUserID, userID, soulID); err != nil {
-		g.logger.Error("telegram pairing: bot_link insert failed", "error", err)
-		_ = reply.SendText(ctx, "Something went wrong linking your account — try again shortly.")
-		return true
-	}
-
-	// Mirror into user_identities as a side-effect so the cabinet's
-	// "linked accounts" view stays accurate. Routing reads from
-	// bot_links only; this row is for display.
-	_, _ = db.ExecContext(ctx,
-		`INSERT INTO vaelum.user_identities (user_id, kind, value, verified_at)
-		 VALUES ($1, 'telegram', $2, now())
-		 ON CONFLICT (kind, value) DO NOTHING`,
-		userID, chatID)
-
-	// Promote the user's blueship.user_profiles.chat_id from the Vaelum
-	// placeholder (`vaelum:<uuid>`) to the real `telegram:<chat_id>` so
-	// the agent-task scheduler's notify path can deliver via Telegram.
-	// Without this, every Notify after pairing still hits a placeholder
-	// chat_id and Sender.SendLong fails. ON CONFLICT-style UPSERT keyed
-	// on id keeps this idempotent across re-pairing.
-	_, _ = db.ExecContext(ctx,
-		`UPDATE user_profiles SET chat_id = $2, updated_at = now()
-		 WHERE id = $1`,
-		userID, chatID)
-
-	_, _ = db.ExecContext(ctx,
-		`UPDATE vaelum.telegram_pairings SET consumed_at = now() WHERE id = $1`, pairingID)
-
-	// Drop any cached UserState built before pairing so the next message
-	// goes through getOrInitTelegramUser with the fresh bot_links row.
-	g.mu.Lock()
-	delete(g.users, chatID)
-	g.mu.Unlock()
-
-	g.logger.Info("telegram pairing: linked",
-		"chat_id", chatID,
-		"bot_id", bi.id.String(),
-		"user_id", userID.String(),
-		"soul_id", soulID.String(),
-	)
-	_ = reply.SendText(ctx, "Your Telegram is now linked to your Vaelum account.")
-	return true
-}
-
 // Run drives the multi-bot fan-in: every registered bot's poller writes
 // into g.updatesChan tagged with its id; this loop dispatches each
 // tagged update to handleUpdate. The host is expected to have called
@@ -541,6 +425,13 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	// `-tags legacy_commands` and uncomment the dispatch below.
 	if cq := update.CallbackQuery; cq != nil {
 		bi.client.AnswerCallbackQuery(ctx, cq.ID)
+		// Bot-onboarding inline keyboards (preset picker) land here.
+		// Handled before the legacy model dispatch so a fresh user's
+		// keyboard taps reach the FSM finalizer even without the
+		// legacy_commands build tag.
+		if g.maybeRunBotOnboardingCallback(ctx, bi, cq) {
+			return
+		}
 		// if g.handleModelCallback(ctx, bi, cq) {
 		// 	return
 		// }
@@ -716,12 +607,6 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	chatID := tgCanonical(rawChatID)
 	tgUserID := msg.From.ID
 
-	// Vaelum pairing — a "pair-…" message links this Telegram account to a
-	// platform user. Handled before user resolution rejects the sender.
-	if g.tryTelegramPairing(ctx, bi, chatID, rawChatID, tgUserID, text) {
-		return
-	}
-
 	// Group-chat routing: in a chat with more than one participant the bot
 	// only reacts to messages that are explicitly addressed to it. Private
 	// (1:1) chats bypass this filter because the human has nobody else to
@@ -768,6 +653,18 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	// 	}
 	// 	return
 	// }
+
+	// Inline bot onboarding: when the host has wired Deps.BotOnboarding,
+	// intercept messages from chats with no vaelum.user_identities row
+	// and run the in-chat account-creation FSM. The hook checks pairing
+	// itself so a paired user's /start lands in the welcome-back path
+	// and any other inbound from a paired user falls through to the
+	// normal getOrInitTelegramUser routing. Unpaired non-/start inbound
+	// continues to replyUnpaired below — onboarding only starts when
+	// the user explicitly types /start.
+	if g.maybeRunBotOnboarding(ctx, bi, chatID, rawChatID, tgUserID, text) {
+		return
+	}
 
 	us, err := g.getOrInitTelegramUser(ctx, bi, chatID, rawChatID, tgUserID)
 	if err != nil {
@@ -1233,8 +1130,7 @@ func (g *Gateway) replyUnpaired(ctx context.Context, bi *botInstance, chatID str
 	greeting := g.platformGreet
 	g.platformGreetMu.Unlock()
 	if greeting == "" {
-		greeting = "Welcome — sign up at https://vaelum.ai, open Settings → Connect Telegram, " +
-			"and send me the `pair-…` code you get there. I’ll be ready as soon as you do."
+		greeting = "I don't know you yet — type /start to get going."
 	}
 	if err := bi.client.SendLong(ctx, tgChatID(chatID), greeting); err != nil {
 		g.logger.Warn("gateway: send greeting failed", "error", err, "chat_id", chatID)

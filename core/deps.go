@@ -179,11 +179,10 @@ type Deps struct {
 
 	// ResolveTelegramChat maps an inbound Telegram message (bot id,
 	// numeric chat id) to its bound (user, soul). The gateway calls this
-	// on every Telegram update AFTER pairing interception. Hosts return
-	// ErrTelegramChatUnpaired to indicate "no link" so the gateway can
-	// run the unpaired-chat policy (platform greet vs user-bot silence).
-	// Mirrors the field on Config.Gateway; ship.go copies it across at
-	// InitDeps time.
+	// on every Telegram update. Hosts return ErrTelegramChatUnpaired to
+	// indicate "no link" so the gateway can run the unpaired-chat policy
+	// (platform greet vs user-bot silence). Mirrors the field on
+	// Config.Gateway; ship.go copies it across at InitDeps time.
 	ResolveTelegramChat func(ctx context.Context, botID uuid.UUID, tgChatID int64) (userID, soulID uuid.UUID, err error)
 
 	// SendToUser is a per-user Telegram sender that picks the right
@@ -196,6 +195,15 @@ type Deps struct {
 	// Nil = host hasn't set it up; caller must fall back to legacy
 	// deps.Sender.
 	SendToUser func(ctx context.Context, userID uuid.UUID, text string) error
+
+	// BotOnboarding drives Telegram-native account creation for fresh
+	// users. The gateway invokes it on /start from a chat that has no
+	// vaelum.user_identities row; the host runs the FSM (GetState +
+	// AdvanceStep) and finalises with CreateAccount in a single tx.
+	// Nil disables the inline path — the gateway falls back to
+	// replyUnpaired (platform greet / user-bot silence). Mirrors the
+	// Config.Gateway field; ship.go copies it across at InitDeps time.
+	BotOnboarding BotOnboarding
 
 	pool *dbPool
 }
@@ -233,6 +241,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		ResolveSoul:         d.ResolveSoul,
 		ResolveTelegramChat: d.ResolveTelegramChat,
 		SendToUser:          d.SendToUser,
+		BotOnboarding:       d.BotOnboarding,
 		pool:                d.pool,
 	}
 }

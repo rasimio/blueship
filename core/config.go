@@ -184,9 +184,9 @@ type TelegramConfig struct {
 // BotConfig describes one Telegram bot the gateway should manage.
 type BotConfig struct {
 	// ID is the host's stable identifier for this bot (typically the
-	// vaelum.bots.id UUID). The gateway uses it as a routing key and in
-	// the pairing query (telegram_pairings.bot_id = $1). uuid.Nil is
-	// reserved for the legacy BotToken fallback path.
+	// vaelum.bots.id UUID). The gateway uses it as a routing key for
+	// inbound updates. uuid.Nil is reserved for the legacy BotToken
+	// fallback path.
 	ID uuid.UUID
 
 	// Kind discriminates routing semantics:
@@ -396,9 +396,9 @@ type GatewayConfig struct {
 	ResolveSoul func(ctx context.Context, userID uuid.UUID) (uuid.UUID, error) `yaml:"-" json:"-"`
 
 	// ResolveTelegramChat maps a (bot, Telegram chat) pair to its bound
-	// (user, soul). The gateway calls it on every inbound Telegram update
-	// AFTER pairing interception. Host-implemented (typically a
-	// vaelum.bot_links lookup); blueship stays generic.
+	// (user, soul). The gateway calls it on every inbound Telegram update.
+	// Host-implemented (typically a vaelum.bot_links lookup); blueship
+	// stays generic.
 	//
 	// Return ErrTelegramChatUnpaired (or any error whose Is-chain reaches
 	// it) to indicate "no link" — the gateway then runs the unpaired-chat
@@ -413,6 +413,14 @@ type GatewayConfig struct {
 	// gateway can call it on every turn after the session id is
 	// known. Nil = no CDN, the LLM still sees the bytes inline.
 	AttachmentSink AttachmentSink `yaml:"-" json:"-"`
+
+	// BotOnboarding, when set, drives a fresh /start on an unpaired
+	// Telegram chat through inline account creation (FSM in the chat,
+	// no website round-trip). The gateway detects the no-identity case,
+	// runs the host-supplied state machine via this hook, finalises
+	// with CreateAccount, and only then hands control to the cortex
+	// turn. Nil falls back to the legacy replyUnpaired greeting.
+	BotOnboarding BotOnboarding `yaml:"-" json:"-"`
 }
 
 // ErrTelegramChatUnpaired signals "this Telegram chat is not linked to any
