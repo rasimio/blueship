@@ -36,6 +36,29 @@ type AttachmentSink interface {
 	// pulled back into the current turn's content so the model can
 	// reason about them, not just the inline text snippet.
 	ListForMessage(ctx context.Context, userID, soulID, messageID uuid.UUID) ([]uuid.UUID, error)
+	// SaveLink upserts a kind='link' row keyed on (user, soul, url).
+	// Returns the row id; the call is idempotent — the same URL twice
+	// for the same (user, soul) returns the same row id and does NOT
+	// insert a new row. Bytes are NOT stored: the cabinet renders the
+	// link chip straight from the URL plus the OpenGraph fields the
+	// async enrichment worker populates after the row lands. Callers
+	// (the gateway's user/assistant scan) pass MessageID / SessionID
+	// best-effort — first writer wins, later upserts only fill them in
+	// when the existing row had them NULL.
+	SaveLink(ctx context.Context, p LinkParams) (id uuid.UUID, err error)
+}
+
+// LinkParams carries the metadata the sink needs to persist one
+// auto-extracted URL. URL is the canonical https://… string as
+// returned by attachment.ExtractURLs. UserID / SoulID are required;
+// SessionID and MessageID are best-effort (zero uuid = unknown, sink
+// inserts NULL).
+type LinkParams struct {
+	UserID    uuid.UUID
+	SoulID    uuid.UUID
+	SessionID uuid.UUID
+	MessageID uuid.UUID
+	URL       string
 }
 
 // AttachmentRecord carries metadata for a resolved attachment —

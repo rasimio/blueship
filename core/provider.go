@@ -49,6 +49,21 @@ type CompletionRequest struct {
 	MaxTokens      int
 	ThinkingBudget int     // -1 = provider default, 0 = disabled, >0 = explicit thinking budget
 	Temperature    float64 // 0 = provider default, >0 = explicit temperature (0.0-2.0)
+
+	// ThinkingMode selects how extended thinking is requested, for providers
+	// that support modes beyond a fixed budget (Anthropic Claude 4.6+):
+	//   ""         → legacy: use ThinkingBudget (manual thinking / disabled)
+	//   "adaptive" → thinking:{type:"adaptive"}; the model decides depth,
+	//                guided by Effort. Required on Opus 4.7/4.8 where manual
+	//                budget_tokens is deprecated. ThinkingBudget is ignored.
+	//   "off"      → no thinking block at all (Effort still applies).
+	// Providers that don't understand modes ignore this field.
+	ThinkingMode string
+
+	// Effort maps to Anthropic's output_config.effort (low|medium|high|xhigh|max).
+	// "" = omit (API default is "high"). Controls total token spend across
+	// thinking, text, and tool calls. Ignored by providers without support.
+	Effort string
 }
 
 // CompletionResponse is the output of CompletionProvider.Complete.

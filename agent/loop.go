@@ -83,6 +83,11 @@ type RunConfig struct {
 	// models like gemma4-nothinker burn 400-500 hidden tokens (~6 s on M4
 	// Max) per turn when enabled. See chooseThinkingBudget below.
 	ThinkingBudget int
+	// ThinkingMode / Effort are forwarded verbatim to CompletionRequest.
+	// ThinkingMode "adaptive" supersedes ThinkingBudget on Claude 4.6+.
+	// Effort maps to output_config.effort. See CompletionRequest docs.
+	ThinkingMode string
+	Effort       string
 }
 
 // NewLoop creates a new agent loop.
@@ -254,6 +259,8 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			Messages:       messages,
 			Tools:          tools,
 			ThinkingBudget: chooseThinkingBudget(cfg.ThinkingBudget, a.cfg.Limits.ThinkingBudget),
+			ThinkingMode:   cfg.ThinkingMode,
+			Effort:         cfg.Effort,
 			Temperature:    cfg.Temperature,
 		})
 		if err != nil {
@@ -469,6 +476,8 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			Messages:       messages,
 			Tools:          tools,
 			ThinkingBudget: chooseThinkingBudget(cfg.ThinkingBudget, a.cfg.Limits.ThinkingBudget),
+			ThinkingMode:   cfg.ThinkingMode,
+			Effort:         cfg.Effort,
 			Temperature:    cfg.Temperature,
 		}
 

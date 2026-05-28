@@ -251,6 +251,10 @@ type ModelRef struct {
 	MaxTokens      int
 	ThinkingBudget int
 	Temperature    float64
+	// ThinkingMode / Effort map to CompletionRequest fields of the same name.
+	// Empty preserves legacy ThinkingBudget behaviour. See CompletionRequest.
+	ThinkingMode string
+	Effort       string
 }
 
 // ForRouter returns "provider:name" for use with LLMRouter.

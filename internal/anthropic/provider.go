@@ -97,9 +97,23 @@ func (p *Provider) Complete(ctx context.Context, req bs.CompletionRequest) (*bs.
 }
 
 // thinkingConfig controls extended thinking in the API request.
+//   Type "enabled"  → manual budget (BudgetTokens required). Legacy; deprecated
+//                     on Claude 4.6+ and rejected on Opus 4.7/4.8 by the public
+//                     API (the OAuth/Claude-Code surface is more lenient).
+//   Type "adaptive" → model decides depth (Claude 4.6+); BudgetTokens omitted,
+//                     guided by output_config.effort.
+// Display "summarized" returns thinking-block text (default "omitted" on
+// Opus 4.7/4.8); we ask for summarized so OnThinking still surfaces reasoning.
 type thinkingConfig struct {
 	Type         string `json:"type"`
-	BudgetTokens int    `json:"budget_tokens"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
+	Display      string `json:"display,omitempty"`
+}
+
+// outputConfig carries Anthropic's effort control (output_config.effort:
+// low|medium|high|xhigh|max). Omitted entirely when Effort is empty.
+type outputConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type cacheControl struct {
@@ -144,9 +158,10 @@ type apiRequest struct {
 	Stream      bool            `json:"stream,omitempty"`
 	System      []systemBlock   `json:"system,omitempty"`
 	Messages    []apiMessage    `json:"messages"`
-	Tools       []apiTool       `json:"tools,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
-	Thinking    *thinkingConfig `json:"thinking,omitempty"`
+	Tools        []apiTool       `json:"tools,omitempty"`
+	Temperature  float64         `json:"temperature,omitempty"`
+	Thinking     *thinkingConfig `json:"thinking,omitempty"`
+	OutputConfig *outputConfig   `json:"output_config,omitempty"`
 }
 
 // apiResponse is the wire format for Anthropic Messages API response.
@@ -159,6 +174,39 @@ type apiResponse struct {
 	Usage      bs.Usage          `json:"usage"`
 }
 
+// applyThinkingAndEffort sets thinking + output_config.effort on apiReq from the
+// request. Centralised so Complete and StreamComplete stay in lockstep.
+//   ThinkingMode "adaptive" → thinking:{type:adaptive} (Claude 4.6+); the model
+//     decides depth, guided by Effort; budget_tokens omitted.
+//   ThinkingMode "off"      → no thinking block (Effort may still apply).
+//   ThinkingMode ""         → legacy: manual thinking when ThinkingBudget > 0.
+// Temperature is forced to 0 (→ omitted) whenever thinking is active, since the
+// API requires the default temperature with extended thinking.
+func applyThinkingAndEffort(apiReq *apiRequest, req bs.CompletionRequest) {
+	if req.Effort != "" {
+		apiReq.OutputConfig = &outputConfig{Effort: req.Effort}
+	}
+	switch req.ThinkingMode {
+	case "adaptive":
+		apiReq.Thinking = &thinkingConfig{Type: "adaptive", Display: "summarized"}
+		apiReq.Temperature = 0
+	case "off":
+		// effort-only: no thinking block
+	default:
+		if req.ThinkingBudget > 0 {
+			apiReq.Thinking = &thinkingConfig{Type: "enabled", BudgetTokens: req.ThinkingBudget}
+			apiReq.MaxTokens += req.ThinkingBudget
+			apiReq.Temperature = 0
+		}
+	}
+}
+
+// thinkingActive reports whether the request asked for any thinking — used to
+// decide whether to strip thinking blocks from the assembled response.
+func thinkingActive(req bs.CompletionRequest) bool {
+	return req.ThinkingMode == "adaptive" || (req.ThinkingMode == "" && req.ThinkingBudget > 0)
+}
+
 func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
 	apiReq := apiRequest{
 		Model:     req.Model,
@@ -168,14 +216,7 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 		Tools:     buildTools(req.Tools),
 	}
 
-	if req.ThinkingBudget > 0 {
-		apiReq.Thinking = &thinkingConfig{
-			Type:         "enabled",
-			BudgetTokens: req.ThinkingBudget,
-		}
-		apiReq.MaxTokens += req.ThinkingBudget
-		apiReq.Temperature = 0 // temperature must be unset (0) with extended thinking
-	}
+	applyThinkingAndEffort(&apiReq, req)
 
 	body, err := json.Marshal(apiReq)
 	if err != nil {
@@ -230,7 +271,7 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 
 	// Filter out thinking blocks — invisible to user
 	content := apiResp.Content
-	if req.ThinkingBudget > 0 {
+	if thinkingActive(req) {
 		filtered := make([]bs.ContentBlock, 0, len(content))
 		for _, b := range content {
 			if b.Type != "thinking" {

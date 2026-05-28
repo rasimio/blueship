@@ -945,6 +945,48 @@ func collapseBlankLinesGateway(s string) string {
 	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
+// scanAndSaveLinks extracts http/https URLs out of text and upserts
+// them as kind='link' rows on the host's AttachmentSink. Symmetric to
+// the byte-attachment Save call: the user side runs this against the
+// pasted message, the assistant side runs it against Arlene's final
+// reply. The OG enrichment worker picks the rows up from there.
+//
+// sessionID is required (so the cabinet's session-scoped view can
+// surface the chip on the right turn). messageID is best-effort —
+// callers pass uuid.Nil when the underlying chat_messages row hasn't
+// been written yet (user side: append happens later inside the agent
+// loop). Empty text and a nil AttachmentSink are silent no-ops. URL
+// upsert failures are warn-logged and per-URL — one bad URL does not
+// abort the rest of the scan or the turn.
+func (g *Gateway) scanAndSaveLinks(ctx context.Context, us *UserState, sessionID, messageID uuid.UUID, source, text string) {
+	if g.deps.AttachmentSink == nil || us == nil || us.UserID == uuid.Nil || us.SoulID == uuid.Nil {
+		return
+	}
+	if text == "" {
+		return
+	}
+	urls := attachment.ExtractURLs(text)
+	if len(urls) == 0 {
+		return
+	}
+	for _, u := range urls {
+		if _, err := g.deps.AttachmentSink.SaveLink(ctx, bs.LinkParams{
+			UserID:    us.UserID,
+			SoulID:    us.SoulID,
+			SessionID: sessionID,
+			MessageID: messageID,
+			URL:       u,
+		}); err != nil {
+			g.logger.Warn("link save failed",
+				"chat_id", us.ChatID,
+				"source", source,
+				"url", u,
+				"err", err,
+			)
+		}
+	}
+}
+
 // hasHeavyContent reports whether a user-message payload is unsuited
 // for the fast reflex tier. Two cases collapse to the same action:
 //   1. Any image block — the codex provider's text-only serializer
@@ -958,7 +1000,7 @@ func collapseBlankLinesGateway(s string) string {
 //      and trip this on the first user turn that carries them.
 //
 // Either way the right move is to skip the fast tier and run cortex
-// (claude-opus-4-7) directly — it has the context budget for the
+// (claude-opus-4-8) directly — it has the context budget for the
 // turn and would have been called via escalation anyway.
 func hasHeavyContent(content any) bool {
 	const heavyTextBytes = 16 << 10 // 16 KiB ≈ 4K tokens
@@ -1531,12 +1573,14 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// show up as a chip in the web UI. Failures are warn-and-continue
 	// — the LLM still has the bytes via chat_messages, the user just
 	// loses the cabinet chip.
+	var sessionUUID uuid.UUID
 	if g.deps.AttachmentSink != nil {
 		sessID, perr := uuid.Parse(sess.ID)
 		if perr != nil {
 			g.logger.Warn("attachment sink: session id parse failed",
 				"session_id", sess.ID, "err", perr)
 		} else {
+			sessionUUID = sessID
 			for _, m := range msgs {
 				for _, a := range m.rawAttachments {
 					if len(a.data) == 0 {
@@ -1558,6 +1602,17 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			}
 		}
 	}
+
+	// Auto-extract pasted URLs from the user's text and persist them as
+	// kind='link' attachment rows. The OG worker (arlene daemon)
+	// enriches the row with og:title / og:description / og:image_url
+	// asynchronously; the cabinet's Links tab + per-message chip
+	// rendering pick the row up either way (empty OG = favicon
+	// fallback). message_id stays NULL on the user side because the
+	// user's chat_messages row is appended later inside the agent loop;
+	// the link still surfaces in the cabinet's session-scoped view via
+	// session_id.
+	g.scanAndSaveLinks(ctx, us, sessionUUID, uuid.Nil, "user", msgText)
 
 	// Wire the session ID into a meta SSE frame so a vaelum-style relayer
 	// can begin attributing persisted tool_calls before any tool fires.
@@ -1735,9 +1790,17 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		reflexLoop = agent.NewLoop(g.provider, g.store, reflexRegistry, g.deps.RoleTools, g.deps.Config, g.logger)
 	}
 
-	var cortexTemp float64
+	var cortexRef bs.ModelRef
 	if g.deps.ModelStore != nil {
-		cortexTemp = g.deps.ModelStore.Get("cortex").Temperature
+		cortexRef = g.deps.ModelStore.Get("cortex")
+	}
+	cortexTemp := cortexRef.Temperature
+	// Per-role max_tokens wins when configured. Adaptive thinking at high/xhigh
+	// effort counts thinking toward max_tokens, so cortex needs a larger cap
+	// than the global default or replies truncate (stop_reason=max_tokens).
+	cortexMaxTokens := g.deps.Config.Limits.MaxOutputTokens
+	if cortexRef.MaxTokens > 0 {
+		cortexMaxTokens = cortexRef.MaxTokens
 	}
 
 	// Reply metadata: the first pendingMsg in the batch carries
@@ -1772,12 +1835,14 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		SystemPrompt:     systemWithTime,
 		CompactSummary:   derefString(sess.CompactSummary),
 		Model:            g.cortexModel(),
-		MaxTokens:        g.deps.Config.Limits.MaxOutputTokens,
+		MaxTokens:        cortexMaxTokens,
 		MaxTurns:         g.deps.Config.Gateway.MaxTurns,
 		InjectedContext:  injectedCtx,
 		ReflexGuidance:   reflexGuidance,
 		Role:             "cortex",
 		Temperature:      cortexTemp,
+		ThinkingMode:     cortexRef.ThinkingMode,
+		Effort:           cortexRef.Effort,
 		AllowedTools:     g.allowedToolsForSoul(ctx, us.SoulID, turnRegistry),
 		ReplyToMessageID: replyToMessageID,
 		TGMessageID:      tgMessageID,
@@ -1966,6 +2031,16 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			g.executePostActions(ctx, us, postActions, reply)
 		}
 		if reply != "" {
+			// Voice symmetry — if Arlene happens to read a URL (uncommon
+			// but not impossible on the JS-fetch-this branch), persist it
+			// as a link chip so it surfaces in the cabinet.
+			var assistantMsgID uuid.UUID
+			if msgID, lookupErr := g.store.LatestAssistantMessageID(ctx, sess.ID); lookupErr == nil && msgID != "" {
+				if parsed, perr := uuid.Parse(msgID); perr == nil {
+					assistantMsgID = parsed
+				}
+			}
+			g.scanAndSaveLinks(ctx, us, sessionUUID, assistantMsgID, "assistant", reply)
 			g.emitTurnCompleted(us, sess)
 		}
 		return
@@ -1997,11 +2072,20 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		// Emit a follow-up meta frame with the assistant message_id so the
 		// SSE relayer can link any persisted tool_calls back to that turn.
 		// Only when both sink + store support it; safe to skip otherwise.
-		if ms, ok := sink.(bs.MetaSink); ok {
-			if msgID, lookupErr := g.store.LatestAssistantMessageID(ctx, sess.ID); lookupErr == nil && msgID != "" {
+		var assistantMsgID uuid.UUID
+		if msgID, lookupErr := g.store.LatestAssistantMessageID(ctx, sess.ID); lookupErr == nil && msgID != "" {
+			if parsed, perr := uuid.Parse(msgID); perr == nil {
+				assistantMsgID = parsed
+			}
+			if ms, ok := sink.(bs.MetaSink); ok {
 				_ = ms.SendMeta(ctx, sess.ID, msgID)
 			}
 		}
+		// Auto-extract URLs from Arlene's final reply and persist them
+		// as kind='link' rows pinned to the assistant message_id, so the
+		// cabinet can highlight which bubble produced the chip. Mirror
+		// of the user-side scan above.
+		g.scanAndSaveLinks(ctx, us, sessionUUID, assistantMsgID, "assistant", reply)
 		// For text-streaming sinks (web SSE) the reply has already been
 		// delivered chunk-by-chunk via cb.OnText; calling SendText again
 		// here would duplicate the whole response in the rendered bubble.
@@ -2113,6 +2197,21 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	reply = g.dispatchAttachmentMarkers(ctx, us, sink, reply)
 	if reply == "" {
 		return
+	}
+
+	// Auto-extract URLs from Arlene's reply on the Telegram path too —
+	// the assistant chip then surfaces in the cabinet's Links tab even
+	// when the user is on mobile. Mirror of the non-Telegram branch
+	// above; here we look up the assistant message id directly because
+	// the meta-sink path doesn't run on Telegram.
+	{
+		var assistantMsgID uuid.UUID
+		if msgID, lookupErr := g.store.LatestAssistantMessageID(ctx, sess.ID); lookupErr == nil && msgID != "" {
+			if parsed, perr := uuid.Parse(msgID); perr == nil {
+				assistantMsgID = parsed
+			}
+		}
+		g.scanAndSaveLinks(ctx, us, sessionUUID, assistantMsgID, "assistant", reply)
 	}
 
 	// Clear tool status for final message

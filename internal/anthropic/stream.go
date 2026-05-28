@@ -75,14 +75,7 @@ func (p *Provider) streamOnce(ctx context.Context, req bs.CompletionRequest, cb 
 		Stream:    true,
 	}
 
-	if req.ThinkingBudget > 0 {
-		apiReq.Thinking = &thinkingConfig{
-			Type:         "enabled",
-			BudgetTokens: req.ThinkingBudget,
-		}
-		apiReq.MaxTokens += req.ThinkingBudget
-		apiReq.Temperature = 0 // temperature must be unset (0) with extended thinking
-	}
+	applyThinkingAndEffort(&apiReq, req)
 
 	body, err := json.Marshal(apiReq)
 	if err != nil {
