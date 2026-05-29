@@ -66,11 +66,20 @@ func (p *Provider) StreamComplete(ctx context.Context, req bs.CompletionRequest,
 // streamOnce performs a single streaming attempt. The bool reports whether any
 // text or tool_use reached cb — once true the request must not be retried.
 func (p *Provider) streamOnce(ctx context.Context, req bs.CompletionRequest, cb *bs.StreamCallbacks) (*bs.CompletionResponse, bool, error) {
+	apiMsgs := buildMessages(req.Messages)
+	if p.oauth {
+		if trimmed, n := trimTrailingAssistant(apiMsgs); n > 0 {
+			p.logger.Warn("anthropic-oauth: dropped trailing assistant message(s) — OAuth surface forbids prefill, conversation must end with a user turn",
+				"dropped", n)
+			apiMsgs = trimmed
+		}
+	}
+
 	apiReq := apiRequest{
 		Model:     req.Model,
 		MaxTokens: req.MaxTokens,
 		System:    buildSystem(req.System, p.oauth),
-		Messages:  buildMessages(req.Messages),
+		Messages:  apiMsgs,
 		Tools:     buildTools(req.Tools),
 		Stream:    true,
 	}

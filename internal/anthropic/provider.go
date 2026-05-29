@@ -97,11 +97,13 @@ func (p *Provider) Complete(ctx context.Context, req bs.CompletionRequest) (*bs.
 }
 
 // thinkingConfig controls extended thinking in the API request.
-//   Type "enabled"  → manual budget (BudgetTokens required). Legacy; deprecated
-//                     on Claude 4.6+ and rejected on Opus 4.7/4.8 by the public
-//                     API (the OAuth/Claude-Code surface is more lenient).
-//   Type "adaptive" → model decides depth (Claude 4.6+); BudgetTokens omitted,
-//                     guided by output_config.effort.
+//
+//	Type "enabled"  → manual budget (BudgetTokens required). Legacy; deprecated
+//	                  on Claude 4.6+ and rejected on Opus 4.7/4.8 by the public
+//	                  API (the OAuth/Claude-Code surface is more lenient).
+//	Type "adaptive" → model decides depth (Claude 4.6+); BudgetTokens omitted,
+//	                  guided by output_config.effort.
+//
 // Display "summarized" returns thinking-block text (default "omitted" on
 // Opus 4.7/4.8); we ask for summarized so OnThinking still surfaces reasoning.
 type thinkingConfig struct {
@@ -153,11 +155,11 @@ type apiContentBlock struct {
 
 // apiRequest is the wire format for Anthropic Messages API.
 type apiRequest struct {
-	Model       string          `json:"model"`
-	MaxTokens   int             `json:"max_tokens"`
-	Stream      bool            `json:"stream,omitempty"`
-	System      []systemBlock   `json:"system,omitempty"`
-	Messages    []apiMessage    `json:"messages"`
+	Model        string          `json:"model"`
+	MaxTokens    int             `json:"max_tokens"`
+	Stream       bool            `json:"stream,omitempty"`
+	System       []systemBlock   `json:"system,omitempty"`
+	Messages     []apiMessage    `json:"messages"`
 	Tools        []apiTool       `json:"tools,omitempty"`
 	Temperature  float64         `json:"temperature,omitempty"`
 	Thinking     *thinkingConfig `json:"thinking,omitempty"`
@@ -176,10 +178,12 @@ type apiResponse struct {
 
 // applyThinkingAndEffort sets thinking + output_config.effort on apiReq from the
 // request. Centralised so Complete and StreamComplete stay in lockstep.
-//   ThinkingMode "adaptive" → thinking:{type:adaptive} (Claude 4.6+); the model
-//     decides depth, guided by Effort; budget_tokens omitted.
-//   ThinkingMode "off"      → no thinking block (Effort may still apply).
-//   ThinkingMode ""         → legacy: manual thinking when ThinkingBudget > 0.
+//
+//	ThinkingMode "adaptive" → thinking:{type:adaptive} (Claude 4.6+); the model
+//	  decides depth, guided by Effort; budget_tokens omitted.
+//	ThinkingMode "off"      → no thinking block (Effort may still apply).
+//	ThinkingMode ""         → legacy: manual thinking when ThinkingBudget > 0.
+//
 // Temperature is forced to 0 (→ omitted) whenever thinking is active, since the
 // API requires the default temperature with extended thinking.
 func applyThinkingAndEffort(apiReq *apiRequest, req bs.CompletionRequest) {
@@ -208,11 +212,20 @@ func thinkingActive(req bs.CompletionRequest) bool {
 }
 
 func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
+	apiMsgs := buildMessages(req.Messages)
+	if p.oauth {
+		if trimmed, n := trimTrailingAssistant(apiMsgs); n > 0 {
+			p.logger.Warn("anthropic-oauth: dropped trailing assistant message(s) — OAuth surface forbids prefill, conversation must end with a user turn",
+				"dropped", n)
+			apiMsgs = trimmed
+		}
+	}
+
 	apiReq := apiRequest{
 		Model:     req.Model,
 		MaxTokens: req.MaxTokens,
 		System:    buildSystem(req.System, p.oauth),
-		Messages:  buildMessages(req.Messages),
+		Messages:  apiMsgs,
 		Tools:     buildTools(req.Tools),
 	}
 
@@ -330,6 +343,28 @@ func buildTools(tools []bs.ToolDefinition) []apiTool {
 	// Mark the last tool — Anthropic caches everything up to and including the breakpoint.
 	out[len(out)-1].CacheControl = &cacheControl{Type: "ephemeral"}
 	return out
+}
+
+// trimTrailingAssistant drops trailing assistant-role messages so the wire
+// array ends with a user turn. The Anthropic OAuth (Claude Code subscription)
+// surface rejects a messages array ending with an assistant message — 400
+// "This model does not support assistant message prefill. The conversation
+// must end with a user message" — whereas the API-key surface tolerates it as
+// a prefill. A trailing assistant turn is always a degenerate state here:
+// nothing in blueship intentionally prefills, so it only arises when an
+// upstream step appended an empty tool_results user turn that buildMessages
+// then drops as empty content, or when a crashed iteration left an orphaned
+// assistant turn in a shared session. Dropping it lets the call proceed
+// instead of hard-failing the whole agent iteration. Returns the trimmed
+// slice and the number of messages dropped (for logging). Caller gates this
+// on p.oauth so the API-key path keeps its (unused but valid) prefill ability.
+func trimTrailingAssistant(msgs []apiMessage) ([]apiMessage, int) {
+	dropped := 0
+	for len(msgs) > 0 && msgs[len(msgs)-1].Role == "assistant" {
+		msgs = msgs[:len(msgs)-1]
+		dropped++
+	}
+	return msgs, dropped
 }
 
 func buildMessages(messages []bs.Message) []apiMessage {

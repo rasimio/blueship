@@ -341,6 +341,19 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 				traces = append(traces, ToolTrace{Name: block.Name, Input: inputStr, Output: outputStr, Error: isError})
 			}
 
+			// Defensive: stop_reason was "tool_use" but no tool_use blocks
+			// materialised (e.g. content was thinking/text-only after the
+			// provider's thinking-block filter). Appending an empty
+			// tool_results user message would be dropped by the provider's
+			// content normaliser, leaving the wire array ending on an
+			// assistant turn — which the Anthropic OAuth surface rejects as
+			// prefill. Treat the turn as terminal rather than looping on an
+			// empty round-trip.
+			if len(toolResults) == 0 {
+				a.logger.Warn("tool_use stop with no tool_use blocks; treating as terminal", "turn", turn+1)
+				return &RunResult{Text: accumulated.String(), ToolTraces: traces}, nil
+			}
+
 			if !cfg.Ephemeral {
 				err = a.store.Append(ctx, cfg.SessionID, bs.Message{
 					Role:    "user",
@@ -574,6 +587,15 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 					Content:   result,
 					IsError:   isError,
 				})
+			}
+
+			// See RunTracked: a tool_use stop with no tool_use blocks must not
+			// append an empty tool_results turn (it would be dropped, leaving
+			// the wire array ending on an assistant turn — rejected as prefill
+			// by the OAuth surface). Treat as terminal.
+			if len(toolResults) == 0 {
+				a.logger.Warn("tool_use stop with no tool_use blocks; treating as terminal (stream)", "turn", turn+1)
+				return accumulated.String(), traces, nil
 			}
 
 			if !cfg.Ephemeral {
