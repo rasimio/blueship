@@ -24,7 +24,7 @@ import (
 
 	"github.com/rasimio/blueship/attachment"
 	bs "github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/internal/browser"
+	"github.com/rasimio/blueship/internal/webaccess/browser"
 	"github.com/rasimio/blueship/internal/gateway"
 )
 

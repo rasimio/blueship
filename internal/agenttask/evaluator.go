@@ -14,7 +14,7 @@ import (
 	"github.com/lib/pq"
 
 	"github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/internal/browser"
+	"github.com/rasimio/blueship/internal/webaccess/browser"
 )
 
 // reURLRequirement matches evidentiary requirements written into the

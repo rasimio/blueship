@@ -20,7 +20,7 @@ import (
 	"github.com/rasimio/blueship/agent"
 	"github.com/rasimio/blueship/attachment"
 	bs "github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/internal/browser"
+	"github.com/rasimio/blueship/internal/webaccess/browser"
 	"github.com/rasimio/blueship/internal/provider/openai"
 	"github.com/rasimio/blueship/internal/transport/telegram"
 	"github.com/rasimio/blueship/session"

@@ -12,11 +12,11 @@ import (
 	"github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/agenttask"
 	"github.com/rasimio/blueship/internal/gateway"
+	"github.com/rasimio/blueship/internal/looprunner"
+	"github.com/rasimio/blueship/internal/store/user"
+	"github.com/rasimio/blueship/internal/toolcatalog"
 	"github.com/rasimio/blueship/internal/transport/httpchat"
 	"github.com/rasimio/blueship/internal/transport/ws"
-	"github.com/rasimio/blueship/internal/scheduler"
-	"github.com/rasimio/blueship/internal/toolcatalog"
-	"github.com/rasimio/blueship/internal/user"
 	"github.com/rasimio/blueship/migrate"
 	"github.com/rasimio/blueship/session"
 	"github.com/rasimio/blueship/tool"
@@ -165,7 +165,7 @@ func (s *Ship) Run(ctx context.Context) error {
 				wg.Add(1)
 				go func(j Job) {
 					defer wg.Done()
-					scheduler.RunLoop(ctx, s.logger, j.Name, j.Interval, j.Run)
+					looprunner.RunLoop(ctx, s.logger, j.Name, j.Interval, j.Run)
 				}(job)
 			}
 		}
@@ -284,7 +284,7 @@ func (s *Ship) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			scheduler.RunLoopWithTrigger(ctx, s.logger, "agent-tasks", 1*time.Minute, agentSched.Run, trigger, agentSched.WakeFromCallback)
+			looprunner.RunLoopWithTrigger(ctx, s.logger, "agent-tasks", 1*time.Minute, agentSched.Run, trigger, agentSched.WakeFromCallback)
 		}()
 
 	}

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/internal/fleet"
+	"github.com/rasimio/blueship/internal/federation/fleet"
 )
 
 // runFleet boots the optional BlueFleet integration. Blocks until ctx is

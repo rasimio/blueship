@@ -14,7 +14,7 @@ import (
 	"github.com/rasimio/blueship/internal/provider/openai"
 	"github.com/rasimio/blueship/internal/provider/openaicodex"
 	"github.com/rasimio/blueship/internal/transport/telegram"
-	"github.com/rasimio/blueship/internal/web"
+	"github.com/rasimio/blueship/internal/webaccess/web"
 )
 
 // --- Convenience constructors for Config ---

@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/internal/fleet"
+	"github.com/rasimio/blueship/internal/federation/fleet"
 )
 
 // fleetAuth bundles Ship-side state populated by runFleet that the A2A

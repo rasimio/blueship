@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	bs "github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/internal/browser"
+	"github.com/rasimio/blueship/internal/webaccess/browser"
 )
 
 // browser_search and browser_fetch are framework-level tools, not
