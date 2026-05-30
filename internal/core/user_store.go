@@ -133,7 +133,7 @@ func (s *userStore) Create(ctx context.Context, chatID, displayName, trustLevel,
 		trustLevel = "new"
 	}
 	if timezone == "" {
-		timezone = "Europe/Moscow"
+		timezone = "UTC"
 	}
 
 	var p UserProfile
