@@ -17,7 +17,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/rasimio/blueship/internal/telegram"
+	"github.com/rasimio/blueship/internal/transport/telegram"
 )
 
 // loadAvailableModels reads available_models from the ship DB.

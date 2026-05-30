@@ -13,7 +13,7 @@ import (
 	"github.com/rasimio/blueship/internal/provider/ollama"
 	"github.com/rasimio/blueship/internal/provider/openai"
 	"github.com/rasimio/blueship/internal/provider/openaicodex"
-	"github.com/rasimio/blueship/internal/telegram"
+	"github.com/rasimio/blueship/internal/transport/telegram"
 	"github.com/rasimio/blueship/internal/web"
 )
 

@@ -22,7 +22,7 @@ import (
 	bs "github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/browser"
 	"github.com/rasimio/blueship/internal/provider/openai"
-	"github.com/rasimio/blueship/internal/telegram"
+	"github.com/rasimio/blueship/internal/transport/telegram"
 	"github.com/rasimio/blueship/session"
 	"github.com/rasimio/blueship/tool"
 )

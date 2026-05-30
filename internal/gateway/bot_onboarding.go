@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	bs "github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/internal/telegram"
+	"github.com/rasimio/blueship/internal/transport/telegram"
 )
 
 // Inline Telegram-native onboarding FSM. Engages when an inbound

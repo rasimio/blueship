@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	bs "github.com/rasimio/blueship/core"
-	"github.com/rasimio/blueship/internal/telegram"
+	"github.com/rasimio/blueship/internal/transport/telegram"
 )
 
 // botInstance is one Telegram bot the gateway maintains a poller for.
