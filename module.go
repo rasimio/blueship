@@ -36,4 +36,3 @@ type CLIProvider interface {
 	Module
 	RegisterCLI(cmd *cobra.Command, d *Deps)
 }
-

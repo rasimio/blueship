@@ -46,9 +46,9 @@ type IterationResult = core.IterationResult
 
 // Convenience re-exports
 
-func NewToolRegistry() *ToolRegistry { return core.NewToolRegistry() }
-func OK(data interface{})            { core.OK(data) }
-func Fail(err string)                { core.Fail(err) }
+func NewToolRegistry() *ToolRegistry                           { return core.NewToolRegistry() }
+func OK(data interface{})                                      { core.OK(data) }
+func Fail(err string)                                          { core.Fail(err) }
 func InitDeps(cfg *Config, logger *slog.Logger) (*Deps, error) { return core.InitDeps(cfg, logger) }
 
 // NormalizeContent converts content to the canonical []ContentBlock format.
