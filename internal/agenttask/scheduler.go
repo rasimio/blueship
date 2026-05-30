@@ -41,12 +41,12 @@ type Scheduler struct {
 	// task.UserID rather than the global Deps zero-value. Hosts that
 	// don't need tenancy may leave it nil — the scheduler falls back to
 	// the shared global registry.
-	registryBuilder  func(userDeps *core.Deps) *core.ToolRegistry
-	msgStore         core.MessageStore
-	deps             *core.Deps
-	notify           func(ctx context.Context, userID uuid.UUID, text string)
-	onStatusChange   func(ctx context.Context, task core.AgentTask)
-	logger           *slog.Logger
+	registryBuilder func(userDeps *core.Deps) *core.ToolRegistry
+	msgStore        core.MessageStore
+	deps            *core.Deps
+	notify          func(ctx context.Context, userID uuid.UUID, text string)
+	onStatusChange  func(ctx context.Context, task core.AgentTask)
+	logger          *slog.Logger
 
 	mu     sync.Mutex
 	busy   map[string]bool // task ID → currently executing

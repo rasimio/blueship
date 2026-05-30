@@ -295,13 +295,13 @@ func TestExtractFetchedURLsFromTrace(t *testing.T) {
 // architectural ungrounded → recheck) is what makes Gate B' actionable.
 func TestScoreGroundingVerdict(t *testing.T) {
 	cases := []struct {
-		name              string
-		claims            []ClaimGrounding
-		wantMet           bool
-		wantGrounded      int
-		wantUngrounded    int
-		wantRecheckCount  int
-		wantReasonHas     string
+		name             string
+		claims           []ClaimGrounding
+		wantMet          bool
+		wantGrounded     int
+		wantUngrounded   int
+		wantRecheckCount int
+		wantReasonHas    string
 	}{
 		{
 			name: "all grounded — pass",
@@ -471,10 +471,10 @@ func repeatClaim(n int, c ClaimGrounding) []ClaimGrounding {
 // explanations, and surface a clean error on truly malformed output.
 func TestParseGroundingResponse(t *testing.T) {
 	cases := []struct {
-		name        string
-		raw         string
-		wantClaims  int
-		wantErr     bool
+		name       string
+		raw        string
+		wantClaims int
+		wantErr    bool
 	}{
 		{
 			name: "clean json",
