@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rasimio/blueship/agent"
+	"github.com/rasimio/blueship/runtime/agent"
 	"github.com/rasimio/blueship/internal/core"
 )
 

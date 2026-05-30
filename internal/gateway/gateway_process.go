@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/rasimio/blueship/agent"
+	"github.com/rasimio/blueship/runtime/agent"
 	bs "github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/tool"
 )

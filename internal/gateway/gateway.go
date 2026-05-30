@@ -21,7 +21,7 @@ import (
 	"github.com/rasimio/blueship/internal/provider/openai"
 	"github.com/rasimio/blueship/internal/transport/telegram"
 	"github.com/rasimio/blueship/internal/webaccess/browser"
-	"github.com/rasimio/blueship/session"
+	"github.com/rasimio/blueship/runtime/session"
 	"github.com/rasimio/blueship/tool"
 )
 

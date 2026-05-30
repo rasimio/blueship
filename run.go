@@ -18,7 +18,7 @@ import (
 	"github.com/rasimio/blueship/internal/toolcatalog"
 	"github.com/rasimio/blueship/internal/transport/httpchat"
 	"github.com/rasimio/blueship/internal/transport/ws"
-	"github.com/rasimio/blueship/session"
+	"github.com/rasimio/blueship/runtime/session"
 	"github.com/rasimio/blueship/tool"
 )
 

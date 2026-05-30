@@ -10,7 +10,7 @@ import (
 	"time"
 
 	bs "github.com/rasimio/blueship/internal/core"
-	"github.com/rasimio/blueship/session"
+	"github.com/rasimio/blueship/runtime/session"
 )
 
 func (g *Gateway) executePostActions(ctx context.Context, us *UserState, actions []bs.PostAction, reply string) {

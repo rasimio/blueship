@@ -10,7 +10,7 @@ import (
 
 	bs "github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/transport/telegram"
-	"github.com/rasimio/blueship/session"
+	"github.com/rasimio/blueship/runtime/session"
 )
 
 func (g *Gateway) emitTurnCompleted(us *UserState, sess *session.Session) {
