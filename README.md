@@ -1,6 +1,8 @@
 # BlueShip
 
-BlueShip is a Go 1.24 framework for building production AI agents. It provides the orchestration layer — LLM loop, tool dispatch, session persistence, Telegram transport, and background jobs — so that your application only needs to implement domain-specific modules.
+BlueShip is a Go 1.26 framework for building production AI agents. It provides the orchestration layer — LLM loop, tool dispatch, session persistence, Telegram transport, and background jobs — so that your application only needs to implement domain-specific modules.
+
+> **Repository layout:** the whole public API is reachable as `blueship.X` from the root package; the framework internals live under `internal/` organized by the S0 (transport) / S1 (reflex) / S2 (cortex) model. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full map.
 
 **Import path:** `github.com/rasimio/blueship`
 
@@ -14,7 +16,7 @@ BlueShip is a Go 1.24 framework for building production AI agents. It provides t
 - **Conversation compaction** — automatic summarization when context exceeds token budget
 - **Extended thinking** — native support for Anthropic's extended thinking (ThinkingBudget)
 - **Telegram transport** — full-featured: text, voice (Whisper), photos, file attachments, reply context, debouncing
-- **Built-in tools** — `current_time`, `web_search` (Serper), `web_fetch` (HTML→text)
+- **Built-in tools** — `current_time`, `web_search` (Serper), `browser_fetch` (headless Chrome)
 - **Background jobs** — panic-safe scheduler with heartbeat and autonomous thinking jobs
 - **Auto-migrations** — embedded SQL migrations applied on startup
 - **Redis optional** — non-fatal if unavailable; used for caching
@@ -35,7 +37,7 @@ BlueShip is a Go 1.24 framework for building production AI agents. It provides t
 │  1. InitDeps (DB pool, Redis)                                │
 │  2. migrate.Run (auto-apply embedded SQL)                    │
 │  3. user.ResolveOwner                                        │
-│  4. Module JobProviders → scheduler.RunLoop (goroutines)     │
+│  4. Module JobProviders → looprunner.RunLoop (goroutines)    │
 │  5. Gateway.Run → Telegram Poller                            │
 └──────────┬────────────────────────────────┬─────────────────┘
            │ updates                        │ heartbeat / thinking
@@ -80,7 +82,7 @@ BlueShip is a Go 1.24 framework for building production AI agents. It provides t
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.26+
 - PostgreSQL 14+
 - A Telegram bot token (`@BotFather`)
 - An Anthropic, OpenAI, or Gemini API key
@@ -122,7 +124,7 @@ func main() {
 }
 ```
 
-This gives you a fully functional Telegram bot backed by Claude. It handles sessions, compaction, and the built-in `current_time` and `web_fetch` tools automatically.
+This gives you a fully functional Telegram bot backed by Claude. It handles sessions, compaction, and the built-in `current_time` and `browser_fetch` tools automatically.
 
 ---
 
@@ -320,7 +322,7 @@ func (m *WeatherModule) Jobs(d *blueship.Deps) []blueship.Job {
 }
 ```
 
-Jobs run in a panic-safe loop via `scheduler.RunLoop`. Panics are caught and logged; the job is restarted on the next tick.
+Jobs run in a panic-safe loop via `looprunner.RunLoop`. Panics are caught and logged; the job is restarted on the next tick.
 
 ### CLIProvider — admin commands
 
@@ -429,7 +431,7 @@ An autonomous thinking job runs for the owner user only, using `THINKING.md`. It
 
 ### Custom jobs
 
-Any module implementing `JobProvider` can add jobs. They run in separate goroutines managed by `scheduler.RunLoop`, which catches panics, logs them, and restarts on the next interval.
+Any module implementing `JobProvider` can add jobs. They run in separate goroutines managed by `looprunner.RunLoop`, which catches panics, logs them, and restarts on the next interval.
 
 ---
 
