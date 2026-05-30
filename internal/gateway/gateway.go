@@ -21,7 +21,7 @@ import (
 	"github.com/rasimio/blueship/attachment"
 	bs "github.com/rasimio/blueship/core"
 	"github.com/rasimio/blueship/internal/browser"
-	"github.com/rasimio/blueship/internal/openai"
+	"github.com/rasimio/blueship/internal/provider/openai"
 	"github.com/rasimio/blueship/internal/telegram"
 	"github.com/rasimio/blueship/session"
 	"github.com/rasimio/blueship/tool"
@@ -989,15 +989,15 @@ func (g *Gateway) scanAndSaveLinks(ctx context.Context, us *UserState, sessionID
 
 // hasHeavyContent reports whether a user-message payload is unsuited
 // for the fast reflex tier. Two cases collapse to the same action:
-//   1. Any image block — the codex provider's text-only serializer
-//      silently drops image content, so reflex never sees the bytes
-//      and either hallucinates a description or routes wrong.
-//   2. Total text past ~16 KiB (≈ 4K tokens, double reflex's
-//      MessageBudget) — the chatgpt.com codex endpoint returns a
-//      misleading 400 ("expected a string, but got an object") on
-//      inputs it can't handle. PDF and text-doc attachments inline
-//      as a single huge text block in the daemon's /chat handler
-//      and trip this on the first user turn that carries them.
+//  1. Any image block — the codex provider's text-only serializer
+//     silently drops image content, so reflex never sees the bytes
+//     and either hallucinates a description or routes wrong.
+//  2. Total text past ~16 KiB (≈ 4K tokens, double reflex's
+//     MessageBudget) — the chatgpt.com codex endpoint returns a
+//     misleading 400 ("expected a string, but got an object") on
+//     inputs it can't handle. PDF and text-doc attachments inline
+//     as a single huge text block in the daemon's /chat handler
+//     and trip this on the first user turn that carries them.
 //
 // Either way the right move is to skip the fast tier and run cortex
 // (claude-opus-4-8) directly — it has the context budget for the
@@ -1166,8 +1166,8 @@ func (g *Gateway) getOrInitTelegramUser(ctx context.Context, bi *botInstance, ch
 // host has not paired yet:
 //   - platform bot: greet + signup link (drives signups);
 //   - user bot:     silent — only the owner is meant to talk to it, and
-//                   we don't want to leak that this token belongs to
-//                   someone in particular.
+//     we don't want to leak that this token belongs to
+//     someone in particular.
 //
 // The greeting text lives in <Config.Prompts>/telegram_platform_greeting.md
 // so it can be edited without redeploying the binary; missing file falls
@@ -1235,7 +1235,6 @@ func formatRulesAsGuidance(rules []bs.ActiveRule) string {
 	}
 	return b.String()
 }
-
 
 // sendDebugError sends the actual error via sink when debug mode is on.
 func (g *Gateway) sendDebugError(ctx context.Context, sink bs.ResponseSink, source string, err error) {
@@ -3454,7 +3453,6 @@ func (g *Gateway) ResetSession(ctx context.Context, userID string) (oldID, newID
 // Timezone returns the configured timezone.
 func (g *Gateway) Timezone() *time.Location { return g.tz }
 
-
 // cortexModel returns the cortex (response generator) model in "provider:name" format.
 func (g *Gateway) cortexModel() string {
 	if g.deps.ModelStore != nil {
@@ -3561,8 +3559,6 @@ func (g *Gateway) cortexModelDisplay() string {
 	}
 	return g.deps.Config.Models.Primary.Name
 }
-
-
 
 func shortID(id string) string {
 	if len(id) > 8 {

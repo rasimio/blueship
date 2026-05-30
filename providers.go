@@ -7,12 +7,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/rasimio/blueship/internal/anthropic"
-	"github.com/rasimio/blueship/internal/anthropicoauth"
-	"github.com/rasimio/blueship/internal/gemini"
-	"github.com/rasimio/blueship/internal/ollama"
-	"github.com/rasimio/blueship/internal/openai"
-	"github.com/rasimio/blueship/internal/openaicodex"
+	"github.com/rasimio/blueship/internal/provider/anthropic"
+	"github.com/rasimio/blueship/internal/provider/anthropicoauth"
+	"github.com/rasimio/blueship/internal/provider/gemini"
+	"github.com/rasimio/blueship/internal/provider/ollama"
+	"github.com/rasimio/blueship/internal/provider/openai"
+	"github.com/rasimio/blueship/internal/provider/openaicodex"
 	"github.com/rasimio/blueship/internal/telegram"
 	"github.com/rasimio/blueship/internal/web"
 )
