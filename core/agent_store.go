@@ -289,10 +289,10 @@ type IterationRecord struct {
 	Iteration        int
 	StartedAt        time.Time
 	CompletedAt      time.Time
-	Outcome          string          // "done" | "rejected" | "pause" | "continue" | "failed"
+	Outcome          string // "done" | "rejected" | "pause" | "continue" | "failed"
 	IsFinal          bool
-	AcceptanceMet    *bool           // nil = not evaluated this iteration
-	AcceptanceReason string          // evaluator's text when met=false
+	AcceptanceMet    *bool  // nil = not evaluated this iteration
+	AcceptanceReason string // evaluator's text when met=false
 	Output           string
 	Notify           string
 	ToolCalls        json.RawMessage // jsonb [{name, input, output, error}, ...]

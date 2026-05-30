@@ -2,11 +2,9 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -16,68 +14,6 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 )
-
-// chatIDCtxKey is a typed context key carrying the user's transport
-// chat id (e.g. "telegram:5452235517") through the agent loop to tool
-// handlers, so a tool can identify the originating chat without taking
-// a snapshot of Deps. Set by the gateway before dispatching cortex.
-type chatIDCtxKey struct{}
-
-// ContextWithChatID returns a copy of ctx that carries the given chat
-// id. Empty chat id is a no-op.
-func ContextWithChatID(ctx context.Context, chatID string) context.Context {
-	if chatID == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, chatIDCtxKey{}, chatID)
-}
-
-// ChatIDFromContext returns the chat id stashed via ContextWithChatID,
-// or "" when the context wasn't tagged.
-func ChatIDFromContext(ctx context.Context) string {
-	v, _ := ctx.Value(chatIDCtxKey{}).(string)
-	return v
-}
-
-// soulIDCtxKey is a typed context key carrying the tenant identity of
-// the request — which soul this incoming message / agent task / CLI
-// invocation belongs to. Resolved at transport boundaries (gateway,
-// scheduler, CLI startup), threaded through ctx so every downstream
-// repo INSERT can read it without needing soul-specific Deps wiring.
-// One arlene runtime hosts N souls concurrently; soul is per-request,
-// not per-process.
-type soulIDCtxKey struct{}
-
-// WithSoulID returns a copy of ctx carrying the given soul identity.
-// Passing uuid.Nil is a no-op (treated as "no soul resolution
-// happened yet"). Idempotent: re-setting overwrites cleanly.
-func WithSoulID(ctx context.Context, id uuid.UUID) context.Context {
-	if id == uuid.Nil {
-		return ctx
-	}
-	return context.WithValue(ctx, soulIDCtxKey{}, id)
-}
-
-// SoulIDFromContext returns the soul id stashed via WithSoulID, or
-// uuid.Nil when the context was never tagged. A Nil result on a write
-// path is a routing bug — but it is surfaced by the NOT NULL / FK
-// constraint on the tenant table (a loud, logged error) rather than a
-// panic, so a single unwired path can't take the whole daemon down
-// from inside a background goroutine. Use SoulIDFromContextOK when the
-// caller needs to branch on presence without relying on the constraint.
-func SoulIDFromContext(ctx context.Context) uuid.UUID {
-	v, _ := ctx.Value(soulIDCtxKey{}).(uuid.UUID)
-	return v
-}
-
-// SoulIDFromContextOK returns the soul id and a found flag.
-func SoulIDFromContextOK(ctx context.Context) (uuid.UUID, bool) {
-	v, ok := ctx.Value(soulIDCtxKey{}).(uuid.UUID)
-	if !ok || v == uuid.Nil {
-		return uuid.Nil, false
-	}
-	return v, true
-}
 
 // Deps holds runtime dependencies available to modules.
 type Deps struct {
@@ -218,31 +154,31 @@ func (d *Deps) DB(module string) (*sqlx.DB, error) {
 // The DB pool and Redis are shared (goroutine-safe).
 func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 	return &Deps{
-		Config:          d.Config,
-		Logger:          d.Logger,
-		Redis:           d.Redis,
-		UserID:          userID,
-		ChatID:          chatID,
-		IsOwner:         isOwner,
-		Embedder:        d.Embedder,
-		LLM:             d.LLM,
-		Sender:          d.Sender,
-		ModelStore:      d.ModelStore,
-		RoleTools:       d.RoleTools,
-		Prompts:         d.Prompts,
-		Users:           d.Users,
-		Sessions:        d.Sessions,
-		ContextInjector:   d.ContextInjector,
-		ReflexPreparer:    d.ReflexPreparer,
-		RuleEngine:        d.RuleEngine,
-		MessageEncoder:    d.MessageEncoder,
-		TurnCompletedHook: d.TurnCompletedHook,
+		Config:                      d.Config,
+		Logger:                      d.Logger,
+		Redis:                       d.Redis,
+		UserID:                      userID,
+		ChatID:                      chatID,
+		IsOwner:                     isOwner,
+		Embedder:                    d.Embedder,
+		LLM:                         d.LLM,
+		Sender:                      d.Sender,
+		ModelStore:                  d.ModelStore,
+		RoleTools:                   d.RoleTools,
+		Prompts:                     d.Prompts,
+		Users:                       d.Users,
+		Sessions:                    d.Sessions,
+		ContextInjector:             d.ContextInjector,
+		ReflexPreparer:              d.ReflexPreparer,
+		RuleEngine:                  d.RuleEngine,
+		MessageEncoder:              d.MessageEncoder,
+		TurnCompletedHook:           d.TurnCompletedHook,
 		AgentIterationCompletedHook: d.AgentIterationCompletedHook,
-		ResolveSoul:         d.ResolveSoul,
-		ResolveTelegramChat: d.ResolveTelegramChat,
-		SendToUser:          d.SendToUser,
-		BotOnboarding:       d.BotOnboarding,
-		pool:                d.pool,
+		ResolveSoul:                 d.ResolveSoul,
+		ResolveTelegramChat:         d.ResolveTelegramChat,
+		SendToUser:                  d.SendToUser,
+		BotOnboarding:               d.BotOnboarding,
+		pool:                        d.pool,
 	}
 }
 
@@ -352,39 +288,4 @@ func InitDeps(cfg *Config, logger *slog.Logger) (*Deps, error) {
 			schemas: schemas,
 		},
 	}, nil
-}
-
-// --- CLI output helpers ---
-
-// Response is the standard JSON output format for CLI commands.
-type Response struct {
-	Success  bool        `json:"success"`
-	Data     interface{} `json:"data,omitempty"`
-	Error    string      `json:"error,omitempty"`
-	Fallback interface{} `json:"fallback,omitempty"`
-	Cached   bool        `json:"cached"`
-	CachedAt *time.Time  `json:"cached_at,omitempty"`
-}
-
-// OK writes a success response to stdout.
-func OK(data interface{}) {
-	r := Response{Success: true, Data: data, Cached: false}
-	writeResponse(r)
-}
-
-// Fail writes an error response to stdout and exits.
-func Fail(err string) {
-	r := Response{Success: false, Error: err, Cached: false}
-	writeResponse(r)
-	os.Exit(1)
-}
-
-func writeResponse(r Response) {
-	data, err := json.MarshalIndent(r, "", "  ")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "output marshal error: %v\n", err)
-		fmt.Printf(`{"success":false,"error":"internal marshal error","cached":false}`)
-		os.Exit(1)
-	}
-	fmt.Println(string(data))
 }

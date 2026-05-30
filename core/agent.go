@@ -24,26 +24,26 @@ type AgentHandler interface {
 //
 // One primitive covers four execution shapes, distinguished by Strategy:
 //   - "recurring"  — Handler is invoked on every Schedule tick. Used for
-//                     heartbeat / inner-thought / session-summary jobs.
+//     heartbeat / inner-thought / session-summary jobs.
 //   - "direct"    — single LLM cycle with the configured tools. Cortex
-//                     freely chooses what to do; finishes when the
-//                     AcceptanceCriteria evaluator says it's done.
+//     freely chooses what to do; finishes when the
+//     AcceptanceCriteria evaluator says it's done.
 //   - "structured"— Plan is an ordered list of steps the executor walks
-//                     through; each iteration may revise on REVISE; ends
-//                     when AcceptanceCriteria is met.
+//     through; each iteration may revise on REVISE; ends
+//     when AcceptanceCriteria is met.
 //   - "delegate"  — Plan is shipped to DelegateTo (a peer agent_id) via
-//                     A2A. The peer runs the lifecycle locally and
-//                     emits milestone events.
+//     A2A. The peer runs the lifecycle locally and
+//     emits milestone events.
 //
 // Completion is criteria-driven: handlers / executors no longer rely on
 // Iteration >= MaxIterations to mark a task done. MaxIterations remains
 // only as a runaway-safety cap.
 type AgentTask struct {
-	ID          uuid.UUID       `db:"id" json:"id"`
-	SoulID      uuid.UUID       `db:"soul_id" json:"soul_id"`
-	UserID      uuid.UUID       `db:"user_id" json:"user_id"`
-	Title       string          `db:"title" json:"title"`
-	Description *string         `db:"description" json:"description,omitempty"`
+	ID          uuid.UUID `db:"id" json:"id"`
+	SoulID      uuid.UUID `db:"soul_id" json:"soul_id"`
+	UserID      uuid.UUID `db:"user_id" json:"user_id"`
+	Title       string    `db:"title" json:"title"`
+	Description *string   `db:"description" json:"description,omitempty"`
 
 	// AcceptanceCriteria is plain-language describing what "done" means.
 	// Each iteration's output is checked against this; an explicit Done
@@ -141,14 +141,14 @@ type TaskProgress struct {
 // AgentDeps is a focused dependency bundle for agent handlers.
 type AgentDeps struct {
 	LLM        CompletionProvider
-	Embedder   EmbeddingProvider    // nil = embedding disabled
+	Embedder   EmbeddingProvider // nil = embedding disabled
 	Registry   *ToolRegistry
 	RoleTools  *RoleToolStore
 	ModelStore *ModelConfigStore // model role → provider:model (nil = use Config.Models)
-	Store      MessageStore     // session/message persistence for agent loops
+	Store      MessageStore      // session/message persistence for agent loops
 	Prompts    PromptStore
-	Users      UserStore        // nil = user lookup disabled
-	Sessions   SessionQuerier   // nil = session query disabled
+	Users      UserStore      // nil = user lookup disabled
+	Sessions   SessionQuerier // nil = session query disabled
 	Logger     *slog.Logger
 	DB         func(module string) (*sqlx.DB, error)
 	UserID     uuid.UUID
