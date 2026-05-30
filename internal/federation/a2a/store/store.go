@@ -16,7 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 
-	"github.com/rasimio/blueship/a2a"
+	"github.com/rasimio/blueship/internal/federation/a2a"
 	bscore "github.com/rasimio/blueship/core"
 )
 

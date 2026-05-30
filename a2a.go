@@ -11,11 +11,11 @@ import (
 
 	"github.com/jmoiron/sqlx"
 
-	"github.com/rasimio/blueship/a2a"
-	a2aclient "github.com/rasimio/blueship/a2a/client"
-	a2aserver "github.com/rasimio/blueship/a2a/server"
-	a2astore "github.com/rasimio/blueship/a2a/store"
 	"github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/internal/federation/a2a"
+	a2aclient "github.com/rasimio/blueship/internal/federation/a2a/client"
+	a2aserver "github.com/rasimio/blueship/internal/federation/a2a/server"
+	a2astore "github.com/rasimio/blueship/internal/federation/a2a/store"
 	"github.com/rasimio/blueship/tool"
 )
 

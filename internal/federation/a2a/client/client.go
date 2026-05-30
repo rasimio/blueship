@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rasimio/blueship/a2a"
-	"github.com/rasimio/blueship/a2a/store"
+	"github.com/rasimio/blueship/internal/federation/a2a"
+	"github.com/rasimio/blueship/internal/federation/a2a/store"
 )
 
 // Tracer is an optional observability hook — it is called every time the

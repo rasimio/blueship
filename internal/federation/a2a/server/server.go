@@ -22,8 +22,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rasimio/blueship/a2a"
-	"github.com/rasimio/blueship/a2a/store"
+	"github.com/rasimio/blueship/internal/federation/a2a"
+	"github.com/rasimio/blueship/internal/federation/a2a/store"
 )
 
 // Dispatcher resolves an incoming tool invocation to a locally-registered

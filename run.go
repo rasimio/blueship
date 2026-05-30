@@ -13,11 +13,11 @@ import (
 	"github.com/rasimio/blueship/internal/agenttask"
 	"github.com/rasimio/blueship/internal/gateway"
 	"github.com/rasimio/blueship/internal/looprunner"
+	"github.com/rasimio/blueship/internal/migrate"
 	"github.com/rasimio/blueship/internal/store/user"
 	"github.com/rasimio/blueship/internal/toolcatalog"
 	"github.com/rasimio/blueship/internal/transport/httpchat"
 	"github.com/rasimio/blueship/internal/transport/ws"
-	"github.com/rasimio/blueship/migrate"
 	"github.com/rasimio/blueship/session"
 	"github.com/rasimio/blueship/tool"
 )
