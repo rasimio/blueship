@@ -17,7 +17,7 @@ import (
 	"github.com/jmoiron/sqlx"
 
 	"github.com/rasimio/blueship/internal/federation/a2a"
-	bscore "github.com/rasimio/blueship/core"
+	bscore "github.com/rasimio/blueship/internal/core"
 )
 
 // ErrNotFound is returned by Get/Read helpers when the row does not exist.

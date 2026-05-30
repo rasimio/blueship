@@ -5,7 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // allowedToolsForSoul returns the set of tool names a soul may use: every

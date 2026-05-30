@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // SerperSearch implements bs.SearchEngine using the Serper.dev Google Search API.

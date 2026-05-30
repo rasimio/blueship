@@ -10,7 +10,7 @@ import (
 
 	"github.com/jmoiron/sqlx"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // Store provides CRUD operations for chat sessions and messages.

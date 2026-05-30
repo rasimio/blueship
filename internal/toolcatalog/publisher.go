@@ -12,7 +12,7 @@ import (
 
 	"github.com/jmoiron/sqlx"
 
-	"github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/internal/core"
 )
 
 // Publish replaces every native row in vaelum.tool_catalog with one row per

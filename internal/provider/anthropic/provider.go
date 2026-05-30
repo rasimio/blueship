@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 const messagesURL = "https://api.anthropic.com/v1/messages"

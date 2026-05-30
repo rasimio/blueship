@@ -19,7 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/internal/core"
 )
 
 // DelegateStrategyExecutor implements core.AgentHandler for the

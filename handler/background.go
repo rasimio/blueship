@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rasimio/blueship/agent"
-	"github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/internal/core"
 )
 
 // recentSearchResultURLs pulls URLs out of browser_search outputs in

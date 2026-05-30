@@ -5,7 +5,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/federation/fleet"
 )
 

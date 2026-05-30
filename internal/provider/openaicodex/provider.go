@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 const responsesURL = "https://chatgpt.com/backend-api/codex/responses"

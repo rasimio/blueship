@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 
-	"github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/telemetry"
 )
 

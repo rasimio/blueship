@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 	"nhooyr.io/websocket"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/gateway"
 )
 

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // Tool name constants. Each tool registered in this package exports the

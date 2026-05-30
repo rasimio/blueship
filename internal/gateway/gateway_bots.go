@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/transport/telegram"
 )
 

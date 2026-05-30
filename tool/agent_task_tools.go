@@ -7,7 +7,7 @@ import (
 
 	"github.com/lib/pq"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // Tool name constants — see builtin.go for the rationale.

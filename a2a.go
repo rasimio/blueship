@@ -11,7 +11,7 @@ import (
 
 	"github.com/jmoiron/sqlx"
 
-	"github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/federation/a2a"
 	a2aclient "github.com/rasimio/blueship/internal/federation/a2a/client"
 	a2aserver "github.com/rasimio/blueship/internal/federation/a2a/server"

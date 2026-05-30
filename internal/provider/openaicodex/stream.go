@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // StreamComplete sends a streaming request via the OpenAI Responses API SSE

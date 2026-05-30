@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // ToolEscalate is the canonical name of the escalation sentinel tool.

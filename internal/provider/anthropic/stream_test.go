@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // sseEvents joins SSE data lines into a stream body — events are separated by

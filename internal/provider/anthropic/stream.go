@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // StreamComplete sends a streaming completion request to the Anthropic Messages

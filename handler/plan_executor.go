@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/rasimio/blueship/agent"
-	"github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/internal/core"
 )
 
 // PlanStep represents one step in a goal execution plan.

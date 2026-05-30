@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // dumpRequestBodyIfEnabled writes the outgoing JSON to the path in

@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rasimio/blueship/attachment"
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/provider/openai"
 	"github.com/rasimio/blueship/internal/transport/telegram"
 	"github.com/rasimio/blueship/internal/webaccess/browser"

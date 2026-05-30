@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 const generateContentURL = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s"

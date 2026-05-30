@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // Loop orchestrates the send → tool_use → dispatch → loop cycle.

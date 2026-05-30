@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 
-	"github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/webaccess/browser"
 )
 

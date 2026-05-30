@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // Session represents a chat session stored in PostgreSQL.

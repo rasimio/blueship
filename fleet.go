@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rasimio/blueship/core"
+	"github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/federation/fleet"
 )
 

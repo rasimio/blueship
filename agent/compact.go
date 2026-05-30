@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // SummaryHeader is prepended to the compaction summary when injected into the system prompt.

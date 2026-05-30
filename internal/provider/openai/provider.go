@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 const defaultBaseURL = "https://api.openai.com/v1"

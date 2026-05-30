@@ -9,7 +9,7 @@ import (
 	"sort"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // ToolTraceRecall is the canonical tool name. See builtin.go for the

@@ -23,7 +23,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rasimio/blueship/attachment"
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/webaccess/browser"
 	"github.com/rasimio/blueship/internal/gateway"
 )

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	bs "github.com/rasimio/blueship/core"
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 func TestCompleteReturnsTextResponse(t *testing.T) {
