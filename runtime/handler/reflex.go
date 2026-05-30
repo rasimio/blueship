@@ -364,7 +364,9 @@ func parseReflexResult(text string) (*core.ReflexResult, error) {
 		if err := json.Unmarshal(raw.Tools, &toolStrings); err == nil {
 			result.Tools = toolStrings
 		} else {
-			var toolObjects []struct{ Tool string `json:"tool"` }
+			var toolObjects []struct {
+				Tool string `json:"tool"`
+			}
 			if err := json.Unmarshal(raw.Tools, &toolObjects); err == nil {
 				for _, t := range toolObjects {
 					result.Tools = append(result.Tools, t.Tool)
@@ -375,4 +377,3 @@ func parseReflexResult(text string) (*core.ReflexResult, error) {
 
 	return result, nil
 }
-
