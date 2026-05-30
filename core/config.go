@@ -361,6 +361,16 @@ type GatewayConfig struct {
 	// Default false; opt-in for safe rollout.
 	InteractionTier bool
 
+	// SkipReflexOnText, when true, skips the Reflex fast tier on text
+	// transports (those that wire no spoken-filler flush — i.e. onReflexDone
+	// is nil) and runs Cortex directly, while voice transports keep the
+	// two-tier reflex+filler. Rationale (Phase 2, calibration-backed): on a
+	// single base model the reflex pre-pass in text neither masks latency
+	// (streaming Cortex is its own handshake) nor reliably routes (a cheap
+	// difficulty gate mis-routes ~half the hard turns), so it is net overhead
+	// in text; voice still benefits from the sub-second filler. Default false.
+	SkipReflexOnText bool
+
 	// BargeIn, when true, runs the WebSocket voice transport with a
 	// concurrent read loop + turn manager so the user can interrupt a
 	// response mid-stream (speech_start / cancel frames). When false the

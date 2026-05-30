@@ -2937,6 +2937,27 @@ func (g *Gateway) runInteraction(
 		return reply, traces, true, err
 	}
 
+	// Phase 2 (calibration-backed): skip the reflex tier on TEXT transports —
+	// those that wire no spoken-filler flush (onReflexDone == nil) — and run
+	// Cortex directly, append-once (same pattern as the heavy bypass above).
+	// Voice (onReflexDone != nil) keeps the two-tier reflex+filler. In text the
+	// reflex pre-pass is net overhead: streaming Cortex is its own latency
+	// handshake, and a cheap difficulty gate mis-routes ~half the hard turns.
+	if onReflexDone == nil && g.deps.Config.Gateway.SkipReflexOnText {
+		if err = g.store.Append(ctx, cortexCfg.SessionID, bs.Message{
+			Role:             "user",
+			Content:          content,
+			ReplyToMessageID: cortexCfg.ReplyToMessageID,
+			TGMessageID:      cortexCfg.TGMessageID,
+		}); err != nil {
+			return "", nil, false, fmt.Errorf("interaction: append user message (skip-reflex): %w", err)
+		}
+		cortexCfg.SkipUserAppend = true
+		g.logger.Info("interaction: skip reflex on text, cortex direct", "session_id", cortexCfg.SessionID)
+		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
+		return reply, traces, false, err
+	}
+
 	// Derive the Reflex (interaction-tier) config from the Cortex config:
 	// same session / context / rules, but the fast model, the reflex role
 	// (escalate-only tools) and the focused interaction-tier system prompt
