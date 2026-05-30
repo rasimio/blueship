@@ -51,21 +51,21 @@ import (
 const (
 	// FSM step names. Persisted verbatim in
 	// vaelum.bot_onboarding_state.step; the gateway dispatches on them.
-	onbStepStart           = "start"
-	onbStepAskName         = "ask_name"
-	onbStepAskVoice        = "ask_voice"
-	onbStepAskTraits       = "ask_traits"
-	onbStepAskDescription  = "ask_description"
-	onbStepConfirm         = "confirm"
+	onbStepStart          = "start"
+	onbStepAskName        = "ask_name"
+	onbStepAskVoice       = "ask_voice"
+	onbStepAskTraits      = "ask_traits"
+	onbStepAskDescription = "ask_description"
+	onbStepConfirm        = "confirm"
 
 	// callback_data prefixes / tokens. Kept short — Telegram caps
 	// callback_data at 64 bytes so "tr:mischievous" leaves plenty of
 	// headroom for long trait names.
-	onbCallbackVoice        = "vc:"          // vc:<voice_id>
-	onbCallbackTrait        = "tr:"          // tr:<trait>
-	onbCallbackTraitsDone   = "traits_done"  // bare token
-	onbCallbackConfirmOK    = "confirm_ok"   // bare token
-	onbCallbackConfirmBack  = "confirm_back" // bare token
+	onbCallbackVoice       = "vc:"          // vc:<voice_id>
+	onbCallbackTrait       = "tr:"          // tr:<trait>
+	onbCallbackTraitsDone  = "traits_done"  // bare token
+	onbCallbackConfirmOK   = "confirm_ok"   // bare token
+	onbCallbackConfirmBack = "confirm_back" // bare token
 
 	// data blob keys (vaelum.bot_onboarding_state.data jsonb).
 	onbDataName        = "name"
@@ -116,45 +116,45 @@ var onbTraits = []string{
 // per the spec). Kept as a struct so a future locale switch is one
 // data swap instead of inline edits.
 type onboardingMessages struct {
-	Greeting          string
-	NamePromptFmt     string // %s = name (already validated)
-	NameTooShort      string
-	VoicePromptFmt    string // %s = name (used after voice pick)
-	TraitsPrompt      string
-	TraitsCounterFmt  string // %d = selected count
-	DescriptionPrompt string
-	ConfirmTitle      string
-	ConfirmRowFmt     string // %s = label, %s = value
-	ConfirmTrueQ      string
-	BtnConfirmOK      string
-	BtnConfirmBack    string
-	WorkingFmt        string // %s = name
-	DoneFmt           string // %s = name
-	BackFmt           string // %s = name (welcome-back greeting)
-	ErrAccountFail    string
+	Greeting            string
+	NamePromptFmt       string // %s = name (already validated)
+	NameTooShort        string
+	VoicePromptFmt      string // %s = name (used after voice pick)
+	TraitsPrompt        string
+	TraitsCounterFmt    string // %d = selected count
+	DescriptionPrompt   string
+	ConfirmTitle        string
+	ConfirmRowFmt       string // %s = label, %s = value
+	ConfirmTrueQ        string
+	BtnConfirmOK        string
+	BtnConfirmBack      string
+	WorkingFmt          string // %s = name
+	DoneFmt             string // %s = name
+	BackFmt             string // %s = name (welcome-back greeting)
+	ErrAccountFail      string
 	ErrAlreadyOnboarded string
-	DashEmpty         string // shown for empty tags / description
+	DashEmpty           string // shown for empty tags / description
 }
 
 var onbMsg = onboardingMessages{
-	Greeting:          "Привет, я Vaelum. Помогу тебе создать собственного ассистента. Как его(её) зовут?",
-	NamePromptFmt:     "Приятно, %s. Выбери голос:",
-	NameTooShort:      "Имя должно быть от 2 до 30 символов. Попробуй ещё раз:",
-	VoicePromptFmt:    "Приятно, %s. Выбери голос:",
-	TraitsPrompt:      "Выбери до 5 черт характера. Тапни чтобы выделить, тапни ещё раз чтобы снять. Когда готов(а) — нажми «Готово».",
-	TraitsCounterFmt:  "Готово · %d из 5",
-	DescriptionPrompt: "Или опиши характер своими словами (одной строкой), либо отправь /skip чтобы пропустить.",
-	ConfirmTitle:      "Проверим перед тем как создать:",
-	ConfirmRowFmt:     "%s: %s",
-	ConfirmTrueQ:      "Всё верно?",
-	BtnConfirmOK:      "✓ Создать",
-	BtnConfirmBack:    "← Назад",
-	WorkingFmt:        "Готовлю...",
-	DoneFmt:           "Готово, познакомься со своим %s. Напиши что-нибудь, и я отвечу.",
-	BackFmt:           "С возвращением, %s!",
-	ErrAccountFail:    "Что-то пошло не так при создании аккаунта. Попробуй ещё раз — нажми «✓ Создать».",
+	Greeting:            "Привет, я Vaelum. Помогу тебе создать собственного ассистента. Как его(её) зовут?",
+	NamePromptFmt:       "Приятно, %s. Выбери голос:",
+	NameTooShort:        "Имя должно быть от 2 до 30 символов. Попробуй ещё раз:",
+	VoicePromptFmt:      "Приятно, %s. Выбери голос:",
+	TraitsPrompt:        "Выбери до 5 черт характера. Тапни чтобы выделить, тапни ещё раз чтобы снять. Когда готов(а) — нажми «Готово».",
+	TraitsCounterFmt:    "Готово · %d из 5",
+	DescriptionPrompt:   "Или опиши характер своими словами (одной строкой), либо отправь /skip чтобы пропустить.",
+	ConfirmTitle:        "Проверим перед тем как создать:",
+	ConfirmRowFmt:       "%s: %s",
+	ConfirmTrueQ:        "Всё верно?",
+	BtnConfirmOK:        "✓ Создать",
+	BtnConfirmBack:      "← Назад",
+	WorkingFmt:          "Готовлю...",
+	DoneFmt:             "Готово, познакомься со своим %s. Напиши что-нибудь, и я отвечу.",
+	BackFmt:             "С возвращением, %s!",
+	ErrAccountFail:      "Что-то пошло не так при создании аккаунта. Попробуй ещё раз — нажми «✓ Создать».",
 	ErrAlreadyOnboarded: "У тебя уже есть ассистент. Напиши что-нибудь, и я отвечу.",
-	DashEmpty:         "—",
+	DashEmpty:           "—",
 }
 
 // maybeRunBotOnboarding intercepts inbound text from a chat with no

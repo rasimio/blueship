@@ -21,7 +21,9 @@ import (
 )
 
 // loadAvailableModels reads available_models from the ship DB.
-func loadAvailableModels(db interface{ Select(dest interface{}, query string, args ...interface{}) error }) map[string][]string {
+func loadAvailableModels(db interface {
+	Select(dest interface{}, query string, args ...interface{}) error
+}) map[string][]string {
 	type row struct {
 		Provider string `db:"provider"`
 		Name     string `db:"name"`

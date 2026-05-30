@@ -113,11 +113,11 @@ func (g *Gateway) ReloadBots(ctx context.Context) error {
 
 // loadDesiredBots returns the bots the gateway should currently poll.
 // Sources, in order:
-//   1. cfg.Transport.Telegram.ListBots — the multi-bot path (typically a
-//      vaelum.bots SELECT). When set, BotToken is ignored.
-//   2. cfg.Transport.BotToken — single-bot legacy fallback. Yields one
-//      transient bot with uuid.Nil id; useful for dev/test configs that
-//      pre-date the platform tables.
+//  1. cfg.Transport.Telegram.ListBots — the multi-bot path (typically a
+//     vaelum.bots SELECT). When set, BotToken is ignored.
+//  2. cfg.Transport.BotToken — single-bot legacy fallback. Yields one
+//     transient bot with uuid.Nil id; useful for dev/test configs that
+//     pre-date the platform tables.
 func (g *Gateway) loadDesiredBots(ctx context.Context) ([]bs.BotConfig, error) {
 	cfg := g.deps.Config
 	if cfg.Transport.Telegram.ListBots != nil {
