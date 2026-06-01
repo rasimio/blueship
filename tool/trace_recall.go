@@ -331,7 +331,7 @@ func RegisterTraceRecall(r *bs.ToolRegistry, tracePath string) {
 	}
 
 	r.Register(ToolTraceRecall,
-		"Покажи свою собственную работу за последние N минут — какие тулы ты вызывала, к каким моделям обращалась, что упало, что было медленным. Это твой единственный канал самонаблюдения. Используй когда хочешь понять 'что я делала только что', найти узкие места ('почему долго думала?') или заметить ошибки которые сама не помнишь. Возвращает агрегаты: tool_calls (по имени), llm_calls (по модели), agent_tasks_by_handler, errors, slow_spans (top-5 по длительности).",
+		"Show your own work over the last N minutes — which tools you called, which models you queried, what failed, what was slow. This is your only self-observation channel. Use it to understand 'what did I just do', find bottlenecks ('why did that take so long?'), or catch errors you don't remember. Returns aggregates: tool_calls (by name), llm_calls (by model), agent_tasks_by_handler, errors, slow_spans (top-5 by duration).",
 		json.RawMessage(`{
 			"type":"object",
 			"properties":{

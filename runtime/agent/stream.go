@@ -167,7 +167,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			a.logger.Warn("LLM refused to respond (stream)", "model", cfg.Model, "turn", turn+1)
 			text := accumulated.String()
 			if text == "" {
-				text = "(модель отказалась отвечать на этот запрос — переформулируй / упрости контекст)"
+				text = a.cfg.UI.ModelRefused
 				if cb != nil && cb.OnText != nil {
 					cb.OnText(text)
 				}

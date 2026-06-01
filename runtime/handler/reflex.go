@@ -62,7 +62,7 @@ func runReflexPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Locati
 
 	notesBlock := rc.ActiveNotes
 	if notesBlock == "" {
-		notesBlock = "(нет активных заметок)"
+		notesBlock = deps.Config.UI.NoActiveNotes
 	}
 	reflexPrompt := fmt.Sprintf(reflexPlanTemplate, rulesBlock.String(), toolsList, notesBlock, msg)
 

@@ -11,7 +11,7 @@ import (
 )
 
 // SummaryHeader is prepended to the compaction summary when injected into the system prompt.
-const SummaryHeader = "\n\n## Краткое содержание предыдущего разговора\n"
+const SummaryHeader = "\n\n## Summary of the earlier conversation\n"
 
 // Compactor summarizes older messages via a lightweight model to reduce context size.
 type Compactor struct {

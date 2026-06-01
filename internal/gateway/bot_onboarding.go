@@ -112,50 +112,9 @@ var onbTraits = []string{
 	"poetic", "sharp", "grounded", "mischievous",
 }
 
-// onboardingMessages bundles the localised UI strings (Russian, short
-// per the spec). Kept as a struct so a future locale switch is one
-// data swap instead of inline edits.
-type onboardingMessages struct {
-	Greeting            string
-	NamePromptFmt       string // %s = name (already validated)
-	NameTooShort        string
-	VoicePromptFmt      string // %s = name (used after voice pick)
-	TraitsPrompt        string
-	TraitsCounterFmt    string // %d = selected count
-	DescriptionPrompt   string
-	ConfirmTitle        string
-	ConfirmRowFmt       string // %s = label, %s = value
-	ConfirmTrueQ        string
-	BtnConfirmOK        string
-	BtnConfirmBack      string
-	WorkingFmt          string // %s = name
-	DoneFmt             string // %s = name
-	BackFmt             string // %s = name (welcome-back greeting)
-	ErrAccountFail      string
-	ErrAlreadyOnboarded string
-	DashEmpty           string // shown for empty tags / description
-}
-
-var onbMsg = onboardingMessages{
-	Greeting:            "Привет, я Vaelum. Помогу тебе создать собственного ассистента. Как его(её) зовут?",
-	NamePromptFmt:       "Приятно, %s. Выбери голос:",
-	NameTooShort:        "Имя должно быть от 2 до 30 символов. Попробуй ещё раз:",
-	VoicePromptFmt:      "Приятно, %s. Выбери голос:",
-	TraitsPrompt:        "Выбери до 5 черт характера. Тапни чтобы выделить, тапни ещё раз чтобы снять. Когда готов(а) — нажми «Готово».",
-	TraitsCounterFmt:    "Готово · %d из 5",
-	DescriptionPrompt:   "Или опиши характер своими словами (одной строкой), либо отправь /skip чтобы пропустить.",
-	ConfirmTitle:        "Проверим перед тем как создать:",
-	ConfirmRowFmt:       "%s: %s",
-	ConfirmTrueQ:        "Всё верно?",
-	BtnConfirmOK:        "✓ Создать",
-	BtnConfirmBack:      "← Назад",
-	WorkingFmt:          "Готовлю...",
-	DoneFmt:             "Готово, познакомься со своим %s. Напиши что-нибудь, и я отвечу.",
-	BackFmt:             "С возвращением, %s!",
-	ErrAccountFail:      "Что-то пошло не так при создании аккаунта. Попробуй ещё раз — нажми «✓ Создать».",
-	ErrAlreadyOnboarded: "У тебя уже есть ассистент. Напиши что-нибудь, и я отвечу.",
-	DashEmpty:           "—",
-}
+// onb returns the host-configured onboarding copy (generic English defaults
+// filled by Config.ApplyDefaults; a host overrides via GatewayConfig.Onboarding).
+func (g *Gateway) onb() bs.OnboardingMessages { return g.deps.Config.Gateway.Onboarding }
 
 // maybeRunBotOnboarding intercepts inbound text from a chat with no
 // vaelum identity. Returns true when the message has been handled by
@@ -181,9 +140,9 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 		if cmd, forUs := g.parseCommand(bi, text); cmd == "/start" && forUs {
 			name := g.lookupDisplayName(ctx, us.UserID)
 			if name == "" {
-				name = "друг"
+				name = g.onb().FallbackName
 			}
-			g.sendOnboardingText(ctx, bi, tgChatID, fmt.Sprintf(onbMsg.BackFmt, name))
+			g.sendOnboardingText(ctx, bi, tgChatID, fmt.Sprintf(g.onb().BackFmt, name))
 			return true
 		}
 		return false
@@ -198,9 +157,9 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 			if cmd, forUs := g.parseCommand(bi, text); cmd == "/start" && forUs {
 				name := g.lookupDisplayName(ctx, uid)
 				if name == "" {
-					name = "друг"
+					name = g.onb().FallbackName
 				}
-				g.sendOnboardingText(ctx, bi, tgChatID, fmt.Sprintf(onbMsg.BackFmt, name))
+				g.sendOnboardingText(ctx, bi, tgChatID, fmt.Sprintf(g.onb().BackFmt, name))
 				return true
 			}
 			return false
@@ -323,7 +282,7 @@ func (g *Gateway) onboardingStart(ctx context.Context, bi *botInstance, tgChatID
 			"tg_user", tgUserID, "error", err)
 		return false
 	}
-	g.sendOnboardingText(ctx, bi, tgChatID, onbMsg.Greeting)
+	g.sendOnboardingText(ctx, bi, tgChatID, g.onb().Greeting)
 	return true
 }
 
@@ -333,7 +292,7 @@ func (g *Gateway) onboardingHandleName(ctx context.Context, bi *botInstance, tgC
 	// so a too-long paste is rejected with the same hint as too-short.
 	rs := []rune(name)
 	if len(rs) < onbMinNameRunes || len(rs) > onbMaxNameRunes {
-		g.sendOnboardingText(ctx, bi, tgChatID, onbMsg.NameTooShort)
+		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().NameTooShort)
 		return true
 	}
 
@@ -357,7 +316,7 @@ func (g *Gateway) onboardingHandleVoice(ctx context.Context, bi *botInstance, tg
 		// pick a valid one without losing the name they typed.
 		name, _ := data[onbDataName].(string)
 		if name == "" {
-			name = "друг"
+			name = g.onb().FallbackName
 		}
 		g.sendOnboardingVoicePicker(ctx, bi, tgChatID, name)
 		return true
@@ -425,7 +384,7 @@ func (g *Gateway) onboardingToggleTrait(ctx context.Context, bi *botInstance, tg
 	// Edit the keyboard in place. The trait labels and the
 	// "Готово · N из 5" counter both re-render off the fresh tags
 	// list, so a single edit keeps the message consistent.
-	rows := buildTraitsKeyboard(tags)
+	rows := g.buildTraitsKeyboard(tags)
 	if err := bi.client.EditMessageReplyMarkup(ctx, tgChatID, messageID, rows); err != nil {
 		// Telegram returns "message is not modified" when the keyboard
 		// shape is identical — harmless for our case but log other
@@ -442,7 +401,7 @@ func (g *Gateway) onboardingHandleTraitsDone(ctx context.Context, bi *botInstanc
 			"tg_user", tgUserID, "error", err)
 		return false
 	}
-	g.sendOnboardingText(ctx, bi, tgChatID, onbMsg.DescriptionPrompt)
+	g.sendOnboardingText(ctx, bi, tgChatID, g.onb().DescriptionPrompt)
 	return true
 }
 
@@ -481,12 +440,12 @@ func (g *Gateway) onboardingFinalize(ctx context.Context, bi *botInstance, tgCha
 	if name == "" || voiceID == "" {
 		// Defensive: state somehow lacks the required fields. Restart
 		// the flow rather than minting a broken soul.
-		g.sendOnboardingText(ctx, bi, tgChatID, onbMsg.Greeting)
+		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().Greeting)
 		_ = g.deps.BotOnboarding.AdvanceStep(ctx, tgUserID, bi.id, onbStepAskName, nil)
 		return true
 	}
 
-	g.sendOnboardingText(ctx, bi, tgChatID, onbMsg.WorkingFmt)
+	g.sendOnboardingText(ctx, bi, tgChatID, g.onb().WorkingFmt)
 
 	_, _, err := g.deps.BotOnboarding.CompleteOnboarding(ctx, bs.BotOnboardingComplete{
 		BotID:                bi.id,
@@ -504,12 +463,12 @@ func (g *Gateway) onboardingFinalize(ctx context.Context, bi *botInstance, tgCha
 		// fix whatever blew up server-side.
 		if errors.Is(err, bs.ErrBotOnboardingAlreadyDone) {
 			_ = g.deps.BotOnboarding.ClearState(ctx, tgUserID, bi.id)
-			g.sendOnboardingText(ctx, bi, tgChatID, onbMsg.ErrAlreadyOnboarded)
+			g.sendOnboardingText(ctx, bi, tgChatID, g.onb().ErrAlreadyOnboarded)
 			return true
 		}
 		g.logger.Error("gateway: onboarding CompleteOnboarding failed",
 			"tg_user", tgUserID, "bot_id", bi.id.String(), "name", name, "error", err)
-		g.sendOnboardingText(ctx, bi, tgChatID, onbMsg.ErrAccountFail)
+		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().ErrAccountFail)
 		return true
 	}
 
@@ -526,7 +485,7 @@ func (g *Gateway) onboardingFinalize(ctx context.Context, bi *botInstance, tgCha
 	delete(g.users, tgCanonical(tgChatID))
 	g.mu.Unlock()
 
-	g.sendOnboardingText(ctx, bi, tgChatID, fmt.Sprintf(onbMsg.DoneFmt, name))
+	g.sendOnboardingText(ctx, bi, tgChatID, fmt.Sprintf(g.onb().DoneFmt, name))
 	return true
 }
 
@@ -536,7 +495,7 @@ func (g *Gateway) onboardingConfirmBack(ctx context.Context, bi *botInstance, tg
 			"tg_user", tgUserID, "error", err)
 		return false
 	}
-	g.sendOnboardingText(ctx, bi, tgChatID, onbMsg.DescriptionPrompt)
+	g.sendOnboardingText(ctx, bi, tgChatID, g.onb().DescriptionPrompt)
 	return true
 }
 
@@ -545,18 +504,18 @@ func (g *Gateway) onboardingConfirmBack(ctx context.Context, bi *botInstance, tg
 func (g *Gateway) onboardingReissue(ctx context.Context, bi *botInstance, tgChatID int64, step string, data map[string]any) bool {
 	switch step {
 	case onbStepAskName:
-		g.sendOnboardingText(ctx, bi, tgChatID, onbMsg.Greeting)
+		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().Greeting)
 	case onbStepAskVoice:
 		name, _ := data[onbDataName].(string)
 		if name == "" {
-			name = "друг"
+			name = g.onb().FallbackName
 		}
 		g.sendOnboardingVoicePicker(ctx, bi, tgChatID, name)
 	case onbStepAskTraits:
 		tags := tagsFromData(data)
 		g.sendOnboardingTraitsPicker(ctx, bi, tgChatID, 0, tags)
 	case onbStepAskDescription:
-		g.sendOnboardingText(ctx, bi, tgChatID, onbMsg.DescriptionPrompt)
+		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().DescriptionPrompt)
 	case onbStepConfirm:
 		g.sendOnboardingConfirm(ctx, bi, tgChatID, data)
 	default:
@@ -595,7 +554,7 @@ func (g *Gateway) sendOnboardingVoicePicker(ctx context.Context, bi *botInstance
 			},
 		})
 	}
-	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, fmt.Sprintf(onbMsg.VoicePromptFmt, name), rows); err != nil {
+	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, fmt.Sprintf(g.onb().VoicePromptFmt, name), rows); err != nil {
 		g.logger.Warn("gateway: onboarding voice keyboard send failed",
 			"tg_chat", tgChatID, "error", err)
 	}
@@ -611,8 +570,8 @@ func (g *Gateway) sendOnboardingTraitsPicker(ctx context.Context, bi *botInstanc
 	if bi == nil || bi.client == nil {
 		return
 	}
-	rows := buildTraitsKeyboard(selected)
-	res, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, onbMsg.TraitsPrompt, rows)
+	rows := g.buildTraitsKeyboard(selected)
+	res, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, g.onb().TraitsPrompt, rows)
 	if err != nil || res == nil {
 		g.logger.Warn("gateway: onboarding traits keyboard send failed",
 			"tg_chat", tgChatID, "error", err)
@@ -646,33 +605,33 @@ func (g *Gateway) sendOnboardingConfirm(ctx context.Context, bi *botInstance, tg
 	tags := tagsFromData(data)
 	desc, _ := data[onbDataDescription].(string)
 
-	voiceName := onbMsg.DashEmpty
+	voiceName := g.onb().DashEmpty
 	if v := findVoice(voiceID); v != nil {
 		voiceName = v.Name
 	}
-	tagsStr := onbMsg.DashEmpty
+	tagsStr := g.onb().DashEmpty
 	if len(tags) > 0 {
 		tagsStr = strings.Join(tags, ", ")
 	}
 	descStr := desc
 	if strings.TrimSpace(descStr) == "" {
-		descStr = onbMsg.DashEmpty
+		descStr = g.onb().DashEmpty
 	}
 
 	var b strings.Builder
-	b.WriteString(onbMsg.ConfirmTitle)
+	b.WriteString(g.onb().ConfirmTitle)
 	b.WriteString("\n\n")
-	fmt.Fprintf(&b, onbMsg.ConfirmRowFmt+"\n", "Имя", name)
-	fmt.Fprintf(&b, onbMsg.ConfirmRowFmt+"\n", "Голос", voiceName)
-	fmt.Fprintf(&b, onbMsg.ConfirmRowFmt+"\n", "Черты", tagsStr)
-	fmt.Fprintf(&b, onbMsg.ConfirmRowFmt+"\n", "Описание", descStr)
+	fmt.Fprintf(&b, g.onb().ConfirmRowFmt+"\n", g.onb().LabelName, name)
+	fmt.Fprintf(&b, g.onb().ConfirmRowFmt+"\n", g.onb().LabelVoice, voiceName)
+	fmt.Fprintf(&b, g.onb().ConfirmRowFmt+"\n", g.onb().LabelTraits, tagsStr)
+	fmt.Fprintf(&b, g.onb().ConfirmRowFmt+"\n", g.onb().LabelDescription, descStr)
 	b.WriteString("\n")
-	b.WriteString(onbMsg.ConfirmTrueQ)
+	b.WriteString(g.onb().ConfirmTrueQ)
 
 	rows := [][]telegram.InlineKeyboardButton{
 		{
-			{Text: onbMsg.BtnConfirmOK, CallbackData: onbCallbackConfirmOK},
-			{Text: onbMsg.BtnConfirmBack, CallbackData: onbCallbackConfirmBack},
+			{Text: g.onb().BtnConfirmOK, CallbackData: onbCallbackConfirmOK},
+			{Text: g.onb().BtnConfirmBack, CallbackData: onbCallbackConfirmBack},
 		},
 	}
 	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, b.String(), rows); err != nil {
@@ -686,7 +645,7 @@ func (g *Gateway) sendOnboardingConfirm(ctx context.Context, bi *botInstance, tg
 // buildTraitsKeyboard renders the 16-trait grid as a 2-per-row keyboard
 // plus a trailing "Готово · N из 5" row. Selected traits get a `[✓]`
 // prefix, unselected `[ ]`. Order matches onbTraits (web parity).
-func buildTraitsKeyboard(selected []string) [][]telegram.InlineKeyboardButton {
+func (g *Gateway) buildTraitsKeyboard(selected []string) [][]telegram.InlineKeyboardButton {
 	selSet := make(map[string]struct{}, len(selected))
 	for _, t := range selected {
 		selSet[t] = struct{}{}
@@ -706,7 +665,7 @@ func buildTraitsKeyboard(selected []string) [][]telegram.InlineKeyboardButton {
 	}
 	rows = append(rows, []telegram.InlineKeyboardButton{
 		{
-			Text:         fmt.Sprintf(onbMsg.TraitsCounterFmt, len(selected)),
+			Text:         fmt.Sprintf(g.onb().TraitsCounterFmt, len(selected)),
 			CallbackData: onbCallbackTraitsDone,
 		},
 	})

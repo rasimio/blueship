@@ -102,4 +102,8 @@ type GatewayConfig struct {
 	// with CreateAccount, and only then hands control to the cortex
 	// turn. Nil falls back to the legacy replyUnpaired greeting.
 	BotOnboarding BotOnboarding `yaml:"-" json:"-"`
+
+	// Onboarding holds the chat-native onboarding UI copy. Generic English
+	// defaults are filled by ApplyDefaults; a host overrides to brand it.
+	Onboarding OnboardingMessages `yaml:"-" json:"-"`
 }

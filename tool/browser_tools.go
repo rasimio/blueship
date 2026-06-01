@@ -78,7 +78,7 @@ func RegisterBrowserTools(r *bs.ToolRegistry, deps *bs.Deps) error {
 	)
 
 	r.Register(ToolBrowserFetch,
-		"Открывает URL и возвращает извлечённый текст + заголовок. HTML-страницы рендерятся через headless Chrome (полный JS execution), PDF-файлы (по расширению .pdf или по magic-байтам) декодируются pure-Go и возвращаются с разметкой `--- Page N ---` так что можно цитировать по страницам. Идёт через тот же прокси что browser_search (xray VPN). Используй после browser_search чтобы прочитать конкретный источник, цитировать факты с реальной страницы, или загрузить arxiv/гос-PDF для подробного разбора.",
+		"Open a URL and return the extracted text + title. HTML pages are rendered via headless Chrome (full JS execution); PDF files (by .pdf extension or magic bytes) are decoded in pure Go and returned with `--- Page N ---` markers so you can cite by page. Use after browser_search to read a specific source, quote facts from the real page, or load an arxiv/long PDF for detailed analysis.",
 		json.RawMessage(`{
 			"type":"object",
 			"properties":{

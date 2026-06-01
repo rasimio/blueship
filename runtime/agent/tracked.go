@@ -183,7 +183,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			a.logger.Warn("LLM refused to respond", "model", cfg.Model, "turn", turn+1)
 			text := accumulated.String()
 			if text == "" {
-				text = "(модель отказалась отвечать на этот запрос — переформулируй / упрости контекст)"
+				text = a.cfg.UI.ModelRefused
 			}
 			return &RunResult{Text: text, ToolTraces: traces}, nil
 

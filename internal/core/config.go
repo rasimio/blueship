@@ -77,6 +77,10 @@ type Config struct {
 	Gateway  GatewayConfig
 	A2A      A2AConfig
 	Fleet    FleetConfig
+
+	// UI holds framework-emitted, human-language strings. Defaults are
+	// generic English; a host overrides any field to speak its own language.
+	UI UIStrings
 }
 
 // ToolMeta is per-tool metadata the host supplies for the Vaelum cabinet:
@@ -303,4 +307,8 @@ func (c *Config) ApplyDefaults() {
 	if c.Transport.Telegram.ReloadInterval == 0 {
 		c.Transport.Telegram.ReloadInterval = 60 * time.Second
 	}
+
+	// Framework-emitted strings: fill generic English defaults; host overrides win.
+	c.UI.applyDefaults()
+	c.Gateway.Onboarding.applyDefaults()
 }

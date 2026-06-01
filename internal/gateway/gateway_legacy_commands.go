@@ -130,8 +130,8 @@ func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx,
 	b.WriteString("=== FINAL CORTEX INPUT LAYOUT ===\n")
 	b.WriteString("system:\n")
 	b.WriteString("  [current_datetime: ...] + <SYSTEM PROMPT shown above>\n\n")
-	b.WriteString("messages: ...прошлая история чата...\n\n")
-	b.WriteString("LAST user message (что Cortex реально видит как user input в этот turn):\n")
+	b.WriteString("messages: ...prior chat history...\n\n")
+	b.WriteString("LAST user message (what Cortex actually sees as user input this turn):\n")
 	b.WriteString("---BEGIN---\n")
 	combinedCtx := ""
 	if reflexGuidance != "" && injectedCtx != "" {

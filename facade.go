@@ -71,18 +71,20 @@ type (
 
 // --- Config tree ---
 type (
-	Config          = core.Config
-	ModelsConfig    = core.ModelsConfig
-	LimitsConfig    = core.LimitsConfig
-	TimeoutsConfig  = core.TimeoutsConfig
-	RetryConfig     = core.RetryConfig
-	GatewayConfig   = core.GatewayConfig
-	OwnerConfig     = core.OwnerConfig
-	ToolMeta        = core.ToolMeta
-	A2AConfig       = core.A2AConfig
-	A2APeerConfig   = core.A2APeerConfig
-	FleetConfig     = core.FleetConfig
-	FleetCapability = core.FleetCapability
+	Config             = core.Config
+	ModelsConfig       = core.ModelsConfig
+	LimitsConfig       = core.LimitsConfig
+	TimeoutsConfig     = core.TimeoutsConfig
+	RetryConfig        = core.RetryConfig
+	GatewayConfig      = core.GatewayConfig
+	UIStrings          = core.UIStrings
+	OnboardingMessages = core.OnboardingMessages
+	OwnerConfig        = core.OwnerConfig
+	ToolMeta           = core.ToolMeta
+	A2AConfig          = core.A2AConfig
+	A2APeerConfig      = core.A2APeerConfig
+	FleetConfig        = core.FleetConfig
+	FleetCapability    = core.FleetCapability
 )
 
 // --- Memory / DI / host seams ---

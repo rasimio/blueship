@@ -127,11 +127,11 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 
 			var sb strings.Builder
 			if local.Len() > 0 {
-				sb.WriteString("## Мои инструменты\n")
+				sb.WriteString("## My tools\n")
 				sb.WriteString(local.String())
 			}
 			for peer, buf := range peerTools {
-				fmt.Fprintf(&sb, "\n## Инструменты агента %s\n", peer)
+				fmt.Fprintf(&sb, "\n## %s agent tools\n", peer)
 				sb.WriteString(buf.String())
 			}
 			if sb.Len() > 0 {
@@ -150,7 +150,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	}
 	notesBlock := rc.ActiveNotes
 	if notesBlock == "" {
-		notesBlock = "(нет активных заметок)"
+		notesBlock = g.deps.Config.UI.NoActiveNotes
 	}
 	reflexPrompt := fmt.Sprintf(g.reflexPlanTemplate, rulesBlock.String(), toolsList, notesBlock, msgText)
 
@@ -233,11 +233,11 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	// 0. Disambiguation: reflex detected multiple plausible tools.
 	if reflexResult.Intent == "clarification_needed" && len(reflexResult.ClarificationOptions) > 0 {
 		guidance.WriteString("[DISAMBIGUATION REQUIRED]\n")
-		guidance.WriteString("Запрос неоднозначен. Спроси пользователя что он имеет в виду:\n")
+		guidance.WriteString("The request is ambiguous. Ask the user what they mean:\n")
 		for i, opt := range reflexResult.ClarificationOptions {
 			fmt.Fprintf(&guidance, "%d. %s\n", i+1, opt.Label)
 		}
-		guidance.WriteString("\nНЕ вызывай инструменты. Задай короткий вопрос с вариантами.\n\n")
+		guidance.WriteString("\nDo NOT call tools. Ask a short question with options.\n\n")
 		// Save options for resolution on the next turn.
 		us.PendingDisambiguation = reflexResult.ClarificationOptions
 		g.logger.Info("reflex: disambiguation",
@@ -354,7 +354,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		guidance.WriteString("[active_notes]\n")
 		guidance.WriteString(rc.ActiveNotes)
 		guidance.WriteString("[/active_notes]\n")
-		guidance.WriteString("Если пользователь сообщает о выполнении — вызови memory_update(id, status=done).\n")
+		guidance.WriteString("If the user reports completion — call memory_update(id, status=done).\n")
 	}
 
 	// Close research block if any pre-actions produced results.
@@ -665,7 +665,7 @@ func (g *Gateway) ClassifyInterjection(ctx context.Context, transcript, inflight
 	if len(tail) > 600 {
 		tail = tail[len(tail)-600:]
 	}
-	prompt := fmt.Sprintf("Ассистент сейчас говорит:\n%s\n\nПользователь перебил репликой:\n%s",
+	prompt := fmt.Sprintf("The assistant is currently saying:\n%s\n\nThe user interrupted with:\n%s",
 		strings.TrimSpace(string(tail)), transcript)
 
 	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
@@ -716,9 +716,9 @@ func (g *Gateway) PersistInterrupted(_ context.Context, chatID, partial string) 
 
 	text := strings.TrimSpace(partial)
 	if text == "" {
-		text = "[прервано пользователем]"
+		text = g.deps.Config.UI.InterruptMarker
 	} else {
-		text += " […прервано]"
+		text += g.deps.Config.UI.InterruptSuffix
 	}
 	if err := g.store.Append(ctx, sess.ID, bs.Message{
 		Role:    "assistant",

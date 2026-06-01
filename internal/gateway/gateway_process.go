@@ -138,9 +138,9 @@ func (g *Gateway) PersistInterruptedForUser(_ context.Context, userID, soulID uu
 
 	text := strings.TrimSpace(partial)
 	if text == "" {
-		text = "[прервано пользователем]"
+		text = g.deps.Config.UI.InterruptMarker
 	} else {
-		text += " […прервано]"
+		text += g.deps.Config.UI.InterruptSuffix
 	}
 	if err := g.store.Append(ctx, sess.ID, bs.Message{
 		Role:    "assistant",
@@ -427,7 +427,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// and this message is a short answer, inject the chosen tool directly.
 	if len(us.PendingDisambiguation) > 0 && msgText != "" {
 		if chosen := resolveDisambiguation(msgText, us.PendingDisambiguation); chosen != nil {
-			reflexGuidance = fmt.Sprintf("[DISAMBIGUATION RESOLVED]\nПользователь выбрал: %s\nВызови %s.\n", chosen.Label, chosen.Tool)
+			reflexGuidance = fmt.Sprintf("[DISAMBIGUATION RESOLVED]\nThe user chose: %s\nCall %s.\n", chosen.Label, chosen.Tool)
 			us.PendingDisambiguation = nil
 			g.logger.Info("disambiguation: resolved", "tool", chosen.Tool, "label", chosen.Label)
 			// Still run context injection for AME traces.
