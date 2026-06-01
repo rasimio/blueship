@@ -66,6 +66,12 @@ type Config struct {
 	// Supplied by the host; nil disables MCP entirely.
 	MCPSource MCPToolSource
 
+	// PublishToolCatalog, when set, receives the native tool catalog at startup
+	// so the host can expose it however it likes (e.g. a web cabinet's catalog
+	// table). Nil = no publishing. The framework owns no platform schema — it
+	// just hands over the tool definitions + metadata.
+	PublishToolCatalog func(ctx context.Context, tools []ToolDefinition, meta map[string]ToolMeta) error `yaml:"-" json:"-"`
+
 	// --- Owner (single-user mode) ---
 	Owner OwnerConfig
 

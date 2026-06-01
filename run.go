@@ -15,7 +15,6 @@ import (
 	"github.com/rasimio/blueship/internal/looprunner"
 	"github.com/rasimio/blueship/internal/migrate"
 	"github.com/rasimio/blueship/internal/store/user"
-	"github.com/rasimio/blueship/internal/toolcatalog"
 	"github.com/rasimio/blueship/internal/transport/httpchat"
 	"github.com/rasimio/blueship/internal/transport/ws"
 	"github.com/rasimio/blueship/runtime/session"
@@ -108,11 +107,11 @@ func (s *Ship) Run(ctx context.Context) error {
 		modules: s.modules,
 	}
 
-	// 3a. Publish the native tool catalog to vaelum.tool_catalog so the
-	// Vaelum web cabinet can enumerate every tool. Gated on ToolMeta —
-	// only the Vaelum host supplies tool categories; generic consumers
-	// skip this entirely. A failure here is non-fatal (stale catalog).
-	if s.cfg.ToolMeta != nil {
+	// 3a. Publish the native tool catalog via the host-supplied hook (e.g. so a
+	// web cabinet can enumerate every tool). Gated on PublishToolCatalog — only
+	// a host that wants a catalog supplies it; generic consumers skip this. The
+	// framework owns no platform schema. A failure here is non-fatal.
+	if s.cfg.PublishToolCatalog != nil {
 		catReg := core.NewToolRegistry()
 		tool.RegisterBuiltinTools(catReg, deps)
 		if err := tool.RegisterBrowserTools(catReg, deps); err != nil {
@@ -122,7 +121,7 @@ func (s *Ship) Run(ctx context.Context) error {
 			s.logger.Warn("toolcatalog: register agent_task tools failed", "error", err)
 		}
 		reg.RegisterAllTools(catReg, deps)
-		if err := toolcatalog.Publish(ctx, shipDB, catReg.Definitions(), s.cfg.ToolMeta, s.logger); err != nil {
+		if err := s.cfg.PublishToolCatalog(ctx, catReg.Definitions(), s.cfg.ToolMeta); err != nil {
 			s.logger.Warn("toolcatalog: publish failed", "error", err)
 		}
 	}
