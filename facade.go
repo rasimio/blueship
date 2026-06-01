@@ -93,6 +93,8 @@ type (
 	UserStore             = core.UserStore
 	PromptStore           = core.PromptStore
 	ModelConfigStore      = core.ModelConfigStore
+	ModelConfigQuerier    = core.ModelConfigQuerier
+	RoleToolQuerier       = core.RoleToolQuerier
 	SessionQuerier        = core.SessionQuerier
 	SessionMessage        = core.SessionMessage
 	AttachmentSink        = core.AttachmentSink

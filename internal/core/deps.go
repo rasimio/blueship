@@ -30,10 +30,10 @@ type Deps struct {
 	Sender   MessageSender      // nil = message sending disabled
 
 	// ModelStore reads model assignments from DB (nil = use Config.Models).
-	ModelStore *ModelConfigStore
+	ModelStore ModelConfigQuerier
 
 	// RoleTools maps model roles to allowed tool names (nil = all tools).
-	RoleTools *RoleToolStore
+	RoleTools RoleToolQuerier
 
 	// Stores provide access to ship DB data without modules querying ship DB directly.
 	Prompts  PromptStore    // file-backed prompt store rooted at Config.Prompts

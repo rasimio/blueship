@@ -16,8 +16,8 @@ type Loop struct {
 	provider  bs.CompletionProvider
 	store     bs.MessageStore
 	registry  *bs.ToolRegistry
-	roleTools *bs.RoleToolStore // nil = all tools
-	compactor *Compactor        // nil = disabled
+	roleTools bs.RoleToolQuerier // nil = all tools
+	compactor *Compactor         // nil = disabled
 	logger    *slog.Logger
 	cfg       *bs.Config
 }
@@ -91,7 +91,7 @@ type RunConfig struct {
 }
 
 // NewLoop creates a new agent loop.
-func NewLoop(provider bs.CompletionProvider, store bs.MessageStore, registry *bs.ToolRegistry, roleTools *bs.RoleToolStore, cfg *bs.Config, logger *slog.Logger) *Loop {
+func NewLoop(provider bs.CompletionProvider, store bs.MessageStore, registry *bs.ToolRegistry, roleTools bs.RoleToolQuerier, cfg *bs.Config, logger *slog.Logger) *Loop {
 	return &Loop{
 		provider:  provider,
 		store:     store,

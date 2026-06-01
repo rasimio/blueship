@@ -143,9 +143,9 @@ type AgentDeps struct {
 	LLM        CompletionProvider
 	Embedder   EmbeddingProvider // nil = embedding disabled
 	Registry   *ToolRegistry
-	RoleTools  *RoleToolStore
-	ModelStore *ModelConfigStore // model role → provider:model (nil = use Config.Models)
-	Store      MessageStore      // session/message persistence for agent loops
+	RoleTools  RoleToolQuerier
+	ModelStore ModelConfigQuerier // model role → provider:model (nil = use Config.Models)
+	Store      MessageStore       // session/message persistence for agent loops
 	Prompts    PromptStore
 	Users      UserStore      // nil = user lookup disabled
 	Sessions   SessionQuerier // nil = session query disabled

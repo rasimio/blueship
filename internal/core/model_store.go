@@ -7,6 +7,18 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+// ModelConfigQuerier resolves model assignments by role. *ModelConfigStore is
+// the DB-backed implementation; Deps holds the interface so a host may supply
+// its own (and nil means "use Config.Models").
+type ModelConfigQuerier interface {
+	Load(ctx context.Context) error
+	Get(role string) ModelRef
+	ForRouter(role string) string
+	Update(ctx context.Context, role, provider, modelName string) error
+	Roles() []string
+	Refresh(ctx context.Context) error
+}
+
 // ModelConfigStore reads model assignments from the model_config table.
 // Thread-safe; caches in memory, refreshed on demand (e.g. /reset).
 type ModelConfigStore struct {

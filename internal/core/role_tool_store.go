@@ -1,5 +1,11 @@
 package core
 
+// RoleToolQuerier resolves the ordered tool allowlist for a role.
+// *RoleToolStore is the in-memory implementation.
+type RoleToolQuerier interface {
+	Get(role string) []string
+}
+
 // RoleToolStore maps a role name (e.g. "cortex", "reflex", "background")
 // to the ordered list of tool names that role is allowed to use.
 //
