@@ -176,7 +176,7 @@ type UserState struct {
 	LastStrategy string
 
 	// PendingDisambiguation stores options from a clarification_needed reflex
-	// so the next short answer ("1", "да") can be resolved to a tool call.
+	// so the next short answer ("1", "yes") can be resolved to a tool call.
 	PendingDisambiguation []bs.ClarificationOption
 
 	// DebugMode appends tool traces to each response.
@@ -719,7 +719,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 
 // uuidInTextRE matches any plausible attachment UUID inside user
 // text — used by resolveInlineAttachmentRefs so a user can paste an
-// id ("прочти abc-…", "что на картинке abc-…") and the gateway
+// id ("read abc-…", "what's in the image abc-…") and the gateway
 // inlines the file as if it had been attached natively. The pattern
 // is the standard 8-4-4-4-12 hex shape; tenant-scoped lookups in
 // Sink.Get drop the rare false positive (a random UUID the user
@@ -731,7 +731,7 @@ var uuidInTextRE = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}
 // and appends the resulting content as additional blocks (image for
 // kind=image, fenced text for kind=pdf/text). The triggering text
 // itself stays in place so the model can still understand the
-// user's question ("что на картинке UUID" reads naturally with the
+// user's question ("what's in the image UUID" reads naturally with the
 // image attached). De-dups by id so a UUID mentioned twice doesn't
 // produce two copies of the file.
 

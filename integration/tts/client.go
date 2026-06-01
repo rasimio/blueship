@@ -18,6 +18,7 @@ type Client struct {
 	model       string
 	speed       float64
 	apiKey      string
+	language    string // ElevenLabs language_code hint; empty = provider auto-detect
 	client      *http.Client
 }
 
@@ -35,8 +36,10 @@ func NewClient(endpoint, model, apiKey string, speed float64, timeout time.Durat
 	}
 }
 
-// NewElevenLabsClient creates a TTS client for the ElevenLabs API.
-func NewElevenLabsClient(apiKey, voiceID, model string, speed float64, timeout time.Duration) *Client {
+// NewElevenLabsClient creates a TTS client for the ElevenLabs API. language is
+// an optional ElevenLabs language_code hint (e.g. "ru", "en"); pass "" to let
+// the provider auto-detect from the text.
+func NewElevenLabsClient(apiKey, voiceID, model, language string, speed float64, timeout time.Duration) *Client {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
@@ -50,6 +53,7 @@ func NewElevenLabsClient(apiKey, voiceID, model string, speed float64, timeout t
 		model:       model,
 		speed:       speed,
 		apiKey:      apiKey,
+		language:    language,
 		client:      &http.Client{Timeout: timeout},
 	}
 }
@@ -79,15 +83,17 @@ func (c *Client) synthesizeElevenLabs(ctx context.Context, text, instruct string
 
 func (c *Client) synthesizeElevenLabsWithEndpoint(ctx context.Context, endpoint, text, instruct string) ([]byte, error) {
 	payload := map[string]any{
-		"text":          text,
-		"model_id":      c.model,
-		"language_code": "ru",
+		"text":     text,
+		"model_id": c.model,
 		"voice_settings": map[string]any{
 			"stability":         0.75,
 			"similarity_boost":  0.95,
 			"style":             0.0,
 			"use_speaker_boost": true,
 		},
+	}
+	if c.language != "" {
+		payload["language_code"] = c.language
 	}
 	if c.speed > 0 && c.speed != 1.0 {
 		payload["speed"] = c.speed

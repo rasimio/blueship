@@ -30,12 +30,13 @@ import (
 
 // Server is the HTTP/SSE chat transport.
 type Server struct {
-	gw     *gateway.Gateway
-	port   int
-	token  string
-	extras func(*http.ServeMux)
-	reset  func(ctx context.Context, userID string) (string, string, error)
-	logger *slog.Logger
+	gw            *gateway.Gateway
+	port          int
+	token         string
+	transportName string // source tag on inbound messages (e.g. the platform name)
+	extras        func(*http.ServeMux)
+	reset         func(ctx context.Context, userID string) (string, string, error)
+	logger        *slog.Logger
 }
 
 // NewServer creates an HTTP chat server attached to an existing Gateway.
@@ -45,8 +46,13 @@ type Server struct {
 // middleware). reset, when non-nil, exposes POST /api/internal/chat/reset
 // — vaelum's web cabinet calls it to archive the active session and
 // open a fresh one (equivalent of the Telegram /reset command).
-func NewServer(gw *gateway.Gateway, port int, token string, extras func(*http.ServeMux), reset func(context.Context, string) (string, string, error), logger *slog.Logger) *Server {
-	return &Server{gw: gw, port: port, token: token, extras: extras, reset: reset, logger: logger}
+// transportName is the source tag stamped on inbound messages (used for
+// session source / observability); empty defaults to "http".
+func NewServer(gw *gateway.Gateway, port int, token, transportName string, extras func(*http.ServeMux), reset func(context.Context, string) (string, string, error), logger *slog.Logger) *Server {
+	if transportName == "" {
+		transportName = "http"
+	}
+	return &Server{gw: gw, port: port, token: token, transportName: transportName, extras: extras, reset: reset, logger: logger}
 }
 
 // Run starts the HTTP server. Blocks until ctx is done.
@@ -280,7 +286,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	)
 	defer workCancel()
 
-	if err := s.gw.ProcessInboundForUser(workCtx, userID, soulID, "vaelum",
+	if err := s.gw.ProcessInboundForUser(workCtx, userID, soulID, s.transportName,
 		[]bs.InboundMessage{{
 			Text:             text,
 			Images:           images,

@@ -176,7 +176,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 
 	// Low confidence → use full context but still run the Rule Engine below.
 	// Previously this was a hard return that skipped Rule Engine entirely,
-	// causing scope:always rules (like "ВЫЗВАТЬ tool call НЕМЕДЛЕННО") to
+	// causing scope:always rules (like "INVOKE tool call IMMEDIATELY") to
 	// be silently dropped. Now we only skip reflex-specific outputs
 	// (matched_rules, pre_actions) but let the rule engine inject guidance.
 	lowConfidence := reflexResult.Confidence < reflexConfidenceThreshold
@@ -649,8 +649,8 @@ func (g *Gateway) TranscribeAudio(ctx context.Context, audio []byte) (string, er
 // (cancel it). It is a single cheap reflex-model call; it deliberately does
 // not run the AME / rule pipeline so it stays fast and lock-free while the
 // active turn is still streaming. inflightTail is what the assistant is
-// currently saying — without it the classifier cannot tell "да-да, понятно"
-// from "да-да, не то ищешь".
+// currently saying — without it the classifier cannot tell "yeah-yeah, got it"
+// from "yeah-yeah, that's not what you're looking for".
 func (g *Gateway) ClassifyInterjection(ctx context.Context, transcript, inflightTail string) (bs.InterjectionClass, error) {
 	model := g.reflexModel()
 	if model == "" {

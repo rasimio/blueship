@@ -103,7 +103,12 @@ type WebSocketConfig struct {
 // the Vaelum web platform's live chat.
 type HTTPChatConfig struct {
 	Port  int    // 0 = disabled
-	Token string // bearer service token vaelum must present
+	Token string // bearer service token the platform must present
+
+	// TransportName is the source tag stamped on inbound HTTP-chat messages
+	// (session source / observability). Empty defaults to "http"; a host sets
+	// its own platform name (e.g. "vaelum").
+	TransportName string
 
 	// Extras, when non-nil, is called once with the server's mux during
 	// startup so the host daemon can mount additional internal

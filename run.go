@@ -346,7 +346,7 @@ func (s *Ship) Run(ctx context.Context) error {
 	// gateway directly from the host package.
 	if hcCfg := s.cfg.Transport.HTTPChat; hcCfg.Port > 0 && gw != nil {
 		hcCfg.Reset = gw.ResetSession
-		hcSrv := httpchat.NewServer(gw, hcCfg.Port, hcCfg.Token, hcCfg.Extras, hcCfg.Reset, s.logger)
+		hcSrv := httpchat.NewServer(gw, hcCfg.Port, hcCfg.Token, hcCfg.TransportName, hcCfg.Extras, hcCfg.Reset, s.logger)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

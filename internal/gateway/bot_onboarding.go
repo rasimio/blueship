@@ -34,7 +34,7 @@ import (
 //	                    keyboard in place. "traits_done" advances to
 //	                    ask_description.
 //	"ask_description" — free-form one-liner (or /skip). Advance to confirm
-//	                    + emit summary + [Создать]/[Назад] keyboard.
+//	                    + emit summary + [Create]/[Back] keyboard.
 //	"confirm"         — callback_query: confirm_ok → CompleteOnboarding +
 //	                    clear state + emit done line; confirm_back →
 //	                    re-emit description prompt with state preserved.
@@ -382,7 +382,7 @@ func (g *Gateway) onboardingToggleTrait(ctx context.Context, bi *botInstance, tg
 	}
 
 	// Edit the keyboard in place. The trait labels and the
-	// "Готово · N из 5" counter both re-render off the fresh tags
+	// "Done · N of 5" counter both re-render off the fresh tags
 	// list, so a single edit keeps the message consistent.
 	rows := g.buildTraitsKeyboard(tags)
 	if err := bi.client.EditMessageReplyMarkup(ctx, tgChatID, messageID, rows); err != nil {
@@ -459,7 +459,7 @@ func (g *Gateway) onboardingFinalize(ctx context.Context, bi *botInstance, tgCha
 	if err != nil {
 		// Already onboarded gets a specific terminal line (user's
 		// account exists; nothing to retry). Everything else stays at
-		// step=confirm so the user can tap "Создать" again after we
+		// step=confirm so the user can tap "Create" again after we
 		// fix whatever blew up server-side.
 		if errors.Is(err, bs.ErrBotOnboardingAlreadyDone) {
 			_ = g.deps.BotOnboarding.ClearState(ctx, tgUserID, bi.id)
@@ -593,7 +593,7 @@ func (g *Gateway) sendOnboardingTraitsPicker(ctx context.Context, bi *botInstanc
 	}
 }
 
-// sendOnboardingConfirm emits the summary + [✓ Создать] / [← Назад]
+// sendOnboardingConfirm emits the summary + [✓ Create] / [← Back]
 // keyboard. The summary mirrors the web wizard's confirm card (Name /
 // Voice / Character / Description rows, "—" placeholder when empty).
 func (g *Gateway) sendOnboardingConfirm(ctx context.Context, bi *botInstance, tgChatID int64, data map[string]any) {
@@ -643,7 +643,7 @@ func (g *Gateway) sendOnboardingConfirm(ctx context.Context, bi *botInstance, tg
 // -- helpers ------------------------------------------------------------------
 
 // buildTraitsKeyboard renders the 16-trait grid as a 2-per-row keyboard
-// plus a trailing "Готово · N из 5" row. Selected traits get a `[✓]`
+// plus a trailing "Done · N of 5" row. Selected traits get a `[✓]`
 // prefix, unselected `[ ]`. Order matches onbTraits (web parity).
 func (g *Gateway) buildTraitsKeyboard(selected []string) [][]telegram.InlineKeyboardButton {
 	selSet := make(map[string]struct{}, len(selected))

@@ -237,8 +237,8 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	// Attachment-reference resolution: if the user pasted an
-	// attachment UUID into their message ("прочти файл abc-…", "что
-	// на картинке abc-…"), look it up via the host's AttachmentSink
+	// attachment UUID into their message ("read file abc-…", "what's
+	// in the picture abc-…"), look it up via the host's AttachmentSink
 	// and inline the bytes — image as a vision block, pdf/text as a
 	// fenced inline. Cortex then sees the file as if the user had
 	// just attached it, no tool roundtrip required. Non-matching
@@ -378,9 +378,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 
 	// Pull a few prior chat turns so AME can embed the multi-turn theme,
 	// not just the (often short, vague) current message. Without this,
-	// "как ты" right after a heavy disclosure has no signal — cosine
-	// search lands on whatever generic emotional record matches "как
-	// ты" best, and the model anchors on the wrong event.
+	// "how are you" right after a heavy disclosure has no signal — cosine
+	// search lands on whatever generic emotional record matches "how
+	// are you" best, and the model anchors on the wrong event.
 	priorContext := g.buildPriorContext(ctx, sess.ID, 6)
 
 	// Build context and run reflex/cortex pipeline.
@@ -644,7 +644,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			delims := []string{". ", "! ", "? ", ".\n", "!\n", "?\n"}
 			minIdx := 10
 			// Until the first audio has gone out, also accept a comma /
-			// dash / colon as a cut point so reflex's «Секунду,» turns
+			// dash / colon as a cut point so reflex's «One sec,» turns
 			// into audio immediately instead of waiting for the period.
 			if !firstChunkEmitted {
 				delims = append(delims, ", ", " — ", ": ", ",\n")
@@ -696,7 +696,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 
 		// reflexFlush emits whatever the reflex tier has spoken so far as an
 		// audio chunk. Called by runInteraction the instant the reflex stream
-		// ends so the user hears the filler ("щас гляну…") immediately, before
+		// ends so the user hears the filler ("let me check…") immediately, before
 		// cortex starts thinking — the interaction-model point. On a simple
 		// turn (no escalation) it also sends the answer slightly earlier than
 		// the post-loop flush would.
@@ -799,7 +799,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		// reflex and cortex use the same callback so reflex-only turns
 		// (where reflex answers without escalating) still stream their
 		// reply — otherwise the web cabinet would see an empty bubble
-		// and fall back to the "(нет ответа)" stalled placeholder
+		// and fall back to the "(no response)" stalled placeholder
 		// because the reply text never reaches a SendText call.
 		cortexCb := buildSinkCallbacks(ctx, sink)
 		reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, cortexCb, cortexCb, nil)
@@ -974,7 +974,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 
 	// Auto-detect self-reflections in cortex response and save them even
 	// when reflex didn't prescribe a post_action. Long responses with
-	// self-reference markers ("я поняла", "мой вывод", "я осознаю") likely
+	// self-reference markers ("I realized", "my conclusion", "I recognize") likely
 	// contain insights worth persisting.
 	if len(postActions) == 0 && len(reply) > 300 && g.looksLikeSelfReflection(reply) {
 		postActions = append(postActions, bs.PostAction{Type: "save_reflection"})
