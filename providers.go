@@ -120,8 +120,8 @@ func Serper(apiKey string) SearchEngine {
 	return web.NewSerperSearch(apiKey)
 }
 
-// NewHTTPFetcher creates a WebFetcher that downloads and extracts text from web pages.
-func NewHTTPFetcher() WebFetcher {
+// HTTPFetcher creates a WebFetcher that downloads and extracts text from web pages.
+func HTTPFetcher() WebFetcher {
 	return web.NewHTTPFetcher()
 }
 
