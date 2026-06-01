@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
 
 	"github.com/rasimio/blueship/internal/core"
 )
@@ -23,10 +22,11 @@ const (
 // Manager is a daemon-lifetime, soul-keyed pool of MCP connections. It
 // implements core.MCPToolSource.
 type Manager struct {
-	store  *store
-	logger *slog.Logger
-	mu     sync.Mutex
-	souls  map[uuid.UUID]*soulConns
+	store     ServerStore
+	credFetch CredentialFetcher
+	logger    *slog.Logger
+	mu        sync.Mutex
+	souls     map[uuid.UUID]*soulConns
 }
 
 type soulConns struct {
@@ -43,13 +43,15 @@ type connectResult struct {
 	tools  []core.MCPTool
 }
 
-// NewManager builds an MCP connection manager. db reads vaelum.mcp_servers
-// and writes server status; credFetch resolves credentials to secrets.
-func NewManager(db *sqlx.DB, credFetch CredentialFetcher, logger *slog.Logger) *Manager {
+// NewManager builds an MCP connection manager. store is the host-supplied
+// persistence seam (reads server config, records status, publishes the tool
+// catalog); credFetch resolves credentials to secrets.
+func NewManager(store ServerStore, credFetch CredentialFetcher, logger *slog.Logger) *Manager {
 	return &Manager{
-		store:  &store{db: db, credFetch: credFetch},
-		logger: logger,
-		souls:  make(map[uuid.UUID]*soulConns),
+		store:     store,
+		credFetch: credFetch,
+		logger:    logger,
+		souls:     make(map[uuid.UUID]*soulConns),
 	}
 }
 
@@ -70,7 +72,7 @@ func (m *Manager) ToolsForSoul(ctx context.Context, soulID uuid.UUID) []core.MCP
 	}
 	m.mu.Unlock()
 
-	sig := m.store.serversSignature(ctx, soulID)
+	sig := m.store.ServersSignature(ctx, soulID)
 
 	sc.mu.Lock()
 	cold := sc.refreshedAt.IsZero()
@@ -110,7 +112,7 @@ func (m *Manager) connectSoul(soulID uuid.UUID, sc *soulConns, sig string) {
 	ctx, cancel := context.WithTimeout(context.Background(), connectTimeout)
 	defer cancel()
 
-	servers, err := m.store.serversForSoul(ctx, soulID)
+	servers, err := m.store.ServersForSoul(ctx, soulID)
 	if err != nil {
 		m.logger.Warn("mcp: list servers failed", "soul_id", soulID.String(), "error", err)
 		sc.mu.Lock()
@@ -160,10 +162,10 @@ func (m *Manager) connectServer(ctx context.Context, srv ServerRow) connectResul
 	defer cancel()
 
 	secret := ""
-	if srv.CredentialID != nil && m.store.credFetch != nil {
-		s, err := m.store.credFetch(sctx, *srv.CredentialID)
+	if srv.CredentialID != nil && m.credFetch != nil {
+		s, err := m.credFetch(sctx, *srv.CredentialID)
 		if err != nil {
-			m.store.markError(context.Background(), srv.ID, "credential: "+err.Error())
+			m.store.MarkError(context.Background(), srv.ID, "credential: "+err.Error())
 			return connectResult{}
 		}
 		secret = s
@@ -171,14 +173,14 @@ func (m *Manager) connectServer(ctx context.Context, srv ServerRow) connectResul
 
 	client, err := dial(sctx, srv, secret)
 	if err != nil {
-		m.store.markError(context.Background(), srv.ID, err.Error())
+		m.store.MarkError(context.Background(), srv.ID, err.Error())
 		m.logger.Warn("mcp: dial failed", "server", srv.Name, "error", err)
 		return connectResult{}
 	}
 	defs, err := client.listTools(sctx)
 	if err != nil {
 		_ = client.close()
-		m.store.markError(context.Background(), srv.ID, err.Error())
+		m.store.MarkError(context.Background(), srv.ID, err.Error())
 		m.logger.Warn("mcp: tools/list failed", "server", srv.Name, "error", err)
 		return connectResult{}
 	}
@@ -188,7 +190,7 @@ func (m *Manager) connectServer(ctx context.Context, srv ServerRow) connectResul
 		origName := d.Name
 		cl := client
 		tools = append(tools, core.MCPTool{
-			Name:        namespacedName(srv.Name, d.Name),
+			Name:        NamespacedName(srv.Name, d.Name),
 			Description: d.Description,
 			Schema:      d.InputSchema,
 			Handler: func(hctx context.Context, input json.RawMessage) (any, error) {
@@ -196,8 +198,8 @@ func (m *Manager) connectServer(ctx context.Context, srv ServerRow) connectResul
 			},
 		})
 	}
-	m.store.upsertCatalogTools(context.Background(), srv.ID, srv.Name, defs)
-	m.store.markSynced(context.Background(), srv.ID, len(defs))
+	m.store.UpsertCatalogTools(context.Background(), srv.ID, srv.Name, defs)
+	m.store.MarkSynced(context.Background(), srv.ID, len(defs))
 	m.logger.Info("mcp: server connected", "server", srv.Name, "tools", len(defs))
 	return connectResult{client: client, tools: tools}
 }
@@ -236,9 +238,9 @@ func (m *Manager) CloseAll() {
 	}
 }
 
-// namespacedName builds the registry tool name mcp__<label>__<tool>,
+// NamespacedName builds the registry tool name mcp__<label>__<tool>,
 // capped at 64 chars (the model's tool-name limit).
-func namespacedName(label, tool string) string {
+func NamespacedName(label, tool string) string {
 	n := "mcp__" + sanitize(label) + "__" + sanitize(tool)
 	if len(n) > 64 {
 		n = n[:64]
