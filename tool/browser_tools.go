@@ -148,7 +148,7 @@ func persistBrowserFetchOutput(ctx context.Context, deps *bs.Deps, rawInput json
 // returned: a transient DB hiccup must not fail an otherwise-good tool
 // call the model already paid for.
 //
-// Exposed at package scope so other tool registrations (code_repo_read,
+// Exposed at package scope so other tool registrations (a peer repo-read tool,
 // db_query, file_read, etc.) can plug into the same audit store
 // without each rewriting the ctx → store boilerplate.
 func persistToolOutput(ctx context.Context, deps *bs.Deps, rec bs.ToolOutputRecord) {

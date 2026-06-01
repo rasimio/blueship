@@ -1,3 +1,6 @@
+// Package tool provides BlueShip's built-in LLM tools (time, web search,
+// browser fetch, agent-task control) and the helpers a host uses to register
+// its own tools onto a ToolRegistry.
 package tool
 
 import (

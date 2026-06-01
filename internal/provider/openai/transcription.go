@@ -36,8 +36,8 @@ func NewTranscriptionProvider(apiKey, model string, timeout time.Duration) *Tran
 // (e.g. local MLX Whisper on localhost:12102).
 func NewTranscriptionProviderWithEndpoint(endpoint, model string, timeout time.Duration) *TranscriptionProvider {
 	return &TranscriptionProvider{
-		model:    model,
-		endpoint: endpoint,
+		model:      model,
+		endpoint:   endpoint,
 		httpClient: &http.Client{Timeout: timeout},
 	}
 }

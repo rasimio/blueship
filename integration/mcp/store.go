@@ -21,7 +21,7 @@ type ServerRow struct {
 }
 
 // CredentialFetcher resolves a credential id to a plaintext secret. The
-// host (arlene) supplies it — the daemon never sees ciphertext or keys.
+// the host supplies it — the daemon never sees ciphertext or keys.
 type CredentialFetcher func(ctx context.Context, credentialID uuid.UUID) (secret string, err error)
 
 // store reads vaelum.mcp_servers and writes server status plus the mcp

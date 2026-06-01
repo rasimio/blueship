@@ -168,14 +168,14 @@ type errorSpan struct {
 }
 
 type traceSummary struct {
-	WindowMinutes int                  `json:"window_minutes"`
-	TotalSpans    int                  `json:"total_spans"`
-	ToolCalls     []toolStat           `json:"tool_calls,omitempty"`
-	LLMCalls      []llmStat            `json:"llm_calls,omitempty"`
-	AgentTasks    map[string]int       `json:"agent_tasks_by_handler,omitempty"`
-	Errors        []errorSpan          `json:"errors,omitempty"`
-	SlowSpans     []slowSpan           `json:"slow_spans,omitempty"`
-	Note          string               `json:"note,omitempty"`
+	WindowMinutes int            `json:"window_minutes"`
+	TotalSpans    int            `json:"total_spans"`
+	ToolCalls     []toolStat     `json:"tool_calls,omitempty"`
+	LLMCalls      []llmStat      `json:"llm_calls,omitempty"`
+	AgentTasks    map[string]int `json:"agent_tasks_by_handler,omitempty"`
+	Errors        []errorSpan    `json:"errors,omitempty"`
+	SlowSpans     []slowSpan     `json:"slow_spans,omitempty"`
+	Note          string         `json:"note,omitempty"`
 }
 
 func summarize(spans []rawSpan, window int) traceSummary {
@@ -185,10 +185,10 @@ func summarize(spans []rawSpan, window int) traceSummary {
 	}
 
 	type toolAgg struct {
-		count     int
-		totalMS   int64
-		maxMS     int64
-		errors    int
+		count   int
+		totalMS int64
+		maxMS   int64
+		errors  int
 	}
 	type llmAgg struct {
 		count        int

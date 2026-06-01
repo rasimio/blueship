@@ -33,7 +33,7 @@ type Background struct {
 // defaultTools — the role-level tool allowlist returned by DefaultTools().
 // Empty/nil means "every registered tool is callable" (full registry),
 // which is what generic agents want when they trust their model not to
-// invent tool names. Hosts that need a hard ceiling (e.g. Arlene's
+// invent tool names. Hosts that need a hard ceiling (e.g. a host's
 // background role MUST NOT be able to call agent_task_create no matter
 // what the model decides to spit out) pass an explicit allowlist here.
 // This is enforced at the scheduler's registry-subset step, so the

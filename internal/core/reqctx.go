@@ -33,7 +33,7 @@ func ChatIDFromContext(ctx context.Context) string {
 // invocation belongs to. Resolved at transport boundaries (gateway,
 // scheduler, CLI startup), threaded through ctx so every downstream
 // repo INSERT can read it without needing soul-specific Deps wiring.
-// One arlene runtime hosts N souls concurrently; soul is per-request,
+// One host runtime hosts N souls concurrently; soul is per-request,
 // not per-process.
 type soulIDCtxKey struct{}
 

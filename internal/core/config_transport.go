@@ -106,10 +106,10 @@ type HTTPChatConfig struct {
 	Token string // bearer service token vaelum must present
 
 	// Extras, when non-nil, is called once with the server's mux during
-	// startup so the host (arlene daemon) can mount additional internal
+	// startup so the host daemon can mount additional internal
 	// API routes on the same port and share the bearer-token middleware.
 	// Generic from blueship's side — it just calls the callback. Used for
-	// arlene's `/api/internal/memory/associate` endpoint that proxies AME
+	// the host's internal memory-associate endpoint that proxies AME
 	// search from the Vaelum cabinet.
 	Extras func(*http.ServeMux) `yaml:"-" json:"-"`
 

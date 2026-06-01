@@ -10,8 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/rasimio/blueship/runtime/agent"
 	bs "github.com/rasimio/blueship/internal/core"
+	"github.com/rasimio/blueship/runtime/agent"
 	"github.com/rasimio/blueship/tool"
 )
 
@@ -349,7 +349,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	// Auto-extract pasted URLs from the user's text and persist them as
-	// kind='link' attachment rows. The OG worker (arlene daemon)
+	// kind='link' attachment rows. The OG worker (the host daemon)
 	// enriches the row with og:title / og:description / og:image_url
 	// asynchronously; the cabinet's Links tab + per-message chip
 	// rendering pick the row up either way (empty OG = favicon
@@ -608,8 +608,8 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			instruct = cfg.TTSInstructMapper(us.LastStrategy)
 		}
 		// Stream path uses the default Synthesize (OGG/Opus from ElevenLabs).
-		// The legacy SynthesizeMP3 preference existed because macOS arlene-
-		// voice couldn't decode OGG — that client is gone, and per-chunk MP3
+		// The legacy SynthesizeMP3 preference existed because an old macOS voice
+		// client couldn't decode OGG — that client is gone, and per-chunk MP3
 		// has a ~150 ms decoder warmup on Android which manifests as the
 		// "first word swallowed" on every TTS chunk. Opus warms in ~5 ms.
 		synthesize := cfg.TTS.Synthesize
@@ -619,7 +619,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		noter, _ := sink.(bs.SpokenTextSink)
 
 		// First chunk emits on any low-latency boundary (sentence end OR a
-		// comma/dash after ≥ 6 chars) so the user hears Arlene within ~1 s
+		// comma/dash after ≥ 6 chars) so the user hears the reply within ~1 s
 		// of the LLM starting to stream. Later chunks demand a full
 		// sentence-end so the playback doesn't sound choppy.
 		//
@@ -776,7 +776,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			g.executePostActions(ctx, us, postActions, reply)
 		}
 		if reply != "" {
-			// Voice symmetry — if Arlene happens to read a URL (uncommon
+			// Voice symmetry — if the assistant happens to read a URL (uncommon
 			// but not impossible on the JS-fetch-this branch), persist it
 			// as a link chip so it surfaces in the cabinet.
 			var assistantMsgID uuid.UUID
@@ -826,7 +826,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 				_ = ms.SendMeta(ctx, sess.ID, msgID)
 			}
 		}
-		// Auto-extract URLs from Arlene's final reply and persist them
+		// Auto-extract URLs from the assistant's final reply and persist them
 		// as kind='link' rows pinned to the assistant message_id, so the
 		// cabinet can highlight which bubble produced the chip. Mirror
 		// of the user-side scan above.
@@ -944,7 +944,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		return
 	}
 
-	// Auto-extract URLs from Arlene's reply on the Telegram path too —
+	// Auto-extract URLs from the assistant's reply on the Telegram path too —
 	// the assistant chip then surfaces in the cabinet's Links tab even
 	// when the user is on mobile. Mirror of the non-Telegram branch
 	// above; here we look up the assistant message id directly because

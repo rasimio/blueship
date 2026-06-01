@@ -7,7 +7,7 @@ import (
 )
 
 // AttachmentSink is the host-supplied hook for the CDN that backs
-// inbound (Telegram photo, cabinet upload) and outbound (Arlene's
+// inbound (Telegram photo, cabinet upload) and outbound (the assistant's
 // attachment_include) file flow. Implementations typically pair a
 // content-addressed disk store with a metadata row that the cabinet's
 // chat history endpoint joins for chip rendering.

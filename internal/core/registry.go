@@ -13,8 +13,8 @@ import (
 )
 
 // peerPrefix is the sentinel that triggers peer-wildcard expansion in
-// DefinitionsForNames / SubsetForNames. "peer:liya" means "all tools
-// whose PeerTag == liya, sorted alphabetically."
+// DefinitionsForNames / SubsetForNames. "peer:<name>" means "all tools
+// whose PeerTag == <name>, sorted alphabetically."
 const peerPrefix = "peer:"
 
 // toolPeerAttr is a tiny helper kept here so registry.go doesn't import
@@ -185,8 +185,8 @@ func (r *ToolRegistry) toolsForPeer(peer string) []registeredTool {
 // occurrence wins.
 //
 // Names with the prefix "peer:" expand to every tool registered from that peer
-// (sorted alphabetically). Example: "peer:liya" includes all tools BlueFleet
-// received from the liya agent without requiring them to be listed individually.
+// (sorted alphabetically). Example: "peer:<name>" includes all tools BlueFleet
+// received from that peer agent without requiring them to be listed individually.
 // Expansion respects the seen-set, so an explicit name before "peer:xxx" takes
 // precedence and the peer-expanded copy is skipped.
 func (r *ToolRegistry) DefinitionsForNames(names []string) []ToolDefinition {

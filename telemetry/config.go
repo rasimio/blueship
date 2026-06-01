@@ -5,7 +5,7 @@
 // Wiring is split into two layers:
 //   - The framework (this package) builds a slog.Handler chain and an
 //     OpenTelemetry tracer; it is host-agnostic.
-//   - The host (arlene, future agents) loads Config from yaml/env and
+//   - The host loads Config from yaml/env and
 //     hands the constructed Tracer + slog.Logger back into deps.
 //
 // Tracing is opt-in via Config.Tracing.Enabled. The Telegram alerter is
@@ -20,7 +20,7 @@ import "time"
 // it from their own config struct (yaml/env) and pass it into NewTracer
 // and NewAlerter.
 type Config struct {
-	ServiceName string  // resource.service.name on every emitted span
+	ServiceName string // resource.service.name on every emitted span
 	Tracing     Tracing
 	Alerts      Alerts
 }

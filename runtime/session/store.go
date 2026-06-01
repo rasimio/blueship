@@ -1,3 +1,6 @@
+// Package session is the chat-session and message store. It persists turns,
+// compacts history past a token threshold, and serves messages back to the
+// agent loop within a budget.
 package session
 
 import (

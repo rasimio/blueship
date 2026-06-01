@@ -39,7 +39,7 @@ func NewCompletionProvider(apiKey string, timeout time.Duration) *CompletionProv
 // Two extraParams keys are interpreted at construction time and stripped from the
 // merged request payload:
 //   - "drop_images": true  → image content blocks are replaced by a text marker
-//                            (for endpoints that only accept text content)
+//     (for endpoints that only accept text content)
 func NewCompatibleProvider(baseURL string, apiKey string, timeout time.Duration, extraParams map[string]any) *CompletionProvider {
 	p := &CompletionProvider{
 		apiKey:     apiKey,
@@ -61,20 +61,20 @@ func NewCompatibleProvider(baseURL string, apiKey string, timeout time.Duration,
 }
 
 type chatCompletionRequest struct {
-	Model       string             `json:"model"`
-	Messages    []chatMessage      `json:"messages"`
-	Tools       []toolDefinition   `json:"tools,omitempty"`
-	MaxTokens   int                `json:"max_tokens,omitempty"`
-	Temperature float64            `json:"temperature,omitempty"`
-	ToolChoice  string             `json:"tool_choice,omitempty"`
+	Model       string           `json:"model"`
+	Messages    []chatMessage    `json:"messages"`
+	Tools       []toolDefinition `json:"tools,omitempty"`
+	MaxTokens   int              `json:"max_tokens,omitempty"`
+	Temperature float64          `json:"temperature,omitempty"`
+	ToolChoice  string           `json:"tool_choice,omitempty"`
 }
 
 type chatMessage struct {
-	Role       string          `json:"role"`
-	Content    any             `json:"content,omitempty"`
-	ToolCalls  []toolCall      `json:"tool_calls,omitempty"`
-	ToolCallID string          `json:"tool_call_id,omitempty"`
-	Name       string          `json:"name,omitempty"`
+	Role       string     `json:"role"`
+	Content    any        `json:"content,omitempty"`
+	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Name       string     `json:"name,omitempty"`
 }
 
 type toolDefinition struct {
@@ -104,8 +104,8 @@ type functionCall struct {
 
 type chatCompletionResponse struct {
 	Choices []struct {
-		FinishReason string       `json:"finish_reason"`
-		Message      chatMessage  `json:"message"`
+		FinishReason string      `json:"finish_reason"`
+		Message      chatMessage `json:"message"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -178,7 +178,7 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 	contentBlocks := toContentBlocks(choice.Message)
 
 	return &bs.CompletionResponse{
-		Content: contentBlocks,
+		Content:    contentBlocks,
 		StopReason: mapStopReason(choice.FinishReason),
 		Usage: bs.Usage{
 			InputTokens:  result.Usage.PromptTokens,

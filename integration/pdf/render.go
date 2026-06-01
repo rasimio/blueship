@@ -76,7 +76,7 @@ func RenderMarkdown(ctx context.Context, title, md string) ([]byte, error) {
 				WithMarginBottom(0.5).
 				WithMarginLeft(0.5).
 				WithMarginRight(0.5).
-				WithPaperWidth(8.27).  // A4 inches
+				WithPaperWidth(8.27). // A4 inches
 				WithPaperHeight(11.69).
 				Do(ctx)
 			if err != nil {

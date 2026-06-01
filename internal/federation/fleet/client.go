@@ -41,8 +41,8 @@ type Client struct {
 	http   *http.Client
 	logger *slog.Logger
 
-	mu       sync.Mutex
-	token    string
+	mu        sync.Mutex
+	token     string
 	expiresAt time.Time
 }
 
@@ -221,9 +221,9 @@ type AgentSummary struct {
 
 // PeerCard is the full view returned by /v0/agents/:id.
 type PeerCard struct {
-	Agent        AgentSummary   `json:"agent"`
+	Agent        AgentSummary    `json:"agent"`
 	Capabilities []CapabilityOut `json:"capabilities"`
-	Tools        []ToolOut      `json:"tools"`
+	Tools        []ToolOut       `json:"tools"`
 }
 
 // CapabilityOut matches agent_capabilities rows returned by Fleet.

@@ -1,3 +1,4 @@
+// Package tts provides text-to-speech synthesis for voice transports.
 package tts
 
 import (

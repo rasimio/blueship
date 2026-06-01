@@ -4,7 +4,7 @@
 // stream is piped straight back to the browser.
 //
 // The same server also hosts host-supplied internal-API routes via the
-// Extras callback on HTTPChatConfig — arlene plugs its AME-associate
+// Extras callback on HTTPChatConfig — the host plugs its associate
 // endpoint in this way. All routes share the bearer-token middleware so
 // the host's extras are authed without each handler re-implementing it.
 package httpchat
@@ -24,8 +24,8 @@ import (
 
 	"github.com/rasimio/blueship/attachment"
 	bs "github.com/rasimio/blueship/internal/core"
-	"github.com/rasimio/blueship/internal/webaccess/browser"
 	"github.com/rasimio/blueship/internal/gateway"
+	"github.com/rasimio/blueship/internal/webaccess/browser"
 )
 
 // Server is the HTTP/SSE chat transport.

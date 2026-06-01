@@ -32,11 +32,11 @@ type MessageSender interface {
 // line so receiving ship gateways can recognise it and skip the cortex
 // turn — this is how we prevent bot-to-bot reply loops.
 type TelegramGroupTracer struct {
-	Sender    MessageSender
-	ChatID    string
-	SelfName  string // this ship's name
-	Level     TraceLevel
-	Logger    *slog.Logger
+	Sender   MessageSender
+	ChatID   string
+	SelfName string // this ship's name
+	Level    TraceLevel
+	Logger   *slog.Logger
 }
 
 // TraceInvoke is called by the A2A client BEFORE the HTTP request is

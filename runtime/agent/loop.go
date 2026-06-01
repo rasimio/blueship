@@ -1,3 +1,6 @@
+// Package agent runs the S2 cortex turn: the LLM tool loop that drives a
+// conversation to completion, handling compaction, tool dispatch, streaming,
+// and token budgeting.
 package agent
 
 import (

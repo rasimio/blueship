@@ -1,6 +1,6 @@
 // urls.go — shared URL extraction for chat text.
 //
-// Both the user's pasted message and Arlene's assistant reply funnel
+// Both the user's pasted message and the assistant reply funnel
 // through ExtractURLs so the gateway can persist link attachments
 // (vaelum.chat_attachments kind='link') symmetrically. We deliberately
 // keep this stupid-simple — a single regex over the raw text — rather

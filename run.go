@@ -9,8 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/agenttask"
+	"github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/gateway"
 	"github.com/rasimio/blueship/internal/looprunner"
 	"github.com/rasimio/blueship/internal/migrate"
@@ -36,7 +36,7 @@ func (s *Ship) Run(ctx context.Context) error {
 
 	// Propagate Config-level callbacks into the freshly-initialised deps.
 	// The host wires these onto cfg before calling blueship.New (e.g.
-	// Arlene's Layer 2 actor manager exposes EmitTurnCompleted as the
+	// the host's Layer-2 actor manager exposes EmitTurnCompleted as the
 	// hook). Done here rather than in InitDeps so InitDeps stays a pure
 	// constructor of stores/clients.
 	deps.TurnCompletedHook = s.cfg.Gateway.TurnCompletedHook
@@ -341,7 +341,7 @@ func (s *Ship) Run(ctx context.Context) error {
 
 	// 6b. Start HTTP/SSE chat server (Vaelum web platform). The host's
 	// optional Extras callback mounts additional internal-API routes on
-	// the same port/token (arlene uses this for AME associate). Reset
+	// the same port/token (the host uses this for its associate endpoint). Reset
 	// is wired here so vaelum gets the same archive+new-session behaviour
 	// as the Telegram /reset command without having to reach into the
 	// gateway directly from the host package.

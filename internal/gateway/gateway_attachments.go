@@ -215,7 +215,7 @@ func collapseBlankLinesGateway(s string) string {
 // scanAndSaveLinks extracts http/https URLs out of text and upserts
 // them as kind='link' rows on the host's AttachmentSink. Symmetric to
 // the byte-attachment Save call: the user side runs this against the
-// pasted message, the assistant side runs it against Arlene's final
+// pasted message, the assistant side runs it against the assistant's final
 // reply. The OG enrichment worker picks the rows up from there.
 //
 // sessionID is required (so the cabinet's session-scoped view can

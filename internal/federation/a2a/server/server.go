@@ -46,11 +46,11 @@ type JWTValidator func(ctx context.Context, raw string) (callerAgentID string, e
 
 // Config holds server startup parameters.
 type Config struct {
-	Name        string
-	Description string
-	Version     string
-	BaseURL     string
-	AuthToken   string       // shared secret; empty disables auth (dev only)
+	Name         string
+	Description  string
+	Version      string
+	BaseURL      string
+	AuthToken    string       // shared secret; empty disables auth (dev only)
 	JWTValidator JWTValidator // optional; when set, JWT auth runs before AuthToken fallback
 }
 

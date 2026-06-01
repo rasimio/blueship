@@ -1,6 +1,6 @@
 // Package pdf is the public-import companion to internal/browser's
 // PDF extraction. Hosts that aren't part of the blueship module need
-// to decode PDF bytes too — most often arlene's attachment_read tool
+// to decode PDF bytes too — most often the host's attachment-read tool
 // reading a user-uploaded file from the CDN. Keeping the body here
 // rather than in internal/ lets that import path stay clean while
 // internal/browser keeps its existing in-module callers.
@@ -8,7 +8,7 @@
 // ExtractPDFText is byte-for-byte the same routine internal/browser
 // uses (it now delegates here). Cp1251 mojibake repair + NUL/C0
 // scrubbing also live in this package so the daemon's Telegram
-// pipeline and arlene's tool calls produce identical outputs.
+// pipeline and the host's tool calls produce identical outputs.
 package pdf
 
 import (

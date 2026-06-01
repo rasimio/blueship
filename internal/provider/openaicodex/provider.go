@@ -76,8 +76,8 @@ type outputTextContent struct {
 }
 
 type inputAssistantMessage struct {
-	Type    string              `json:"type"`   // "message"
-	Role    string              `json:"role"`   // "assistant"
+	Type    string              `json:"type"` // "message"
+	Role    string              `json:"role"` // "assistant"
 	ID      string              `json:"id"`
 	Content []outputTextContent `json:"content"`
 	Status  string              `json:"status"` // "completed"

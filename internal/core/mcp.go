@@ -17,7 +17,7 @@ type MCPTool struct {
 }
 
 // MCPToolSource supplies a soul's external MCP tools to the gateway. The
-// host (arlene) provides the implementation; blueship core only declares
+// the host provides the implementation; blueship core only declares
 // the seam so core need not import the mcp package.
 type MCPToolSource interface {
 	// ToolsForSoul returns every tool from the soul's connected MCP

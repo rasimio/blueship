@@ -1,3 +1,10 @@
+// Package blueship is a framework for building production AI agents. A host
+// configures a Ship, registers feature modules, and calls Run; the framework
+// owns transport, the reflex/cortex turn pipeline, providers, memory plumbing,
+// agent-task scheduling, and federation.
+//
+// The whole public API is reachable as blueship.X via the facade over
+// internal/core; see docs/ARCHITECTURE.md for the S0/S1/S2 layered map.
 package blueship
 
 import (

@@ -44,21 +44,21 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 	r.Register(ToolAgentTaskCreate,
 		"Kick off an autonomous task. Choose strategy carefully — wrong choice = wasted budget:\n"+
 			"  • direct — DEFAULT for almost everything. LLM runs in a loop with the configured tools (web_search, browser_fetch, memory_*, etc.), iterates freely, and finishes when acceptance_criteria is satisfied. USE FOR: research, news digests, Q&A with web sources, deep-dives, market analysis, anything that boils down to 'iterate over tools until the answer is good enough'.\n"+
-			"  • structured — ONLY when the task is a fixed multi-phase pipeline with explicit ordering, peer-task callbacks, or revision gates (e.g. delegate code work to Liya: code_task_create → wait → decide → execute → wait → decide → push → open_pr → merge). The plan field MUST contain a JSON array of step objects {action:tool|wait|decide|milestone|done, ...}. NEVER use structured for research/synthesis — direct does that better.\n"+
+			"  • structured — ONLY when the task is a fixed multi-phase pipeline with explicit ordering, peer-task callbacks, or revision gates (e.g. delegate code work to a coding peer: <peer>_task_create → wait → decide → execute → wait → decide → push → open_pr → merge). The plan field MUST contain a JSON array of step objects {action:tool|wait|decide|milestone|done, ...}. NEVER use structured for research/synthesis — direct does that better.\n"+
 			"  • delegate — hand off the WHOLE task to a peer agent (delegate_to = peer agent_id from BlueFleet). Peer runs its own lifecycle and reports terminal status back via callback.\n"+
 			"acceptance_criteria — plain language definition of done, checked by an LLM judge AND structural gates after each iteration. Be SPECIFIC and EVIDENTIARY: vague criteria pass weak work.\n"+
-				"  - Research / information-gathering: a STRONG research criterion bundles all of the following — vague criteria pass press-release-quality work, while specific ones produce S-tier briefs:\n"+
-				"      * minimum URL-citation count (e.g. '≥4 distinct URL citations'),\n"+
-				"      * source diversity ('citations spread across ≥3 distinct domains, no single domain over 50%' — and please do NOT pin to one vendor like 'arxiv.org or ai.meta.com only', that defeats triangulation),\n"+
-				"      * at least one independent / outside-the-originating-organisation source (third-party benchmark, peer-reviewed reaction, or non-vendor analysis),\n"+
-				"      * comparative positioning ('contrasts the subject against ≥2 named peer methods or competing approaches'),\n"+
-				"      * limitations or open questions ('includes 2-5 bullet points naming what is contested, unverified, or unsupported'),\n"+
-				"      * TL;DR up top ('2-4 sentence executive summary preceding the body').\n"+
-				"      Example: 'Brief on X covering definition, paradigm contrasts, history, and 2024-25 state. ≥4 distinct URL citations across ≥3 domains with no single domain >50%; ≥1 source outside the originating org; explicit comparison against ≥2 named peer methods; TL;DR up top; Limitations section of 2-5 bullets; inline [N] citations + References list at the end.' This trips the hard-fetch / diversity / structure gates; without it the evaluator can be fooled by polished single-vendor prose.\n"+
-				"  - Code: name the artifact and verification. 'PR open with passing CI on branch X, tests cover new module Y.'\n"+
-				"  - Lists / digests: count and qualifier. 'List contains 5+ recent items (≤14 days), each with title, source URL, and 2-sentence summary.'\n"+
-				"  - Booking / actions: outcome description. 'Confirmation number captured in the result text; booking page URL fetched.'\n"+
-				"use_agents — optional allow-list of peer agent_ids (empty = no peers).\n"+
+			"  - Research / information-gathering: a STRONG research criterion bundles all of the following — vague criteria pass press-release-quality work, while specific ones produce S-tier briefs:\n"+
+			"      * minimum URL-citation count (e.g. '≥4 distinct URL citations'),\n"+
+			"      * source diversity ('citations spread across ≥3 distinct domains, no single domain over 50%' — and please do NOT pin to one vendor like 'arxiv.org or ai.meta.com only', that defeats triangulation),\n"+
+			"      * at least one independent / outside-the-originating-organisation source (third-party benchmark, peer-reviewed reaction, or non-vendor analysis),\n"+
+			"      * comparative positioning ('contrasts the subject against ≥2 named peer methods or competing approaches'),\n"+
+			"      * limitations or open questions ('includes 2-5 bullet points naming what is contested, unverified, or unsupported'),\n"+
+			"      * TL;DR up top ('2-4 sentence executive summary preceding the body').\n"+
+			"      Example: 'Brief on X covering definition, paradigm contrasts, history, and 2024-25 state. ≥4 distinct URL citations across ≥3 domains with no single domain >50%; ≥1 source outside the originating org; explicit comparison against ≥2 named peer methods; TL;DR up top; Limitations section of 2-5 bullets; inline [N] citations + References list at the end.' This trips the hard-fetch / diversity / structure gates; without it the evaluator can be fooled by polished single-vendor prose.\n"+
+			"  - Code: name the artifact and verification. 'PR open with passing CI on branch X, tests cover new module Y.'\n"+
+			"  - Lists / digests: count and qualifier. 'List contains 5+ recent items (≤14 days), each with title, source URL, and 2-sentence summary.'\n"+
+			"  - Booking / actions: outcome description. 'Confirmation number captured in the result text; booking page URL fetched.'\n"+
+			"use_agents — optional allow-list of peer agent_ids (empty = no peers).\n"+
 			"cadence — Go duration string (e.g. '1h', '30m', '15s'). Rate-limits how often a task is allowed to tick — scheduler skips ticks that arrive sooner without burning an iteration. USE FOR periodic monitors ('check BTC price every hour for 6 hours' = cadence: '1h', max_iterations: 6) so wall-clock duration ≈ cadence × max_iterations. Omit for tasks that should iterate as fast as the LLM allows (research, code synthesis, etc.).",
 		json.RawMessage(`{
 			"type":"object",

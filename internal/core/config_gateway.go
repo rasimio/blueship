@@ -48,7 +48,7 @@ type GatewayConfig struct {
 	// TurnCompletedHook fires after the gateway successfully sends an
 	// assistant reply to the user (across Telegram batch, Telegram
 	// streaming, voice streaming, and WebSocket batch transports). The
-	// host (e.g. Arlene's Layer 2 sleep-time agent) uses this signal to
+	// host (e.g. a sleep-time agent) uses this signal to
 	// drive per-user state machines without polling. The hook runs in a
 	// goroutine inside the gateway, so a slow callback doesn't add
 	// latency to the response path. Nil = no-op.
@@ -58,7 +58,7 @@ type GatewayConfig struct {
 	// TurnCompletedHook: it fires after every successful (non-error)
 	// iteration of an agent_task, regardless of strategy or terminal
 	// state (Pause / Done / continue). Hosts use this to attach a
-	// write-time pipeline (e.g. Arlene's AgentSaver) so research
+	// write-time pipeline (e.g. a write-time saver) so research
 	// artifacts produced inside background iterations land in the same
 	// obligatory memory pipeline as chat-turn findings — without asking
 	// the LLM to call memory_save inside the agent loop. Runs in a

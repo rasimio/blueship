@@ -129,16 +129,16 @@ type CallbackHandler func(ctx context.Context, cb Callback)
 
 // Peer is a remote ship this one knows about.
 type Peer struct {
-	ID            string    `db:"id"`
-	Name          string    `db:"name"`
-	BaseURL       string    `db:"base_url"`
-	AuthToken     string    `db:"auth_token"`
-	AgentCard     []byte    `db:"agent_card"`
+	ID            string     `db:"id"`
+	Name          string     `db:"name"`
+	BaseURL       string     `db:"base_url"`
+	AuthToken     string     `db:"auth_token"`
+	AgentCard     []byte     `db:"agent_card"`
 	CardFetchedAt *time.Time `db:"card_fetched_at"`
 	LastSeenAt    *time.Time `db:"last_seen_at"`
-	Enabled       bool      `db:"enabled"`
-	CreatedAt     time.Time `db:"created_at"`
-	UpdatedAt     time.Time `db:"updated_at"`
+	Enabled       bool       `db:"enabled"`
+	CreatedAt     time.Time  `db:"created_at"`
+	UpdatedAt     time.Time  `db:"updated_at"`
 }
 
 // Call is one row in the a2a_calls audit table.

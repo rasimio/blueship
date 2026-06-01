@@ -44,9 +44,9 @@ type Bootstrap struct {
 
 	// optional — when set, Bootstrap derives a federated tool snapshot from
 	// each peer card and pushes it to the sink.
-	sink         FederatedToolSink
-	invokeFn     PeerInvokeFunc
-	selfAgentID  string
+	sink        FederatedToolSink
+	invokeFn    PeerInvokeFunc
+	selfAgentID string
 }
 
 // PeerInvokeFunc dispatches one cross-agent tool call. Implementations get
@@ -199,7 +199,6 @@ func (b *Bootstrap) federatedHandler(peerName, peerAgentID, endpointURL, toolNam
 		return b.invokeFn(ctx, peerName, peerAgentID, endpointURL, toolName, input, bearer)
 	}
 }
-
 
 // Run executes the startup publish + refresh loop until ctx is cancelled.
 // Returns nil when ctx fires; transient errors are logged but don't stop

@@ -84,7 +84,7 @@ func OpenAICodex(refreshToken, tokenFile string, timeout time.Duration, backoffs
 }
 
 // AnthropicOAuth creates a CompletionProvider using Claude subscription via OAuth.
-// refreshToken is the initial token from env (minted by `arlene-anthropic-login`);
+// refreshToken is the initial token from env (minted by the host OAuth login flow);
 // tokenFile persists rotated tokens. Requests are made through the standard
 // Anthropic Messages API but authenticated with a subscription-billed bearer
 // token instead of an API key — usage counts against the Claude Code plan.

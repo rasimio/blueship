@@ -232,7 +232,7 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 // ToolOutputRecord is one row written into agent_task_tool_outputs by
 // any tool that produced a bulky output worth auditing or replaying
 // later. Generic by design: a single store covers research (browser_
-// fetch HTML/PDF bodies), coding (code_repo_read source files), data
+// fetch HTML/PDF bodies), coding (reading source files), data
 // analysis (db_query CSV blobs), etc. Per-tool semantics live in
 // ToolInput / Metadata jsonb instead of typed columns so adding a new
 // tool never requires a migration.
@@ -242,7 +242,7 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 type ToolOutputRecord struct {
 	TaskID       uuid.UUID
 	Iteration    int
-	ToolName     string          // "browser_fetch", "code_repo_read", ...
+	ToolName     string          // "browser_fetch", "<peer>_repo_read", ...
 	ToolInput    json.RawMessage // raw tool input json
 	Output       string          // the bulky body
 	OutputFormat string          // "html" | "pdf" | "code" | "json" | "csv" | ...

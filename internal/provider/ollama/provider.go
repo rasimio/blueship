@@ -88,10 +88,10 @@ type chatRequest struct {
 }
 
 type chatResponse struct {
-	Model     string        `json:"model"`
-	Message   ollamaMessage `json:"message"`
-	Done      bool          `json:"done"`
-	DoneReason string       `json:"done_reason,omitempty"`
+	Model      string        `json:"model"`
+	Message    ollamaMessage `json:"message"`
+	Done       bool          `json:"done"`
+	DoneReason string        `json:"done_reason,omitempty"`
 
 	PromptEvalCount int `json:"prompt_eval_count,omitempty"`
 	EvalCount       int `json:"eval_count,omitempty"`
