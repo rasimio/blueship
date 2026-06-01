@@ -106,4 +106,21 @@ type GatewayConfig struct {
 	// Onboarding holds the chat-native onboarding UI copy. Generic English
 	// defaults are filled by ApplyDefaults; a host overrides to brand it.
 	Onboarding OnboardingMessages `yaml:"-" json:"-"`
+
+	// ResolveUserBotID maps a (user, Telegram chat) to the bot id that should
+	// deliver to them, for hosts that run multiple bots per user. Host-supplied
+	// (typically a bot-pairing lookup). Nil disables per-user bot routing in
+	// SendToUser. The framework owns no platform schema.
+	ResolveUserBotID func(ctx context.Context, userID uuid.UUID, tgChatID int64) (uuid.UUID, error) `yaml:"-" json:"-"`
+
+	// ResolveDisplayName returns a friendly display name for a user, or "" if
+	// none is known. Host-supplied; nil = the caller falls back to a generic
+	// noun rather than a raw chat id.
+	ResolveDisplayName func(ctx context.Context, userID uuid.UUID) string `yaml:"-" json:"-"`
+
+	// ResolveSoulToolPolicy returns a soul's per-tool enable/disable overrides
+	// and its connected service providers, so the gateway can compute the
+	// per-turn tool allowlist. Host-supplied (typically a cabinet lookup). Nil
+	// or an error means "no filtering — every registered tool is allowed".
+	ResolveSoulToolPolicy func(ctx context.Context, soulID uuid.UUID) (overrides map[string]bool, connectedProviders []string, err error) `yaml:"-" json:"-"`
 }

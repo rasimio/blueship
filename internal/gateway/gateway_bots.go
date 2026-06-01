@@ -325,17 +325,15 @@ func (g *Gateway) SendToUser(ctx context.Context, userID uuid.UUID, text string)
 		return fmt.Errorf("send to user %s: malformed chat_id %q: %w", userID, primaryChatID, parseErr)
 	}
 
-	// Find the bot that owns this (user, tg_chat) pairing. We could
-	// rely on the unique index on (bot_id, tg_chat_id) but the same
-	// tg_chat may be linked via different bots; scoping by user_id
-	// keeps us on this user's own bot.
-	var botID uuid.UUID
-	err = db.GetContext(ctx, &botID,
-		`SELECT bot_id FROM vaelum.bot_links
-		  WHERE user_id = $1 AND tg_chat_id = $2
-		  ORDER BY linked_at DESC LIMIT 1`, userID, tgChatID)
+	// Find the bot that owns this (user, tg_chat) pairing via the host's
+	// bot-router hook. The framework owns no pairing schema.
+	resolveBot := g.deps.Config.Gateway.ResolveUserBotID
+	if resolveBot == nil {
+		return fmt.Errorf("send to user %s: no per-user bot router configured", userID)
+	}
+	botID, err := resolveBot(ctx, userID, tgChatID)
 	if err != nil {
-		return fmt.Errorf("send to user %s: no bot link for primary chat %d: %w", userID, tgChatID, err)
+		return fmt.Errorf("send to user %s: no bot for primary chat %d: %w", userID, tgChatID, err)
 	}
 	bi := g.botByID(botID)
 	if bi == nil {

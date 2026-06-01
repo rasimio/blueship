@@ -725,24 +725,8 @@ func tagsFromData(data map[string]any) []string {
 // welcome-back line. Falls back to "" so the caller can pick a
 // generic noun rather than the user_profiles raw chat_id.
 func (g *Gateway) lookupDisplayName(ctx context.Context, userID uuid.UUID) string {
-	db, err := g.deps.DB("ship")
-	if err != nil {
-		return ""
-	}
-	var name *string
-	if err := db.GetContext(ctx, &name,
-		`SELECT display_name FROM vaelum.memberships
-		  WHERE user_id = $1 ORDER BY created_at LIMIT 1`, userID); err != nil {
-		return ""
-	}
-	if name != nil && *name != "" {
-		return *name
-	}
-	// Try vaelum.users.display_name as a fallback.
-	var udn *string
-	if err := db.GetContext(ctx, &udn,
-		`SELECT display_name FROM vaelum.users WHERE id = $1`, userID); err == nil && udn != nil {
-		return *udn
+	if h := g.deps.Config.Gateway.ResolveDisplayName; h != nil {
+		return h(ctx, userID)
 	}
 	return ""
 }
