@@ -310,18 +310,16 @@ func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID) (st
 	if soulID == uuid.Nil {
 		return g.systemPrompt, nil
 	}
-	db, err := g.deps.DB("ship")
-	if err != nil {
-		return "", fmt.Errorf("system prompt for soul %s: db unavailable: %w", soulID, err)
+	resolve := g.deps.Config.Gateway.ResolveSoulPersona
+	if resolve == nil {
+		return "", fmt.Errorf("system prompt for soul %s: no ResolveSoulPersona hook configured", soulID)
 	}
-	var persona string
-	if err := db.GetContext(ctx, &persona,
-		`SELECT system_prompt FROM vaelum.soul_personas WHERE soul_id = $1`,
-		soulID); err != nil {
-		return "", fmt.Errorf("system prompt for soul %s: no persona row in vaelum.soul_personas: %w", soulID, err)
+	persona, err := resolve(ctx, soulID)
+	if err != nil {
+		return "", fmt.Errorf("system prompt for soul %s: persona lookup failed: %w", soulID, err)
 	}
 	if strings.TrimSpace(persona) == "" {
-		return "", fmt.Errorf("system prompt for soul %s: persona row has empty system_prompt", soulID)
+		return "", fmt.Errorf("system prompt for soul %s: persona is empty", soulID)
 	}
 	preamble, agents, err := g.platformPrompts(ctx)
 	if err != nil {
@@ -339,26 +337,18 @@ func (g *Gateway) platformPrompts(ctx context.Context) (preamble, agents string,
 	if g.ppLoaded {
 		return g.ppPreamble, g.ppAgents, nil
 	}
-	db, err := g.deps.DB("ship")
+	resolve := g.deps.Config.Gateway.ResolvePlatformPrompts
+	if resolve == nil {
+		return "", "", fmt.Errorf("platform prompts: no ResolvePlatformPrompts hook configured")
+	}
+	preamble, agents, err = resolve(ctx)
 	if err != nil {
-		return "", "", fmt.Errorf("platform prompts: db unavailable: %w", err)
+		return "", "", fmt.Errorf("platform prompts: %w", err)
 	}
-	var rows []struct {
-		Key     string `db:"key"`
-		Content string `db:"content"`
+	if strings.TrimSpace(preamble) == "" || strings.TrimSpace(agents) == "" {
+		return "", "", fmt.Errorf("platform prompts: preamble or agents layer is empty")
 	}
-	if err := db.SelectContext(ctx, &rows,
-		`SELECT key, content FROM vaelum.platform_prompts WHERE key IN ('preamble', 'agents')`); err != nil {
-		return "", "", fmt.Errorf("platform prompts: query vaelum.platform_prompts: %w", err)
-	}
-	layer := map[string]string{}
-	for _, r := range rows {
-		layer[r.Key] = r.Content
-	}
-	if strings.TrimSpace(layer["preamble"]) == "" || strings.TrimSpace(layer["agents"]) == "" {
-		return "", "", fmt.Errorf("platform prompts: vaelum.platform_prompts is missing the 'preamble' or 'agents' row")
-	}
-	g.ppPreamble, g.ppAgents, g.ppLoaded = layer["preamble"], layer["agents"], true
+	g.ppPreamble, g.ppAgents, g.ppLoaded = preamble, agents, true
 	return g.ppPreamble, g.ppAgents, nil
 }
 
@@ -371,13 +361,12 @@ func (g *Gateway) reflexSystemPromptForSoul(ctx context.Context, soulID uuid.UUI
 	if soulID == uuid.Nil {
 		return g.systemPrompt, nil
 	}
-	db, err := g.deps.DB("ship")
-	if err != nil {
-		return "", fmt.Errorf("reflex system prompt: db unavailable: %w", err)
+	resolve := g.deps.Config.Gateway.ResolveSoulPersona
+	if resolve == nil {
+		return "", fmt.Errorf("reflex system prompt: no ResolveSoulPersona hook configured")
 	}
-	var persona string
-	if err := db.GetContext(ctx, &persona,
-		`SELECT system_prompt FROM vaelum.soul_personas WHERE soul_id = $1`, soulID); err != nil {
+	persona, err := resolve(ctx, soulID)
+	if err != nil {
 		return "", fmt.Errorf("reflex system prompt: no persona for soul %s: %w", soulID, err)
 	}
 	preamble, _, err := g.platformPrompts(ctx)

@@ -123,4 +123,14 @@ type GatewayConfig struct {
 	// per-turn tool allowlist. Host-supplied (typically a cabinet lookup). Nil
 	// or an error means "no filtering — every registered tool is allowed".
 	ResolveSoulToolPolicy func(ctx context.Context, soulID uuid.UUID) (overrides map[string]bool, connectedProviders []string, err error) `yaml:"-" json:"-"`
+
+	// ResolveSoulPersona returns a soul's persona/system-prompt text. Required
+	// when souls are used (non-nil soulID) — the framework has no persona store
+	// of its own; a nil hook is a misconfiguration for a soul-bound deployment.
+	ResolveSoulPersona func(ctx context.Context, soulID uuid.UUID) (string, error) `yaml:"-" json:"-"`
+
+	// ResolvePlatformPrompts returns the platform-wide preamble + agents prompt
+	// layers composed around each soul's persona. Host-supplied; the gateway
+	// caches the result for the process lifetime. Required when souls are used.
+	ResolvePlatformPrompts func(ctx context.Context) (preamble, agents string, err error) `yaml:"-" json:"-"`
 }
