@@ -1,0 +1,27 @@
+# Local Postgres for BlueShip development.
+#
+#   make db        # start it (or: docker compose up -d)
+#   make down      # stop it
+#
+# The default DATABASE_URL in .env.example points at this container. BlueShip
+# auto-migrates its own tables on first run — there is no manual schema step.
+services:
+  db:
+    image: postgres:17
+    container_name: blueship-db
+    environment:
+      POSTGRES_USER: blueship
+      POSTGRES_PASSWORD: blueship
+      POSTGRES_DB: blueship
+    ports:
+      - "5432:5432"
+    volumes:
+      - blueship-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blueship -d blueship"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  blueship-pgdata:

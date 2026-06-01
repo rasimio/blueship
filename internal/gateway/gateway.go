@@ -227,14 +227,21 @@ func NewGateway(deps *bs.Deps, modules ModuleRegistry, logger *slog.Logger) (*Ga
 	gw.initBotRegistry()
 
 	// Load system prompts from the agent's prompts directory (Config.Prompts).
-	// Personality lives with the agent, never in the framework.
+	// Personality lives with the agent, never in the framework. With no Prompts
+	// configured the ship boots with an empty system prompt (a bare LLM agent) —
+	// a loud warning, not a hard failure, so a fresh checkout runs immediately.
+	// Set Config.Prompts to a directory of <key>.md files to give the agent a
+	// personality; once it IS set, a missing file is a hard error (catches a
+	// misconfigured deploy rather than silently shipping a personality-less bot).
 	if cfg.Prompts == "" {
-		return nil, fmt.Errorf("system prompts not configured: set Config.Prompts to a directory containing <key>.md files")
+		logger.Warn("gateway: no Config.Prompts set — running with an empty system prompt; " +
+			"set Config.Prompts to a directory of <key>.md files to give the agent a personality")
+	} else {
+		if err := gw.loadSystemPrompts(cfg.Prompts); err != nil {
+			return nil, fmt.Errorf("load system prompts: %w", err)
+		}
+		gw.loadPlatformGreet(cfg.Prompts)
 	}
-	if err := gw.loadSystemPrompts(cfg.Prompts); err != nil {
-		return nil, fmt.Errorf("load system prompts: %w", err)
-	}
-	gw.loadPlatformGreet(cfg.Prompts)
 
 	return gw, nil
 }

@@ -14,7 +14,7 @@ type Config struct {
 	LLM        CompletionProvider // e.g. blueship.Anthropic(apiKey)
 	Transport  TransportConfig    // e.g. blueship.Telegram(botToken)
 	DB         string             // PostgreSQL DSN (app database)
-	ShipSchema string             // Schema for BlueShip tables (default: "" = public)
+	ShipSchema string             // Schema for BlueShip's own tables (default: "blueship")
 
 	// --- Optional providers (nil = disabled) ---
 	Embedder          EmbeddingProvider                // default: nil (embedding features disabled)
@@ -235,6 +235,12 @@ type A2APeerConfig struct {
 
 // applyDefaults fills in zero values with sensible defaults.
 func (c *Config) ApplyDefaults() {
+	// BlueShip keeps its own tables in a dedicated schema so it never pollutes
+	// the host application's public schema. The embedded migrations assume this
+	// schema; defaulting it here lets a fresh database bootstrap with no config.
+	if c.ShipSchema == "" {
+		c.ShipSchema = "blueship"
+	}
 	if c.Timezone == "" {
 		c.Timezone = "UTC"
 	}

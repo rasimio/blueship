@@ -90,9 +90,15 @@ func (s *Ship) Run(ctx context.Context) error {
 			return fmt.Errorf("ensure owner: %w", err)
 		}
 	} else {
+		// No owner configured. Resolve an existing one if present; otherwise
+		// boot without a designated owner — a basic bot resolves each user when
+		// they message, and owner-scoped features (proactive jobs, single-user
+		// mode) are simply inactive until Config.Owner.ChatID is set. This lets
+		// a fresh deployment start with zero user setup.
 		uid, err = user.ResolveOwner(ctx, shipDB)
 		if err != nil {
-			return fmt.Errorf("resolve owner: %w", err)
+			s.logger.Warn("no owner configured and none found in DB; continuing without a designated owner — set Config.Owner.ChatID for single-user / proactive features", "error", err)
+			uid = uuid.Nil
 		}
 	}
 	deps.UserID = uid

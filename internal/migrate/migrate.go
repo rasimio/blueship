@@ -49,8 +49,15 @@ func Run(db *sqlx.DB, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("read migrations dir: %w", err)
 	}
+	// init.sql is the base schema and must run before the numbered
+	// incremental migrations (which ALTER tables it creates). It sorts after
+	// "0NN" lexically, so order it explicitly first; everything else lexical.
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
+		a, b := entries[i].Name(), entries[j].Name()
+		if a == "init.sql" || b == "init.sql" {
+			return a == "init.sql" && b != "init.sql"
+		}
+		return a < b
 	})
 
 	// 3. Apply each migration

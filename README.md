@@ -80,20 +80,29 @@ BlueShip is a Go 1.26 framework for building production AI agents. It provides t
 
 ## Quick Start
 
-### Prerequisites
+A working Telegram bot backed by Claude, in about 5 minutes.
 
-- Go 1.26+
-- PostgreSQL 14+
-- A Telegram bot token (`@BotFather`)
-- An Anthropic, OpenAI, or Gemini API key
-
-### Install
+**Prerequisites:** Go 1.26+, Docker (for Postgres), an [Anthropic API key](https://console.anthropic.com/), and a Telegram bot token from [@BotFather](https://t.me/BotFather).
 
 ```bash
-go get github.com/rasimio/blueship
+git clone https://github.com/rasimio/blueship && cd blueship
+make setup     # starts Postgres in Docker, fetches deps, creates .env
+#              ↳ now edit .env: paste your ANTHROPIC_API_KEY and TELEGRAM_BOT_TOKEN
+make run       # builds and runs the example agent
 ```
 
-### Minimal agent
+Message your bot on Telegram — that's it. You have a fully functional agent
+with session persistence, automatic context compaction, and the built-in tools
+(`current_time`, `web_search`, `browser_fetch`). BlueShip created its own
+database tables on first run; there is no manual schema step.
+
+New here? [**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md) walks you
+through giving the agent a personality and adding your own tools.
+
+### The whole program
+
+`make run` runs [`examples/minimal`](examples/minimal/main.go) — which is the
+entire agent:
 
 ```go
 package main
@@ -124,7 +133,10 @@ func main() {
 }
 ```
 
-This gives you a fully functional Telegram bot backed by Claude. It handles sessions, compaction, and the built-in `current_time` and `browser_fetch` tools automatically.
+To use BlueShip as a library in your own project: `go get github.com/rasimio/blueship`.
+Give the agent a personality by pointing `Config.Prompts` at a directory of
+`<key>.md` files, and add capabilities by registering modules (ToolProvider /
+JobProvider / CLIProvider) — see [Writing Modules](#writing-modules) below.
 
 ---
 
