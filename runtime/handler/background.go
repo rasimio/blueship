@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/runtime/agent"
 )
@@ -94,15 +96,20 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			skipReflex = cfg.SkipReflex
 		}
 	}
+	// defaultPersonaStack marks that promptKeys came from the host's default
+	// SystemPromptKeys (the chat persona layer), not an explicit per-task
+	// override. Only that default stack is swapped for the soul's own persona
+	// below — an explicit system_prompt_keys override (e.g. a reflection job
+	// that deliberately avoids chat prompts) is left exactly as configured.
+	defaultPersonaStack := false
 	if promptKeys == nil {
 		// Research workers (direct strategy with the default
 		// "background-task" prompt) must NOT see chat-cortex prompts:
-		// SOUL.md and AGENTS.md ship persona / chat-tool semantics
-		// (caomoji, note_close, message_send markers, +_+ feedback)
-		// that are noise for a research role and actively pull the
-		// model toward chat-style hedging instead of grounded citation.
-		// Background-task.md is self-contained — it tells the model
-		// exactly what shape its work takes. Anything else is bloat.
+		// the persona / chat-tool semantics (note_close, message_send
+		// markers, feedback) are noise for a research role and actively
+		// pull the model toward chat-style hedging instead of grounded
+		// citation. Background-task.md is self-contained — it tells the
+		// model exactly what shape its work takes. Anything else is bloat.
 		//
 		// Recurring handlers (heartbeat, inner-thought) still get the
 		// chat persona stack because their replies go straight back to
@@ -111,18 +118,49 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			// minimal: only the background-task instruction below
 		} else {
 			promptKeys = append(promptKeys, deps.Config.SystemPromptKeys...)
+			defaultPersonaStack = true
 		}
 	}
-	promptKeys = append(promptKeys, instructionKey)
 
 	var parts []string
-	for _, key := range promptKeys {
-		p, err := deps.Prompts.Get(ctx, key)
+
+	// Soul-bound tasks must speak in THEIR soul's voice. The default persona
+	// stack resolves the "soul" key from the process-global file prompt store,
+	// which is the founding soul's persona — so without this every soul's
+	// heartbeat would address its user as the founding soul's user. When the
+	// host wires the per-soul persona hooks, compose the SAME stack the live
+	// gateway uses (platform preamble + this soul's persona + platform agents)
+	// instead. Framework consumers without the soul model keep the file path.
+	gw := deps.Config.Gateway
+	if defaultPersonaStack && task.SoulID != uuid.Nil &&
+		gw.ResolveSoulPersona != nil && gw.ResolvePlatformPrompts != nil {
+		preamble, agents, err := gw.ResolvePlatformPrompts(ctx)
 		if err != nil {
-			return core.IterationResult{}, fmt.Errorf("load prompt %q: %w", key, err)
+			return core.IterationResult{}, fmt.Errorf("background: platform prompts: %w", err)
 		}
-		parts = append(parts, p)
+		persona, err := gw.ResolveSoulPersona(ctx, task.SoulID)
+		if err != nil {
+			return core.IterationResult{}, fmt.Errorf("background: soul %s persona: %w", task.SoulID, err)
+		}
+		parts = append(parts, preamble, persona, agents)
+	} else {
+		for _, key := range promptKeys {
+			p, err := deps.Prompts.Get(ctx, key)
+			if err != nil {
+				return core.IterationResult{}, fmt.Errorf("load prompt %q: %w", key, err)
+			}
+			parts = append(parts, p)
+		}
 	}
+
+	// Instruction prompt (background-task / heartbeat / …) is always appended
+	// last, from the file store.
+	instr, err := deps.Prompts.Get(ctx, instructionKey)
+	if err != nil {
+		return core.IterationResult{}, fmt.Errorf("load prompt %q: %w", instructionKey, err)
+	}
+	parts = append(parts, instr)
+
 	systemPrompt := strings.Join(parts, "\n\n")
 
 	now := time.Now().In(b.tz)
