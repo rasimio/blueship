@@ -104,6 +104,35 @@ type BotOnboarding interface {
 	CompleteDeeplinkLogin(ctx context.Context, token string, tgUserID int64) (approved bool, message string, err error)
 }
 
+// DeeplinkLinker is an OPTIONAL extension of the BotOnboarding host hook.
+// A host that supports the cabinet-initiated "link my existing account to
+// this Telegram chat" deep link (https://t.me/<bot>?start=link_<token>)
+// implements it; the gateway type-asserts it off the BotOnboarding value at
+// call time, so hosts that don't implement it keep compiling and the link_
+// deep link simply falls through to the onboarding FSM.
+//
+// Unlike CompleteDeeplinkLogin — which only flips an auth nonce and lets the
+// cabinet's poll mint a session keyed on the Telegram id — CompleteDeeplinkLink
+// performs the whole link write itself: it resolves the token to the
+// initiating (user, soul), writes the host's chat→soul routing row for
+// (botID, tgChatID) so subsequent inbound lands on that EXISTING soul, and
+// returns the user-facing confirmation line. This is the missing inverse of
+// onboarding: onboarding creates a new soul for an unknown chat; linking
+// attaches a known chat to an already-created soul.
+type DeeplinkLinker interface {
+	// CompleteDeeplinkLink consumes a link token minted by the cabinet's
+	// "Connect Telegram" endpoint and binds this Telegram chat to the
+	// initiating user's existing soul. botID is the platform bot that
+	// received /start link_<token>; tgUserID/tgChatID identify the chat.
+	//
+	// Returns the message the gateway should reply with. A nil error with
+	// a non-empty message is the normal path for BOTH success and benign
+	// failure (token expired, or the Telegram id already belongs to a
+	// different account); a non-nil error is reserved for infrastructure
+	// faults and surfaces to the user as a generic "try again" line.
+	CompleteDeeplinkLink(ctx context.Context, token string, botID uuid.UUID, tgUserID, tgChatID int64) (message string, err error)
+}
+
 // BotOnboardingAccount is the payload CreateAccount needs to mint a
 // fresh tenant from a Telegram chat. tg_chat_id is the user's 1:1 chat
 // with the bot — it lands in vaelum.bot_links AND in user_profiles.chat_id

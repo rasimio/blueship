@@ -104,6 +104,7 @@ type (
 	AttachmentParams      = core.AttachmentParams
 	LinkParams            = core.LinkParams
 	BotOnboarding         = core.BotOnboarding
+	DeeplinkLinker        = core.DeeplinkLinker
 	BotOnboardingAccount  = core.BotOnboardingAccount
 	BotOnboardingComplete = core.BotOnboardingComplete
 )
