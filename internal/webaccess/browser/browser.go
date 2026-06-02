@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -30,6 +31,43 @@ import (
 
 	"github.com/chromedp/chromedp"
 )
+
+// validateFetchURL is the SSRF/LFI guard for the fetch primitive. Fetch
+// renders whatever URL the caller (ultimately an LLM tool call) hands it in a
+// real browser, so without this guard a `file://` URL reads arbitrary local
+// files and an `http://127.0.0.1` / `http://169.254.169.254` URL reaches
+// host-internal services and cloud metadata. We therefore allow only http(s)
+// and refuse loopback / private / link-local / unspecified destinations.
+//
+// This is host-internal hardening, not full SSRF protection: a public
+// hostname that DNS-resolves to a private address (DNS rebinding) is not
+// caught here. Deployments that expose this tool to untrusted callers should
+// additionally pin the browser behind an egress proxy that blocks RFC-1918.
+func validateFetchURL(rawURL string) error {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return fmt.Errorf("browser.Fetch: invalid URL: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https":
+	default:
+		return fmt.Errorf("browser.Fetch: refusing scheme %q — only http and https are allowed", u.Scheme)
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return fmt.Errorf("browser.Fetch: URL has no host")
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return fmt.Errorf("browser.Fetch: refusing to fetch loopback host %q", host)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("browser.Fetch: refusing to fetch internal address %q", host)
+		}
+	}
+	return nil
+}
 
 // FetchOptions controls a single Fetch call.
 type FetchOptions struct {
@@ -176,6 +214,12 @@ func allocator(ctx context.Context, proxy string) (context.Context, context.Canc
 func Fetch(ctx context.Context, opts FetchOptions) (*FetchResult, error) {
 	if opts.URL == "" {
 		return nil, fmt.Errorf("browser.Fetch: empty URL")
+	}
+	// SSRF/LFI guard — must run before any navigation (chromedp or the
+	// fetchPDF fast path), so a file:// or loopback URL never reaches the
+	// browser.
+	if err := validateFetchURL(opts.URL); err != nil {
+		return nil, err
 	}
 	// Track what the caller asked for, separately from what we actually
 	// open. Preprint hosts (arxiv et al) serve a 200-word abstract page
