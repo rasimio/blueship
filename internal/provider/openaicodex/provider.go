@@ -42,12 +42,19 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 // --- Request types ---
 
 type responsesRequest struct {
-	Model        string         `json:"model"`
-	Instructions string         `json:"instructions"`
-	Input        []any          `json:"input"`
-	Stream       bool           `json:"stream"`
-	Store        bool           `json:"store"`
-	Tools        []responseTool `json:"tools,omitempty"`
+	Model        string           `json:"model"`
+	Instructions string           `json:"instructions"`
+	Input        []any            `json:"input"`
+	Stream       bool             `json:"stream"`
+	Store        bool             `json:"store"`
+	Reasoning    *reasoningConfig `json:"reasoning,omitempty"`
+	Tools        []responseTool   `json:"tools,omitempty"`
+}
+
+// reasoningConfig maps to the Codex Responses API reasoning object. Only
+// effort is wired today; summary/verbosity are left at backend defaults.
+type reasoningConfig struct {
+	Effort string `json:"effort"`
 }
 
 type responseTool struct {
@@ -150,7 +157,30 @@ func buildRequest(req bs.CompletionRequest) responsesRequest {
 		Input:        input,
 		Stream:       true,
 		Store:        false,
+		Reasoning:    codexReasoning(req.Effort),
 		Tools:        buildTools(req.Tools),
+	}
+}
+
+// codexReasoning maps the generic CompletionRequest.Effort onto the Codex
+// Responses API reasoning.effort field. gpt-5.5 on the Codex backend accepts
+// exactly: none|low|medium|high|xhigh (verified live — it rejects gpt-5's
+// "minimal" with a 400). "none" is the instant, no-reasoning tier; "xhigh" is
+// the deepest. The Anthropic-flavoured "minimal"/"max" aliases collapse to the
+// nearest supported tier so a shared model_config.effort works across
+// providers. An empty or unrecognised effort returns nil so the request omits
+// the field entirely and the backend applies its default — preserving the
+// pre-existing behaviour for callers that don't set Effort.
+func codexReasoning(effort string) *reasoningConfig {
+	switch e := strings.ToLower(strings.TrimSpace(effort)); e {
+	case "none", "low", "medium", "high", "xhigh":
+		return &reasoningConfig{Effort: e}
+	case "minimal":
+		return &reasoningConfig{Effort: "none"}
+	case "max":
+		return &reasoningConfig{Effort: "xhigh"}
+	default:
+		return nil
 	}
 }
 
