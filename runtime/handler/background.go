@@ -75,6 +75,17 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	instructionKey := "background-task"
 	notifyDefault := true
 	skipReflex := false
+	// inputMode controls how the instruction reaches the model:
+	//   prompt_key (default) — instruction in the system prompt + a [TASK:…]
+	//     user turn through the chat persona (legacy behaviour).
+	//   system — instruction in the system prompt + a NEUTRAL trigger turn
+	//     that forbids conversational preamble. The assistant executes its
+	//     own proactive tick and returns only the result/[no-op] — this is
+	//     what stops a heartbeat from opening with "щас гляну".
+	//   user — the instruction text is delivered AS the user's message; the
+	//     model replies conversationally in persona (system carries persona
+	//     only). For chat-authored "message me on a schedule" tasks.
+	inputMode := "prompt_key"
 	var promptKeys []string
 	if task.Config != nil {
 		var cfg struct {
@@ -82,6 +93,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			NotifyDefault    *bool    `json:"notify_default"`
 			SystemPromptKeys []string `json:"system_prompt_keys"`
 			SkipReflex       bool     `json:"skip_reflex"`
+			InputMode        string   `json:"input_mode"`
 		}
 		if json.Unmarshal(task.Config, &cfg) == nil {
 			if cfg.Prompt != "" {
@@ -94,6 +106,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 				promptKeys = append(promptKeys, cfg.SystemPromptKeys...)
 			}
 			skipReflex = cfg.SkipReflex
+			if cfg.InputMode != "" {
+				inputMode = cfg.InputMode
+			}
 		}
 	}
 	// defaultPersonaStack marks that promptKeys came from the host's default
@@ -153,13 +168,18 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		}
 	}
 
-	// Instruction prompt (background-task / heartbeat / …) is always appended
-	// last, from the file store.
-	instr, err := deps.Prompts.Get(ctx, instructionKey)
-	if err != nil {
-		return core.IterationResult{}, fmt.Errorf("load prompt %q: %w", instructionKey, err)
+	// Resolve the instruction. resolvePromptOrBody returns the file contents
+	// when instructionKey names a real prompt (heartbeat, background-task, …)
+	// and otherwise treats the string itself as an inline body — so a cabinet/
+	// chat-authored task can carry its own instruction text without a file.
+	instr := resolvePromptOrBody(ctx, deps.Prompts, instructionKey)
+
+	// In `user` mode the instruction is the user's message (added as the user
+	// turn below), so the system prompt is persona-only. Every other mode puts
+	// the instruction in the system prompt.
+	if inputMode != "user" {
+		parts = append(parts, instr)
 	}
-	parts = append(parts, instr)
 
 	systemPrompt := strings.Join(parts, "\n\n")
 
@@ -242,32 +262,54 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 	var msg string
 
-	// Resumed from pause — tell LLM what woke it + last progress summary.
-	if progress.PeerTaskID != "" && progress.Phase == "waiting" {
-		resumeMsg := fmt.Sprintf("[RESUME] You were paused waiting for peer task %s. Check its current status and decide next steps.",
-			progress.PeerTaskID)
-		if progress.Summary != "" {
-			resumeMsg += fmt.Sprintf("\n\nLast progress: %s", progress.Summary)
+	switch inputMode {
+	case "system":
+		// Instruction lives in the system prompt and IS the whole job of this
+		// tick. The trigger turn frames it as the assistant's OWN proactive
+		// check (not a user request) and bans any acknowledgement — only the
+		// finished message or [no-op] should come back. This is the fix for a
+		// heartbeat opening with "щас гляну".
+		msg = "[Proactive tick. Carry out the instructions in your system prompt now. " +
+			"This is your OWN background check, not a user request — do not acknowledge, " +
+			"greet, or narrate (no \"let me check\", no \"щас гляну\"). Reply with ONLY the " +
+			"finished message to send the user, or exactly [no-op] if there is nothing to send.]"
+	case "user":
+		// The instruction text is delivered as if the user wrote it; the model
+		// replies conversationally in persona.
+		if strings.TrimSpace(instr) != "" {
+			msg = instr
+		} else {
+			msg = "(scheduled check-in)"
 		}
-		msg = fmt.Sprintf("%s\nIteration: %d/%d", resumeMsg, task.Iteration+1, task.MaxIterations)
-	} else if instructionKey != "background-task" {
-		// Tasks with a custom prompt (config.prompt) are self-contained —
-		// no multi-phase planning/execution/synthesis overlay.
-		msg = fmt.Sprintf("[TASK: %s]\n%s\nIteration: %d/%d",
-			task.Title, desc, task.Iteration+1, task.MaxIterations)
-	} else {
-		isFirst := task.Iteration == 0
+	default:
+		// prompt_key (legacy) — pause-resume + multi-phase framing.
+		if progress.PeerTaskID != "" && progress.Phase == "waiting" {
+			// Resumed from pause — tell LLM what woke it + last progress summary.
+			resumeMsg := fmt.Sprintf("[RESUME] You were paused waiting for peer task %s. Check its current status and decide next steps.",
+				progress.PeerTaskID)
+			if progress.Summary != "" {
+				resumeMsg += fmt.Sprintf("\n\nLast progress: %s", progress.Summary)
+			}
+			msg = fmt.Sprintf("%s\nIteration: %d/%d", resumeMsg, task.Iteration+1, task.MaxIterations)
+		} else if instructionKey != "background-task" {
+			// Tasks with a custom prompt (config.prompt) are self-contained —
+			// no multi-phase planning/execution/synthesis overlay.
+			msg = fmt.Sprintf("[TASK: %s]\n%s\nIteration: %d/%d",
+				task.Title, desc, task.Iteration+1, task.MaxIterations)
+		} else {
+			isFirst := task.Iteration == 0
 
-		phaseKey := "background-execution"
-		if isFirst {
-			phaseKey = "background-planning"
-		} else if isLast {
-			phaseKey = "background-synthesis"
+			phaseKey := "background-execution"
+			if isFirst {
+				phaseKey = "background-planning"
+			} else if isLast {
+				phaseKey = "background-synthesis"
+			}
+			phasePrompt, _ := deps.Prompts.Get(ctx, phaseKey)
+
+			msg = fmt.Sprintf("[TASK: %s]\nMission: %s\nIteration: %d/%d\n\n%s",
+				task.Title, desc, task.Iteration+1, task.MaxIterations, phasePrompt)
 		}
-		phasePrompt, _ := deps.Prompts.Get(ctx, phaseKey)
-
-		msg = fmt.Sprintf("[TASK: %s]\nMission: %s\nIteration: %d/%d\n\n%s",
-			task.Title, desc, task.Iteration+1, task.MaxIterations, phasePrompt)
 	}
 
 	// Budget warning.
@@ -561,4 +603,18 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "..."
+}
+
+// resolvePromptOrBody resolves a task's instruction. When keyOrBody names a
+// real prompt file (heartbeat, background-task, …) its contents are returned;
+// otherwise the string is treated as an inline instruction body. This lets
+// seed/template tasks reference a prompt KEY while cabinet/chat-authored tasks
+// carry their own text — without the old hard-fail when Get didn't find a key.
+func resolvePromptOrBody(ctx context.Context, prompts core.PromptStore, keyOrBody string) string {
+	if prompts != nil {
+		if v, err := prompts.Get(ctx, keyOrBody); err == nil && strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return keyOrBody
 }
