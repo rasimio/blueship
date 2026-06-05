@@ -71,9 +71,23 @@ type inputTextContent struct {
 	Text string `json:"text"`
 }
 
+// inputImageContent is a Responses API vision content item. The codex /
+// ChatGPT backend accepts an inline base64 data URL in image_url (same
+// surface as the public Responses API), so an attached screenshot rides
+// in the user message alongside input_text rather than being dropped.
+type inputImageContent struct {
+	Type     string `json:"type"`             // "input_image"
+	ImageURL string `json:"image_url"`        // "data:image/png;base64,...."
+	Detail   string `json:"detail,omitempty"` // "auto" | "low" | "high"
+}
+
+// inputMessage.Content is heterogeneous: a user turn may interleave
+// input_text and input_image items, so it is typed []any rather than a
+// text-only slice. Each element is an inputTextContent or
+// inputImageContent value.
 type inputMessage struct {
-	Role    string             `json:"role"`
-	Content []inputTextContent `json:"content"`
+	Role    string `json:"role"`
+	Content []any  `json:"content"`
 }
 
 type outputTextContent struct {
@@ -186,20 +200,28 @@ func codexReasoning(effort string) *reasoningConfig {
 
 func buildUserInput(blocks []bs.ContentBlock) []any {
 	var items []any
-	var textParts []string
+	var content []any // ordered input_text / input_image for the pending user message
+
+	flush := func() {
+		if len(content) > 0 {
+			items = append(items, inputMessage{Role: "user", Content: content})
+			content = nil
+		}
+	}
 
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			textParts = append(textParts, b.Text)
-		case "tool_result":
-			if len(textParts) > 0 {
-				items = append(items, inputMessage{
-					Role:    "user",
-					Content: []inputTextContent{{Type: "input_text", Text: strings.Join(textParts, "\n")}},
-				})
-				textParts = nil
+			content = append(content, inputTextContent{Type: "input_text", Text: b.Text})
+		case "image":
+			if img, ok := imageContentItem(b.Source); ok {
+				content = append(content, img)
 			}
+		case "tool_result":
+			// A function_call_output is a top-level input item, not message
+			// content — flush any pending user content first so the wire
+			// order (text/image, then tool result) is preserved.
+			flush()
 			output := stringifyContent(b.Content)
 			items = append(items, inputFunctionCallOutput{
 				Type:   "function_call_output",
@@ -209,13 +231,28 @@ func buildUserInput(blocks []bs.ContentBlock) []any {
 		}
 	}
 
-	if len(textParts) > 0 {
-		items = append(items, inputMessage{
-			Role:    "user",
-			Content: []inputTextContent{{Type: "input_text", Text: strings.Join(textParts, "\n")}},
-		})
-	}
+	flush()
 	return items
+}
+
+// imageContentItem converts a blueship image block into a Responses API
+// input_image item. The base64 bytes ride inline as a data URL rebuilt
+// from the source's media type — the same base64 the Anthropic vision
+// path forwards. Returns false for a nil/empty source so a malformed
+// block is skipped rather than emitted as an empty image.
+func imageContentItem(src *bs.ImageSource) (inputImageContent, bool) {
+	if src == nil || src.Data == "" {
+		return inputImageContent{}, false
+	}
+	media := src.MediaType
+	if media == "" {
+		media = "image/jpeg"
+	}
+	return inputImageContent{
+		Type:     "input_image",
+		ImageURL: "data:" + media + ";base64," + src.Data,
+		Detail:   "auto",
+	}, true
 }
 
 func buildAssistantInput(blocks []bs.ContentBlock) []any {
