@@ -133,7 +133,10 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// flow, ≥4 iterations so plan + ≥2 exec + synthesis fits) with the skill
 	// hooks wired. Below that we keep the flat phase flow (no plan theatre).
 	planActive := instructionKey == "background-task" && inputMode == "prompt_key" &&
-		task.MaxIterations >= 4 && gw.ResolveSkillCatalog != nil && gw.ResolveSkills != nil
+		task.MaxIterations >= 4 && gw.ResolveSkillCatalog != nil && gw.ResolveSkills != nil &&
+		// Fallback: if planning (iter 0) didn't yield a usable plan, don't
+		// re-plan forever — drop to the flat phase flow from iter 1 on.
+		!(progress.Plan == nil && task.Iteration > 0)
 
 	// Resolve the current step + the role for THIS iteration. A step's skill
 	// overrides config.skills; planning (no plan yet) and synthesis (plan
