@@ -119,6 +119,43 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			}
 		}
 	}
+
+	// Parse progress early — the role plan (if any) decides which skill body to
+	// compose this iteration, so it must be known before the prompt is built.
+	var progress bgProgress
+	if len(task.Progress) > 0 && string(task.Progress) != "{}" {
+		json.Unmarshal(task.Progress, &progress)
+	}
+	gw := deps.Config.Gateway
+	isLast := task.MaxIterations > 0 && task.Iteration+1 >= task.MaxIterations
+
+	// planActive: a multi-iteration research-style task (default background-task
+	// flow, ≥4 iterations so plan + ≥2 exec + synthesis fits) with the skill
+	// hooks wired. Below that we keep the flat phase flow (no plan theatre).
+	planActive := instructionKey == "background-task" && inputMode == "prompt_key" &&
+		task.MaxIterations >= 4 && gw.ResolveSkillCatalog != nil && gw.ResolveSkills != nil
+
+	// Resolve the current step + the role for THIS iteration. A step's skill
+	// overrides config.skills; planning (no plan yet) and synthesis (plan
+	// exhausted) compose no role body.
+	var planStep *RoleStep
+	effectiveSkills := skillSlugs
+	if planActive {
+		if progress.Plan != nil {
+			planStep = progress.Plan.currentStep()
+		}
+		switch {
+		case progress.Plan == nil:
+			effectiveSkills = nil // planning — planner sees the catalog, not a body
+		case planStep == nil:
+			effectiveSkills = nil // plan exhausted — synthesis is role-neutral
+		case len(planStep.Skills) > 0:
+			effectiveSkills = planStep.Skills // the step's primary role
+		default:
+			effectiveSkills = skillSlugs // step has no role → user baseline
+		}
+	}
+
 	// defaultPersonaStack marks that promptKeys came from the host's default
 	// SystemPromptKeys (the chat persona layer), not an explicit per-task
 	// override. Only that default stack is swapped for the soul's own persona
@@ -159,7 +196,6 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// host wires the per-soul persona hooks, compose the SAME stack the live
 	// gateway uses (platform preamble + this soul's persona + platform agents)
 	// instead. Framework consumers without the soul model keep the file path.
-	gw := deps.Config.Gateway
 	if defaultPersonaStack && task.SoulID != uuid.Nil &&
 		gw.ResolveSoulPersona != nil && gw.ResolvePlatformPrompts != nil {
 		preamble, agents, err := gw.ResolvePlatformPrompts(ctx)
@@ -181,14 +217,16 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		}
 	}
 
-	// Compose any role/skill bodies the task carries (config.skills) after the
-	// persona/agents layer and before the task instruction — so the model adopts
-	// the role (programmer / analyst / …) while the instruction stays the task.
-	if len(skillSlugs) > 0 && gw.ResolveSkills != nil {
-		if bodies, serr := gw.ResolveSkills(ctx, skillSlugs); serr != nil {
+	// Compose the role body for THIS iteration after the persona/agents layer
+	// and before the task instruction. effectiveSkills is the current plan
+	// step's role (S2), or the task's config.skills baseline, or nil during
+	// planning/synthesis — so the model adopts exactly one role while the
+	// instruction stays the task.
+	if len(effectiveSkills) > 0 && gw.ResolveSkills != nil {
+		if bodies, serr := gw.ResolveSkills(ctx, effectiveSkills); serr != nil {
 			if deps.Logger != nil {
 				deps.Logger.WarnContext(ctx, "background: resolve skills failed",
-					"skills", skillSlugs, "error", serr)
+					"skills", effectiveSkills, "error", serr)
 			}
 		} else {
 			parts = append(parts, bodies...)
@@ -213,12 +251,6 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	now := time.Now().In(b.tz)
 	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s",
 		now.Format("2006-01-02 15:04 MST (Monday)"), systemPrompt)
-
-	// 2. Parse progress (contains session_id for shared session + pause state)
-	var progress bgProgress
-	if len(task.Progress) > 0 && string(task.Progress) != "{}" {
-		json.Unmarshal(task.Progress, &progress)
-	}
 
 	// 3. Resolve model: router format for LLM, display name for session.
 	//
@@ -285,8 +317,6 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		desc = *task.Description
 	}
 
-	isLast := task.MaxIterations > 0 && task.Iteration+1 >= task.MaxIterations
-
 	var msg string
 
 	switch inputMode {
@@ -323,6 +353,29 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			// no multi-phase planning/execution/synthesis overlay.
 			msg = fmt.Sprintf("[TASK: %s]\n%s\nIteration: %d/%d",
 				task.Title, desc, task.Iteration+1, task.MaxIterations)
+		} else if planActive {
+			// S2: plan (iter 0) → per-step execution → synthesis. The phase is
+			// driven by the plan's state, not the raw iteration index.
+			var phaseKey, planBlock string
+			switch {
+			case progress.Plan == nil:
+				// Planning: show the role catalog (descriptions, not bodies) and
+				// ask for a <<<PLAN_JSON …>>> plan with one role per step.
+				phaseKey = "background-plan"
+				if cat, cerr := gw.ResolveSkillCatalog(ctx); cerr == nil {
+					planBlock = "\n\n" + formatSkillCatalog(cat)
+				}
+			case planStep != nil && !isLast:
+				// Execution: the current step (its role body is already in the
+				// system prompt) plus the whole plan for context.
+				phaseKey = "background-step"
+				planBlock = "\n\n" + formatPlanForExecutor(progress.Plan, planStep)
+			default:
+				phaseKey = "background-synthesis"
+			}
+			phasePrompt, _ := deps.Prompts.Get(ctx, phaseKey)
+			msg = fmt.Sprintf("[TASK: %s]\nMission: %s\nIteration: %d/%d\n\n%s%s",
+				task.Title, desc, task.Iteration+1, task.MaxIterations, phasePrompt, planBlock)
 		} else {
 			isFirst := task.Iteration == 0
 
@@ -464,6 +517,23 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 	reply := result.Text
 
+	// S2 plan bookkeeping (handler owns the state; the model only proposes).
+	// The planner's first reply builds the plan; each execution reply completes
+	// its step. Adaptive patching (PLAN_PATCH_JSON) lands in S2-b.
+	if planActive {
+		if progress.Plan == nil {
+			if p, ok := parsePlanJSON(reply); ok {
+				progress.Plan = p
+				if deps.Logger != nil {
+					deps.Logger.InfoContext(ctx, "background: role plan created",
+						"task_id", task.ID, "steps", len(p.Steps))
+				}
+			}
+		} else if planStep != nil {
+			progress.Plan.completeStep(planStep.ID, extractResultLine(reply))
+		}
+	}
+
 	// Serialise tool traces once; every return path passes them through
 	// IterationResult so the scheduler can persist them into the
 	// agent_task_iterations.tool_calls jsonb column. Empty trace yields
@@ -518,6 +588,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		// notes (e.g. the synthesis grounding self-audit). It's a forcing
 		// function for the model, not something the user should ever see.
 		clean = scratchpadRE.ReplaceAllString(clean, "")
+		// Strip any plan machinery (PLAN_JSON / PLAN_PATCH_JSON) that slipped
+		// into a user-facing reply.
+		clean = stripPlanMarkers(clean)
 		clean = strings.TrimSpace(clean)
 
 		// Archive session (one-shot, no reuse after task completion).
@@ -604,6 +677,7 @@ type bgProgress struct {
 	DelegatedFrom map[string]any `json:"delegated_from,omitempty"` // preserved across iterations so the
 	// scheduler's terminal-status callback can route
 	// back to the originating agent.
+	Plan *RolePlan `json:"plan,omitempty"` // S2 role-assigned step plan (nil until the planner builds it)
 }
 
 // isGarbageOutput detects raw tool output that shouldn't be sent to users

@@ -140,4 +140,20 @@ type GatewayConfig struct {
 	// system prompt for tasks carrying config.skills. Optional; nil = the
 	// host has no skills layer.
 	ResolveSkills func(ctx context.Context, slugs []string) ([]string, error) `yaml:"-" json:"-"`
+
+	// ResolveSkillCatalog returns lightweight metadata for every enabled
+	// skill — slug/title/description/tags, NOT the bodies. The task planner
+	// reads this to assign a role per step without bloating the planning
+	// prompt with full persona bodies (the executor pulls the body via
+	// ResolveSkills only for the step it's running). Optional.
+	ResolveSkillCatalog func(ctx context.Context) ([]SkillMeta, error) `yaml:"-" json:"-"`
+}
+
+// SkillMeta is the planner-facing summary of a skill — enough to choose a role,
+// none of the prompt body.
+type SkillMeta struct {
+	Slug        string   `json:"slug"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Tags        []string `json:"tags"`
 }

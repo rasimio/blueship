@@ -51,6 +51,7 @@ type (
 	AgentTask       = core.AgentTask
 	AgentDeps       = core.AgentDeps
 	IterationResult = core.IterationResult
+	SkillMeta       = core.SkillMeta
 )
 
 // --- Providers: LLM + capability ports ---
