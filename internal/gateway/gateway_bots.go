@@ -290,56 +290,69 @@ func (g *Gateway) telegramEnabled() bool {
 // cfg.Transport.BotToken — a Vaelum user who paired with @VaelumBot
 // must not receive proactive messages from the host owner's private
 // @ArleneKateBot (the user has never opened a chat with it).
-func (g *Gateway) SendToUser(ctx context.Context, userID uuid.UUID, text string) error {
+// resolveUserBot finds the bot instance + tg chat id for a user's PRIMARY
+// paired Telegram channel (user_profiles.chat_id, "telegram:NNN"). Shared by
+// SendToUser (text) and SendToUserAttachment (files) so both route through the
+// exact bot the user is actually talking to — not the host owner's private
+// bot. Non-telegram primary channels return an error the caller skips on.
+func (g *Gateway) resolveUserBot(ctx context.Context, userID uuid.UUID) (*botInstance, int64, error) {
 	db, err := g.deps.DB("ship")
 	if err != nil {
-		return fmt.Errorf("send to user: db unavailable: %w", err)
+		return nil, 0, fmt.Errorf("send to user: db unavailable: %w", err)
 	}
-
-	// Resolve the PRIMARY (user, tg_chat) — the one recorded on
-	// user_profiles.chat_id. That row is the first pairing event
-	// (set by blueship's pairing-consume UPDATE on user_profiles) and
-	// represents the channel the user actually checks. Multi-pairing
-	// is real: a user may have linked several Telegram accounts (e.g.
-	// a personal one + a throw-away tester) — pushing proactive
-	// notifications to a stale "latest" link surfaces as Forbidden if
-	// that throw-away account blocked the bot.
-	//
-	// chat_id is stored as a transport-prefixed string: "telegram:NNN".
-	// Other prefixes (vaelum:..., voice:...) mean "user never paired a
-	// real TG channel" — return errNoLink so the caller can skip
-	// silently rather than try and fail.
 	var primaryChatID string
-	err = db.GetContext(ctx, &primaryChatID,
-		`SELECT chat_id FROM user_profiles WHERE id = $1`, userID)
-	if err != nil {
-		return fmt.Errorf("send to user %s: no profile: %w", userID, err)
+	if err := db.GetContext(ctx, &primaryChatID,
+		`SELECT chat_id FROM user_profiles WHERE id = $1`, userID); err != nil {
+		return nil, 0, fmt.Errorf("send to user %s: no profile: %w", userID, err)
 	}
 	const tgPrefix = "telegram:"
 	if !strings.HasPrefix(primaryChatID, tgPrefix) {
-		return fmt.Errorf("send to user %s: primary channel is %q, not telegram", userID, primaryChatID)
+		return nil, 0, fmt.Errorf("send to user %s: primary channel is %q, not telegram", userID, primaryChatID)
 	}
-	tgChatIDStr := strings.TrimPrefix(primaryChatID, tgPrefix)
-	tgChatID, parseErr := strconv.ParseInt(tgChatIDStr, 10, 64)
+	tgChatID, parseErr := strconv.ParseInt(strings.TrimPrefix(primaryChatID, tgPrefix), 10, 64)
 	if parseErr != nil {
-		return fmt.Errorf("send to user %s: malformed chat_id %q: %w", userID, primaryChatID, parseErr)
+		return nil, 0, fmt.Errorf("send to user %s: malformed chat_id %q: %w", userID, primaryChatID, parseErr)
 	}
-
-	// Find the bot that owns this (user, tg_chat) pairing via the host's
-	// bot-router hook. The framework owns no pairing schema.
 	resolveBot := g.deps.Config.Gateway.ResolveUserBotID
 	if resolveBot == nil {
-		return fmt.Errorf("send to user %s: no per-user bot router configured", userID)
+		return nil, 0, fmt.Errorf("send to user %s: no per-user bot router configured", userID)
 	}
 	botID, err := resolveBot(ctx, userID, tgChatID)
 	if err != nil {
-		return fmt.Errorf("send to user %s: no bot for primary chat %d: %w", userID, tgChatID, err)
+		return nil, 0, fmt.Errorf("send to user %s: no bot for primary chat %d: %w", userID, tgChatID, err)
 	}
 	bi := g.botByID(botID)
 	if bi == nil {
-		return fmt.Errorf("send to user %s: bot %s not loaded", userID, botID)
+		return nil, 0, fmt.Errorf("send to user %s: bot %s not loaded", userID, botID)
+	}
+	return bi, tgChatID, nil
+}
+
+func (g *Gateway) SendToUser(ctx context.Context, userID uuid.UUID, text string) error {
+	bi, tgChatID, err := g.resolveUserBot(ctx, userID)
+	if err != nil {
+		return err
 	}
 	return bi.client.SendLong(ctx, tgChatID, text)
+}
+
+// SendToUserAttachment ships a CDN-resolved file out the user's paired bot —
+// the file sibling of SendToUser. Routes by kind: image → SendPhoto, else
+// SendDocument (PDF/text/csv land as a download).
+func (g *Gateway) SendToUserAttachment(ctx context.Context, userID uuid.UUID, rec bs.AttachmentRecord, data []byte) error {
+	bi, tgChatID, err := g.resolveUserBot(ctx, userID)
+	if err != nil {
+		return err
+	}
+	name := rec.Name
+	if name == "" {
+		name = "file"
+	}
+	chatID := strconv.FormatInt(tgChatID, 10)
+	if rec.Kind == "image" {
+		return bi.client.SendPhoto(ctx, chatID, name, rec.Mime, data, "")
+	}
+	return bi.client.SendDocument(ctx, chatID, name, rec.Mime, data)
 }
 
 // runReloadLoop reconciles the bot registry against the host's source

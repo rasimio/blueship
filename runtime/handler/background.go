@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,6 +13,10 @@ import (
 	"github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/runtime/agent"
 )
+
+// scratchpadRE strips <scratchpad>…</scratchpad> internal working notes from a
+// task's final reply before it reaches the user (see the [DONE] cleaning).
+var scratchpadRE = regexp.MustCompile(`(?is)<scratchpad>.*?</scratchpad>`)
 
 type Background struct {
 	tz           *time.Location
@@ -487,6 +492,10 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		clean = strings.ReplaceAll(clean, "[PAUSE]", "")
 		clean = strings.ReplaceAll(clean, "[MILESTONE]", "")
 		clean = strings.ReplaceAll(clean, "[NOTIFY]", "")
+		// Strip <scratchpad>…</scratchpad> — the model's internal working
+		// notes (e.g. the synthesis grounding self-audit). It's a forcing
+		// function for the model, not something the user should ever see.
+		clean = scratchpadRE.ReplaceAllString(clean, "")
 		clean = strings.TrimSpace(clean)
 
 		// Archive session (one-shot, no reuse after task completion).

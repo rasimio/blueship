@@ -213,28 +213,53 @@ func (s *Ship) Run(ctx context.Context) error {
 					return
 				}
 
+				// Resolve [attached: UUID] markers into real file sends (a
+				// research task's PDF report), then continue with the cleaned
+				// text. The agent-task path used to send the raw marker as
+				// text. soul_id rides on ctx (set in executeTask); without it,
+				// or the host hooks, we fall back to plain text.
+				cleaned := text
+				if ids, c, ok := core.ParseAttachmentMarkers(text); ok {
+					cleaned = c
+					soulID, hasSoul := core.SoulIDFromContextOK(ctx)
+					if hasSoul && deps.AttachmentSink != nil && deps.SendToUserAttachment != nil {
+						for _, id := range ids {
+							rec, data, aerr := deps.AttachmentSink.Get(ctx, userID, soulID, id)
+							if aerr != nil || rec == nil {
+								s.logger.Warn("agent-tasks: attachment resolve failed", "id", id, "error", aerr)
+								continue
+							}
+							if serr := deps.SendToUserAttachment(ctx, userID, *rec, data); serr != nil {
+								s.logger.Warn("agent-tasks: attachment send failed", "id", id, "error", serr)
+							}
+						}
+					}
+				}
+
 				// Append to active chat session so cortex sees it in conversation history.
 				uid := userID.String()
 				var sessID string
 				_ = shipDB.GetContext(ctx, &sessID,
 					`SELECT id FROM chat_sessions WHERE user_id = $1 AND source = 'chat' AND active = true ORDER BY updated_at DESC LIMIT 1`, uid)
-				if sessID != "" {
+				if sessID != "" && strings.TrimSpace(cleaned) != "" {
 					_ = msgStore.Append(ctx, sessID, core.Message{
 						Role:    "assistant",
-						Content: core.NormalizeContent(text),
+						Content: core.NormalizeContent(cleaned),
 					})
 				}
 
-				// Send to Telegram. Prefer the per-user multi-bot
-				// sender wired by the gateway — it reads the user's
-				// actual paired bot from vaelum.bot_links and sends
-				// through it. Without this the legacy Transport.BotToken
-				// (host owner's private bot) was used for everyone,
-				// which surfaces as "403 Forbidden: bot was blocked"
-				// for every platform user who never opened that bot
-				// (they paired with @VaelumBot, not @ArleneKateBot).
+				// A marker-only message (no prose) has nothing left to send as
+				// text once the file is dispatched.
+				if strings.TrimSpace(cleaned) == "" {
+					return
+				}
+
+				// Send to Telegram. Prefer the per-user multi-bot sender wired
+				// by the gateway — it reads the user's actual paired bot and
+				// sends through it (legacy Transport.BotToken would 403 for
+				// users who never opened the host owner's private bot).
 				if deps.SendToUser != nil {
-					if err := deps.SendToUser(ctx, userID, text); err != nil {
+					if err := deps.SendToUser(ctx, userID, cleaned); err != nil {
 						s.logger.Warn("agent-tasks: notify failed", "error", err)
 					}
 				} else if deps.Sender != nil {
@@ -242,7 +267,7 @@ func (s *Ship) Run(ctx context.Context) error {
 					if idx := strings.Index(chatID, ":"); idx >= 0 {
 						chatID = chatID[idx+1:]
 					}
-					if err := deps.Sender.SendLong(ctx, chatID, text); err != nil {
+					if err := deps.Sender.SendLong(ctx, chatID, cleaned); err != nil {
 						s.logger.Warn("agent-tasks: notify failed", "error", err)
 					}
 				}
@@ -314,6 +339,7 @@ func (s *Ship) Run(ctx context.Context) error {
 		// scheduler can deliver Notify via the SAME bot the user paired
 		// with, instead of the legacy single-bot Transport.BotToken.
 		deps.SendToUser = gw.SendToUser
+		deps.SendToUserAttachment = gw.SendToUserAttachment
 	}
 
 	// 5a. Telegram fan-in — populated by ReloadBots from the host's

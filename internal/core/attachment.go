@@ -2,9 +2,40 @@ package core
 
 import (
 	"context"
+	"regexp"
+	"strings"
 
 	"github.com/google/uuid"
 )
+
+// attachMarkerRE matches the `[attached: UUID]` sentinel attachment_include
+// emits. Shared by the gateway (chat) and the agent-task notify path so both
+// deliver files identically.
+var attachMarkerRE = regexp.MustCompile(`(?i)\[attached:\s*([0-9a-f-]{36})\s*\]`)
+
+// ParseAttachmentMarkers extracts the de-duped attachment UUIDs referenced by
+// `[attached: UUID]` markers in text, and returns the text with those markers
+// stripped + the blank lines they leave behind collapsed. ok=false means no
+// markers were present (caller can skip the attachment path entirely).
+func ParseAttachmentMarkers(text string) (ids []uuid.UUID, cleaned string, ok bool) {
+	matches := attachMarkerRE.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return nil, text, false
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, m := range matches {
+		id, err := uuid.Parse(strings.ToLower(m[1]))
+		if err != nil || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	cleaned = attachMarkerRE.ReplaceAllString(text, "")
+	// Collapse 3+ newlines a stripped sentinel leaves behind into 2.
+	cleaned = regexp.MustCompile(`\n{3,}`).ReplaceAllString(cleaned, "\n\n")
+	return ids, strings.TrimSpace(cleaned), true
+}
 
 // AttachmentSink is the host-supplied hook for the CDN that backs
 // inbound (Telegram photo, cabinet upload) and outbound (the assistant's

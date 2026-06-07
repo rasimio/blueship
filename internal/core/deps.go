@@ -132,6 +132,13 @@ type Deps struct {
 	// deps.Sender.
 	SendToUser func(ctx context.Context, userID uuid.UUID, text string) error
 
+	// SendToUserAttachment is the file sibling of SendToUser: it ships a
+	// CDN-resolved attachment (PDF / image / text) out the user's paired
+	// bot. Lets the agent-task notify path deliver `[attached: UUID]`
+	// markers as real files (a research task's PDF report), not raw text.
+	// Nil = host hasn't wired it; caller skips file delivery.
+	SendToUserAttachment func(ctx context.Context, userID uuid.UUID, rec AttachmentRecord, data []byte) error
+
 	// BotOnboarding drives Telegram-native account creation for fresh
 	// users. The gateway invokes it on /start from a chat that has no
 	// vaelum.user_identities row; the host runs the FSM (GetState +
@@ -177,6 +184,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		ResolveSoul:                 d.ResolveSoul,
 		ResolveTelegramChat:         d.ResolveTelegramChat,
 		SendToUser:                  d.SendToUser,
+		SendToUserAttachment:        d.SendToUserAttachment,
 		BotOnboarding:               d.BotOnboarding,
 		pool:                        d.pool,
 	}
