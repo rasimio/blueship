@@ -92,6 +92,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	//     only). For chat-authored "message me on a schedule" tasks.
 	inputMode := "prompt_key"
 	var promptKeys []string
+	var skillSlugs []string
 	if task.Config != nil {
 		var cfg struct {
 			Prompt           string   `json:"prompt"`
@@ -99,8 +100,10 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			SystemPromptKeys []string `json:"system_prompt_keys"`
 			SkipReflex       bool     `json:"skip_reflex"`
 			InputMode        string   `json:"input_mode"`
+			Skills           []string `json:"skills"`
 		}
 		if json.Unmarshal(task.Config, &cfg) == nil {
+			skillSlugs = cfg.Skills
 			if cfg.Prompt != "" {
 				instructionKey = cfg.Prompt
 			}
@@ -170,6 +173,20 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 				return core.IterationResult{}, fmt.Errorf("load prompt %q: %w", key, err)
 			}
 			parts = append(parts, p)
+		}
+	}
+
+	// Compose any role/skill bodies the task carries (config.skills) after the
+	// persona/agents layer and before the task instruction — so the model adopts
+	// the role (programmer / analyst / …) while the instruction stays the task.
+	if len(skillSlugs) > 0 && gw.ResolveSkills != nil {
+		if bodies, serr := gw.ResolveSkills(ctx, skillSlugs); serr != nil {
+			if deps.Logger != nil {
+				deps.Logger.WarnContext(ctx, "background: resolve skills failed",
+					"skills", skillSlugs, "error", serr)
+			}
+		} else {
+			parts = append(parts, bodies...)
 		}
 	}
 

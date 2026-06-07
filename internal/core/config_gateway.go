@@ -133,4 +133,11 @@ type GatewayConfig struct {
 	// layers composed around each soul's persona. Host-supplied; the gateway
 	// caches the result for the process lifetime. Required when souls are used.
 	ResolvePlatformPrompts func(ctx context.Context) (preamble, agents string, err error) `yaml:"-" json:"-"`
+
+	// ResolveSkills returns the persona-prompt bodies for the given skill
+	// slugs, in the requested order (a "skill" is a reusable role like
+	// programmer / analyst). The background handler composes these into the
+	// system prompt for tasks carrying config.skills. Optional; nil = the
+	// host has no skills layer.
+	ResolveSkills func(ctx context.Context, slugs []string) ([]string, error) `yaml:"-" json:"-"`
 }
