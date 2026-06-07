@@ -51,7 +51,17 @@ type Scheduler struct {
 	mu     sync.Mutex
 	busy   map[string]bool // task ID → currently executing
 	taskWg sync.WaitGroup  // tracks in-flight executeTask goroutines
+	// sem bounds how many tasks execute concurrently across the whole
+	// scheduler — the back-to-back runner (runTask) holds a slot for a
+	// one-off task's entire plan, so without a cap a burst of pending
+	// one-offs would spawn unbounded LLM-heavy loops. Non-blocking: a task
+	// that can't get a slot stays pending for a later tick.
+	sem chan struct{}
 }
+
+// maxConcurrentTasks bounds simultaneous task execution (S2-a2 worker-pool
+// lite). Conservative default; fairness/queueing is a later hardening slice.
+const maxConcurrentTasks = 8
 
 // SetStatusCallback registers a function called after a task transitions
 // to a terminal status (done/failed/canceled). Used to send A2A
@@ -90,6 +100,7 @@ func NewScheduler(
 		notify:           notify,
 		logger:           logger,
 		busy:             make(map[string]bool),
+		sem:              make(chan struct{}, maxConcurrentTasks),
 	}
 }
 
@@ -166,10 +177,64 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		}
 
 		s.taskWg.Add(1)
-		go s.executeTask(ctx, task, handler, dispatchTag)
+		go s.runTask(ctx, task, handler, dispatchTag)
 	}
 
 	return nil
+}
+
+// runTask is the back-to-back runner (S2-a2 worker-pool lite). It holds a
+// global concurrency slot + the busy lease for a task's whole run, then loops:
+// one-off (schedule==nil) tasks advance to the next iteration IMMEDIATELY when
+// the prior one was non-terminal — so a multi-step plan executes in seconds,
+// not one step per 60s tick. Recurring tasks run exactly one iteration and
+// return (fresh session per tick by design). Cancel / deadline / max_iterations
+// are honoured by re-fetching the row each loop; progress persists per
+// iteration inside executeTaskOnce, so a crash mid-loop just resumes next tick.
+func (s *Scheduler) runTask(ctx context.Context, task core.AgentTask, handler core.AgentHandler, dispatchTag string) {
+	defer s.taskWg.Done()
+	// Bounded global concurrency: take a slot or leave the task pending for a
+	// later tick (no blocking — keeps the scheduler loop responsive).
+	select {
+	case s.sem <- struct{}{}:
+		defer func() { <-s.sem }()
+	default:
+		return
+	}
+	// Hold the busy lease across the ENTIRE back-to-back run so the 60s tick
+	// can't double-launch a task that's mid-loop (its row is 'pending' between
+	// iterations).
+	s.setBusy(task.ID.String(), true)
+	defer s.setBusy(task.ID.String(), false)
+
+	for {
+		again := s.executeTaskOnce(ctx, task, handler, dispatchTag)
+		if !again {
+			return
+		}
+		// Re-fetch for the next iteration: executeTaskOnce set the row back to
+		// pending + iteration++. Stop on terminal/paused/cancelled, exhausted
+		// budget, passed deadline, or shutdown.
+		next, err := s.store.Get(ctx, task.ID)
+		if err != nil {
+			s.logger.WarnContext(ctx, "agent-tasks: back-to-back refetch failed",
+				"task_id", task.ID, "error", err)
+			return
+		}
+		if next.Status != "pending" {
+			return
+		}
+		if next.MaxIterations > 0 && next.Iteration >= next.MaxIterations {
+			return
+		}
+		if next.Deadline != nil && !next.Deadline.After(time.Now()) {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		task = next
+	}
 }
 
 // Wait blocks until all in-flight task goroutines complete.
@@ -178,11 +243,13 @@ func (s *Scheduler) Wait() {
 	s.taskWg.Wait()
 }
 
-func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handler core.AgentHandler, dispatchTag string) {
-	defer s.taskWg.Done()
-	s.setBusy(task.ID.String(), true)
-	defer s.setBusy(task.ID.String(), false)
-
+// executeTaskOnce runs ONE iteration of a task. It returns again=true when the
+// caller (runTask) should immediately run the next iteration back-to-back —
+// i.e. a one-off (schedule==nil) task that produced a non-terminal result
+// (continue or grounding-rejected). Terminal outcomes (done/failed/pause) and
+// recurring tasks return false. The lease + concurrency slot are owned by
+// runTask, not here.
+func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, handler core.AgentHandler, dispatchTag string) (again bool) {
 	// Tenant-attribute every write this iteration does. The task row
 	// carries its own soul_id (denormalised in Phase A); thread it
 	// through ctx so the handler, its tools, and the per-call DB ctxes
@@ -203,7 +270,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		span.SetAttributes(attribute.String("agent_task.outcome", "set_running_failed"))
 		telemetry.RecordError(span, err)
 		s.logger.ErrorContext(ctx, "agent-tasks: set running failed", "task_id", task.ID, "error", err)
-		return
+		return false
 	}
 
 	// Build per-task tool registry. When the host installed a
@@ -351,7 +418,9 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		if fErr := s.store.SetPending(dbCtx, task.ID); fErr != nil {
 			s.logger.ErrorContext(ctx, "agent-tasks: reset after fail error", "error", fErr)
 		}
-		return
+		// Handler error: SetPending leaves it for a retry, but don't hammer it
+		// back-to-back — let the next tick pick it up (avoids a hot crash loop).
+		return false
 	}
 
 	// Defer the iteration-completed hook so it fires at function return,
@@ -410,7 +479,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		if err := s.store.PauseTask(dbCtx, task.ID, result.Progress); err != nil {
 			s.logger.ErrorContext(ctx, "agent-tasks: pause update error", "error", err)
 		}
-		return
+		return false
 	}
 
 	if result.Done {
@@ -463,7 +532,8 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 				if err := s.store.UpdateProgressWithRecheck(dbCtx, task.ID, progressWithReason, recheckURLs); err != nil {
 					s.logger.ErrorContext(ctx, "agent-tasks: progress update error", "error", err)
 				}
-				return
+				// Non-terminal: a one-off retries immediately (back-to-back).
+				return task.Schedule == nil
 			}
 		}
 
@@ -516,6 +586,7 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 			task.Result = &result.Output
 			go s.onStatusChange(core.WithSoulID(context.Background(), task.SoulID), task)
 		}
+		return false
 	} else {
 		// Mid-task iteration. Push only when the handler explicitly
 		// flagged something user-relevant via Notify (milestone, blocker)
@@ -541,6 +612,9 @@ func (s *Scheduler) executeTask(ctx context.Context, task core.AgentTask, handle
 		if err := s.store.UpdateProgress(dbCtx, task.ID, result.Progress); err != nil {
 			s.logger.ErrorContext(ctx, "agent-tasks: progress update error", "error", err)
 		}
+		// Non-terminal mid-task iteration: a one-off advances to the next step
+		// immediately (back-to-back); recurring waits for the next tick.
+		return task.Schedule == nil
 	}
 }
 
