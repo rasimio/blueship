@@ -137,8 +137,13 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		// Recurring handlers (heartbeat, inner-thought) still get the
 		// chat persona stack because their replies go straight back to
 		// the user in chat voice.
-		if task.Strategy == core.StrategyDirect && instructionKey == "background-task" {
-			// minimal: only the background-task instruction below
+		//
+		// A task that carries explicit skills runs as a CLEAN role-agent:
+		// the skill body IS its persona for this work, so we skip the chat
+		// persona/agents stack entirely — each iteration is a clean agent
+		// (role + task), not the chat persona with a role piled on top.
+		if (task.Strategy == core.StrategyDirect && instructionKey == "background-task") || len(skillSlugs) > 0 {
+			// minimal: skill(s) + instruction below, no chat persona stack
 		} else {
 			promptKeys = append(promptKeys, deps.Config.SystemPromptKeys...)
 			defaultPersonaStack = true
