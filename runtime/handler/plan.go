@@ -1,13 +1,32 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 
 	"github.com/rasimio/blueship/internal/core"
 )
+
+// catalogSlugs returns the set of valid skill slugs (from the host catalog) a
+// plan patch may reference. Empty when no catalog hook is wired.
+func catalogSlugs(ctx context.Context, gw core.GatewayConfig) map[string]bool {
+	set := map[string]bool{}
+	if gw.ResolveSkillCatalog == nil {
+		return set
+	}
+	cat, err := gw.ResolveSkillCatalog(ctx)
+	if err != nil {
+		return set
+	}
+	for _, c := range cat {
+		set[c.Slug] = true
+	}
+	return set
+}
 
 // RolePlan is the living, role-assigned plan a multi-step task executes against
 // — the runtime state the planner builds and the executor walks one step at a
@@ -137,6 +156,169 @@ func extractResultLine(reply string) string {
 		return strings.TrimSpace(m[1])
 	}
 	return truncate(stripPlanMarkers(reply), 200)
+}
+
+// --- S2-b: adaptive plan patching --------------------------------------
+//
+// The executor proposes plan edits in a <<<PLAN_PATCH_JSON …>>> block; the
+// handler validates and applies them. The model proposes, the handler owns the
+// state — it rejects bad slugs, refuses to mutate done steps, and won't grow
+// the plan past the remaining iteration budget.
+
+// PlanPatch is the executor's proposed change to the remaining plan.
+type PlanPatch struct {
+	CompletedStepID string    `json:"completed_step_id"`
+	ResultSummary   string    `json:"result_summary"`
+	Operations      []PatchOp `json:"operations"`
+}
+
+// PatchOp is one edit: add a step (after another, or appended), remove a
+// pending step, or update a pending step's goal/role/acceptance.
+type PatchOp struct {
+	Op         string    `json:"op"` // add | remove | update
+	After      string    `json:"after"`
+	ID         string    `json:"id"`
+	Step       *RoleStep `json:"step"`
+	Goal       *string   `json:"goal"`
+	Skills     []string  `json:"skills"`
+	Acceptance *string   `json:"acceptance"`
+}
+
+// parsePlanPatch extracts a PLAN_PATCH_JSON block from a reply. ok=false means
+// the executor proposed no plan change this step.
+func parsePlanPatch(reply string) (*PlanPatch, bool) {
+	m := planPatchRE.FindStringSubmatch(reply)
+	if m == nil {
+		return nil, false
+	}
+	var p PlanPatch
+	if err := json.Unmarshal([]byte(m[1]), &p); err != nil {
+		return nil, false
+	}
+	return &p, true
+}
+
+func (p *RolePlan) step(id string) *RoleStep {
+	for i := range p.Steps {
+		if p.Steps[i].ID == id {
+			return &p.Steps[i]
+		}
+	}
+	return nil
+}
+
+// nextStepID returns an unused step_NNN id (max existing + 1).
+func (p *RolePlan) nextStepID() string {
+	max := 0
+	for i := range p.Steps {
+		var n int
+		if _, err := fmt.Sscanf(p.Steps[i].ID, "step_%d", &n); err == nil && n > max {
+			max = n
+		}
+	}
+	return fmt.Sprintf("step_%03d", max+1)
+}
+
+func (p *RolePlan) insertAfter(afterID string, s RoleStep) {
+	if afterID == "" {
+		p.Steps = append(p.Steps, s)
+		return
+	}
+	for i := range p.Steps {
+		if p.Steps[i].ID == afterID {
+			p.Steps = append(p.Steps[:i+1], append([]RoleStep{s}, p.Steps[i+1:]...)...)
+			return
+		}
+	}
+	p.Steps = append(p.Steps, s) // unknown anchor → append
+}
+
+func (p *RolePlan) removeStep(id string) {
+	for i := range p.Steps {
+		if p.Steps[i].ID == id {
+			p.Steps = append(p.Steps[:i], p.Steps[i+1:]...)
+			return
+		}
+	}
+}
+
+// applyPatch validates and applies a patch's operations to the remaining plan.
+// validSlugs gates skill assignment; remaining caps how many pending steps the
+// plan may hold (so the model can't plan past its iteration budget). Returns the
+// number of operations actually applied. Invalid ops are skipped + logged, not
+// fatal — a bad patch must never wedge the run.
+func (p *RolePlan) applyPatch(patch *PlanPatch, validSlugs map[string]bool, remaining int, logger *slog.Logger) int {
+	warn := func(msg, id string) {
+		if logger != nil {
+			logger.Warn("plan patch: op skipped", "reason", msg, "id", id)
+		}
+	}
+	applied := 0
+	for _, op := range patch.Operations {
+		switch op.Op {
+		case "add":
+			if op.Step == nil {
+				continue
+			}
+			if p.pendingCount() >= remaining {
+				warn("over budget", op.Step.ID)
+				continue
+			}
+			if len(op.Step.Skills) > 0 && !validSlugs[op.Step.Skills[0]] {
+				warn("unknown skill", op.Step.Skills[0])
+				continue
+			}
+			ns := *op.Step
+			if len(ns.Skills) > 1 {
+				ns.Skills = ns.Skills[:1]
+			}
+			ns.Status = "pending"
+			if ns.ID == "" || p.step(ns.ID) != nil {
+				ns.ID = p.nextStepID()
+			}
+			p.insertAfter(op.After, ns)
+			applied++
+		case "remove":
+			s := p.step(op.ID)
+			if s == nil || s.Status != "pending" { // never drop a done step
+				warn("remove non-pending", op.ID)
+				continue
+			}
+			p.removeStep(op.ID)
+			applied++
+		case "update":
+			s := p.step(op.ID)
+			if s == nil || s.Status != "pending" {
+				warn("update non-pending", op.ID)
+				continue
+			}
+			if op.Goal != nil {
+				s.Goal = *op.Goal
+			}
+			if op.Acceptance != nil {
+				s.Acceptance = *op.Acceptance
+			}
+			if len(op.Skills) > 0 {
+				if validSlugs[op.Skills[0]] {
+					s.Skills = op.Skills[:1]
+				} else {
+					warn("unknown skill", op.Skills[0])
+				}
+			}
+			applied++
+		default:
+			warn("unknown op", op.Op)
+		}
+	}
+	if applied > 0 {
+		p.Rev++
+		if next := p.currentStep(); next != nil {
+			p.CurrentStepID = next.ID
+		} else {
+			p.CurrentStepID = ""
+		}
+	}
+	return applied
 }
 
 // stripPlanMarkers removes any PLAN_JSON / PLAN_PATCH_JSON blocks from text so

@@ -533,7 +533,27 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 				}
 			}
 		} else if planStep != nil {
-			progress.Plan.completeStep(planStep.ID, extractResultLine(reply))
+			summary := extractResultLine(reply)
+			// S2-b: the executor may propose plan edits via PLAN_PATCH_JSON.
+			// Mark the step that just ran done, then validate+apply the patch
+			// (handler owns the state — bad slugs / done-step mutations / over-
+			// budget adds are rejected).
+			if patch, ok := parsePlanPatch(reply); ok {
+				if patch.ResultSummary != "" {
+					summary = patch.ResultSummary
+				}
+				progress.Plan.completeStep(planStep.ID, summary)
+				remaining := task.MaxIterations - (task.Iteration + 2) // reserve synthesis
+				if remaining < 0 {
+					remaining = 0
+				}
+				if n := progress.Plan.applyPatch(patch, catalogSlugs(ctx, gw), remaining, deps.Logger); n > 0 && deps.Logger != nil {
+					deps.Logger.InfoContext(ctx, "background: plan patched",
+						"task_id", task.ID, "ops_applied", n, "plan_rev", progress.Plan.Rev)
+				}
+			} else {
+				progress.Plan.completeStep(planStep.ID, summary)
+			}
 		}
 	}
 
