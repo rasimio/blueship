@@ -129,7 +129,13 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	s.logger.Info("agent-tasks: tick")
 
 	// Auto-complete tasks that exhausted iterations but weren't marked done.
-	s.store.CompleteExhausted(ctx)
+	// This is the one TERMINAL failure worth alerting the owner about — a
+	// per-iteration handler error (below) just retries and is logged at WARN,
+	// so transient infra/timeout/quota blips don't page anyone.
+	for _, t := range s.store.CompleteExhausted(ctx) {
+		s.logger.ErrorContext(ctx, "agent-tasks: task failed (exhausted retries)",
+			"task_id", t.ID, "title", t.Title)
+	}
 
 	// Crash recovery: reset tasks stuck in 'running' for > 10 min.
 	if n, err := s.store.ResetStale(ctx, 10*time.Minute); err != nil {
@@ -412,7 +418,12 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		iterationError = err.Error()
 		span.SetAttributes(attribute.String("agent_task.outcome", "failed"))
 		telemetry.RecordError(span, err)
-		s.logger.ErrorContext(ctx, "agent-tasks: handler failed",
+		// WARN, not ERROR: this iteration failed but SetPending retries it, and
+		// most causes are transient + self-healing (DB pool/timeout blips, an
+		// LLM 429 usage-limit that clears on quota reset). Alerting on each one
+		// is noise — the owner is paged only when the task truly dies
+		// (CompleteExhausted, logged at ERROR above). Still logged for forensics.
+		s.logger.WarnContext(ctx, "agent-tasks: iteration failed, will retry",
 			"task_id", task.ID,
 			"handler", task.Handler,
 			"error", err,

@@ -100,8 +100,17 @@ func (s *AgentTaskStore) Complete(ctx context.Context, id uuid.UUID, result stri
 //     error_message. Auto-completing as 'done' was the old behaviour and
 //     was wrong: it claimed success for tasks that, by definition, never
 //     met their acceptance criteria.
-func (s *AgentTaskStore) CompleteExhausted(ctx context.Context) {
-	s.db.ExecContext(ctx, `
+// ExhaustedTask identifies a task CompleteExhausted just force-failed, so the
+// scheduler can alert the owner ONCE per truly-dead task (rather than firing an
+// alert on every retryable per-iteration failure).
+type ExhaustedTask struct {
+	ID    uuid.UUID `db:"id"`
+	Title string    `db:"title"`
+}
+
+func (s *AgentTaskStore) CompleteExhausted(ctx context.Context) []ExhaustedTask {
+	var failed []ExhaustedTask
+	if err := s.db.SelectContext(ctx, &failed, `
 		UPDATE agent_tasks
 		SET status = 'failed',
 		    completed_at = NOW(),
@@ -110,7 +119,11 @@ func (s *AgentTaskStore) CompleteExhausted(ctx context.Context) {
 		WHERE status = 'pending'
 		  AND schedule IS NULL
 		  AND max_iterations > 0
-		  AND iteration >= max_iterations`)
+		  AND iteration >= max_iterations
+		RETURNING id, title`); err != nil {
+		return nil
+	}
+	return failed
 }
 
 // SetPending resets a task back to pending (for retry after transient errors).
