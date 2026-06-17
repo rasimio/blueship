@@ -142,10 +142,12 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		)
 
 		if !cfg.Ephemeral {
-			err = a.store.AppendWithTokens(ctx, cfg.SessionID, bs.Message{
+			pctx, pcancel := persistCtx(ctx)
+			err = a.store.AppendWithTokens(pctx, cfg.SessionID, bs.Message{
 				Role:    "assistant",
 				Content: resp.Content,
 			}, resp.Usage.OutputTokens)
+			pcancel()
 			if err != nil {
 				return "", nil, fmt.Errorf("append assistant message: %w", err)
 			}
@@ -215,7 +217,9 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			}
 
 			if !cfg.Ephemeral {
-				err = a.store.Append(ctx, cfg.SessionID, bs.Message{Role: "user", Content: toolResults})
+				pctx, pcancel := persistCtx(ctx)
+				err = a.store.Append(pctx, cfg.SessionID, bs.Message{Role: "user", Content: toolResults})
+				pcancel()
 				if err != nil {
 					return "", nil, fmt.Errorf("append tool results: %w", err)
 				}

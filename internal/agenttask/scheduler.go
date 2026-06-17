@@ -19,8 +19,12 @@ import (
 // stay a one-liner without importing encoding/json at the call site.
 var jsonUnmarshal = json.Unmarshal
 
-// DefaultTaskTimeout is applied to tasks without an explicit deadline.
-const DefaultTaskTimeout = 5 * time.Minute
+// DefaultTaskTimeout is applied to tasks without an explicit deadline. A heavy
+// research iteration (many browser_fetch + a long synthesis turn) can run well
+// past 5 min; 10 gives it room to finish before the iteration ctx cancels the
+// next LLM/DB call. Critical state writes are additionally detached from this
+// ctx (agent.persistCtx) so they survive even when an iteration does overrun.
+const DefaultTaskTimeout = 10 * time.Minute
 
 // Scheduler polls agent_tasks and dispatches handlers.
 //

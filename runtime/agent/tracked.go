@@ -4,9 +4,21 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	bs "github.com/rasimio/blueship/internal/core"
 )
+
+// persistCtx returns a context for a critical session-state write (a message
+// append) that survives the iteration's deadline/cancellation. A heavy agent
+// iteration (many browser_fetch + a long synthesis turn) can run past its task
+// budget mid-loop; the assistant message and tool results MUST still persist or
+// the shared session is left with a dangling tool_use turn that breaks the next
+// iteration ("append … : begin tx: context deadline exceeded"). Values (soul
+// id, task id) are preserved; a fresh short deadline bounds the write.
+func persistCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), 20*time.Second)
+}
 
 func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (*RunResult, error) {
 	if cfg.MaxTurns <= 0 {
@@ -151,12 +163,16 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			"turn", turn+1,
 		)
 
-		// 5. Store assistant response (skipped for an ephemeral run).
+		// 5. Store assistant response (skipped for an ephemeral run). Detached
+		// ctx so a long turn that just consumed the iteration budget can't lose
+		// this state write.
 		if !cfg.Ephemeral {
-			err = a.store.AppendWithTokens(ctx, cfg.SessionID, bs.Message{
+			pctx, pcancel := persistCtx(ctx)
+			err = a.store.AppendWithTokens(pctx, cfg.SessionID, bs.Message{
 				Role:    "assistant",
 				Content: resp.Content,
 			}, resp.Usage.OutputTokens)
+			pcancel()
 			if err != nil {
 				return nil, fmt.Errorf("append assistant message: %w", err)
 			}
@@ -232,10 +248,12 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			}
 
 			if !cfg.Ephemeral {
-				err = a.store.Append(ctx, cfg.SessionID, bs.Message{
+				pctx, pcancel := persistCtx(ctx)
+				err = a.store.Append(pctx, cfg.SessionID, bs.Message{
 					Role:    "user",
 					Content: toolResults,
 				})
+				pcancel()
 				if err != nil {
 					return nil, fmt.Errorf("append tool results: %w", err)
 				}
