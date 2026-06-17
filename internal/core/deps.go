@@ -236,8 +236,14 @@ func (p *dbPool) get(module string) (*sqlx.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", module, err)
 	}
-	db.SetMaxOpenConns(5)
-	db.SetMaxIdleConns(2)
+	// Pool sized for the agent-task worker-pool (up to maxConcurrentTasks
+	// back-to-back loops) running alongside live chat + heartbeat + saver,
+	// which all share this module pool. At 5 it starved: a task's BeginTx for
+	// the assistant-message append waited past its deadline ("begin tx:
+	// context deadline exceeded") under concurrency. Postgres max_connections
+	// is 100 with ~22 in use, so 20/module is comfortable headroom.
+	db.SetMaxOpenConns(20)
+	db.SetMaxIdleConns(8)
 	db.SetConnMaxLifetime(30 * time.Minute)
 	p.dbs[module] = db
 	return db, nil
