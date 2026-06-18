@@ -203,13 +203,21 @@ func (s *Scheduler) Run(ctx context.Context) error {
 // iteration inside executeTaskOnce, so a crash mid-loop just resumes next tick.
 func (s *Scheduler) runTask(ctx context.Context, task core.AgentTask, handler core.AgentHandler, dispatchTag string) {
 	defer s.taskWg.Done()
-	// Bounded global concurrency: take a slot or leave the task pending for a
-	// later tick (no blocking — keeps the scheduler loop responsive).
-	select {
-	case s.sem <- struct{}{}:
-		defer func() { <-s.sem }()
-	default:
-		return
+	// Bounded global concurrency for the heavy back-to-back ONE-OFF loops: take
+	// a slot or leave the task pending for a later tick (no blocking — keeps the
+	// scheduler loop responsive).
+	//
+	// Recurring ticks (heartbeat / reminders) are EXEMPT: they're lightweight,
+	// time-critical, and run exactly one iteration. Making them compete for a
+	// slot let a burst of heavy research one-offs starve reminders (a missed
+	// heartbeat = a late nudge). They must always run on schedule.
+	if task.Schedule == nil {
+		select {
+		case s.sem <- struct{}{}:
+			defer func() { <-s.sem }()
+		default:
+			return
+		}
 	}
 	// Hold the busy lease across the ENTIRE back-to-back run so the 60s tick
 	// can't double-launch a task that's mid-loop (its row is 'pending' between
