@@ -36,10 +36,14 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 		"Returns the current local datetime, weekday, and configured timezone. Use to ground time-sensitive reasoning ('today is X', 'it is now N o'clock') or to compare against stored timestamps.",
 		json.RawMessage(`{"type":"object","properties":{}}`),
 		func(ctx context.Context, input json.RawMessage) (any, error) {
-			now := time.Now().In(tz)
+			// Resolve the USER's timezone from ctx (server tz is only a
+			// fallback) — otherwise the assistant reads the server clock and
+			// has to convert by hand.
+			loc := d.Config.Gateway.TimezoneFor(ctx, tz)
+			now := time.Now().In(loc)
 			return map[string]string{
 				"datetime": now.Format("2006-01-02 15:04:05"),
-				"timezone": tz.String(),
+				"timezone": loc.String(),
 				"weekday":  now.Weekday().String(),
 			}, nil
 		},

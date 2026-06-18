@@ -149,21 +149,23 @@ type GatewayConfig struct {
 	ResolveSkillCatalog func(ctx context.Context) ([]SkillMeta, error) `yaml:"-" json:"-"`
 
 	// ResolveTimezone returns the IANA timezone name (e.g. "Europe/Belgrade")
-	// for a user, so [current_datetime] and time-window logic follow the USER's
-	// clock, not the server's. Empty string = no per-user tz set (use the
-	// process default). Optional.
-	ResolveTimezone func(ctx context.Context, userID uuid.UUID) string `yaml:"-" json:"-"`
+	// for the soul pinned on ctx (via WithSoulID), so [current_datetime], the
+	// current_time tool, and time-window logic follow the USER's clock, not the
+	// server's. Empty string = no per-user tz set (use the process default).
+	// Optional.
+	ResolveTimezone func(ctx context.Context) string `yaml:"-" json:"-"`
 }
 
-// TimezoneFor resolves the user's *time.Location via the ResolveTimezone hook,
-// falling back to def when no per-user tz is set or the name is invalid. This
-// is the single place per-user [current_datetime] is decided — the server's own
-// timezone is only ever a fallback.
-func (gc GatewayConfig) TimezoneFor(ctx context.Context, userID uuid.UUID, def *time.Location) *time.Location {
-	if gc.ResolveTimezone == nil || userID == uuid.Nil {
+// TimezoneFor resolves the *time.Location for the ctx's soul via the
+// ResolveTimezone hook, falling back to def when no per-user tz is set or the
+// name is invalid. This is the single place per-user time is decided — the
+// server's own timezone is only ever a fallback. ctx MUST carry the soul
+// (WithSoulID); the gateway, the background handler, and tool calls all do.
+func (gc GatewayConfig) TimezoneFor(ctx context.Context, def *time.Location) *time.Location {
+	if gc.ResolveTimezone == nil {
 		return def
 	}
-	name := gc.ResolveTimezone(ctx, userID)
+	name := gc.ResolveTimezone(ctx)
 	if name == "" {
 		return def
 	}

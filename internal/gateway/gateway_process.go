@@ -505,7 +505,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// misconfiguration — abort the turn loudly rather than answer with the
 	// wrong identity.
 	// [current_datetime] in the USER's timezone (server tz is only a fallback).
-	now := time.Now().In(g.deps.Config.Gateway.TimezoneFor(ctx, us.UserID, g.tz))
+	now := time.Now().In(g.deps.Config.Gateway.TimezoneFor(bs.WithSoulID(ctx, us.SoulID), g.tz))
 	soulPrompt, err := g.systemPromptForSoul(ctx, us.SoulID)
 	if err != nil {
 		g.logger.Error("cortex: cannot resolve system prompt, aborting turn",
