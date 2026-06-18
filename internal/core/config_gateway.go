@@ -147,6 +147,30 @@ type GatewayConfig struct {
 	// prompt with full persona bodies (the executor pulls the body via
 	// ResolveSkills only for the step it's running). Optional.
 	ResolveSkillCatalog func(ctx context.Context) ([]SkillMeta, error) `yaml:"-" json:"-"`
+
+	// ResolveTimezone returns the IANA timezone name (e.g. "Europe/Belgrade")
+	// for a user, so [current_datetime] and time-window logic follow the USER's
+	// clock, not the server's. Empty string = no per-user tz set (use the
+	// process default). Optional.
+	ResolveTimezone func(ctx context.Context, userID uuid.UUID) string `yaml:"-" json:"-"`
+}
+
+// TimezoneFor resolves the user's *time.Location via the ResolveTimezone hook,
+// falling back to def when no per-user tz is set or the name is invalid. This
+// is the single place per-user [current_datetime] is decided — the server's own
+// timezone is only ever a fallback.
+func (gc GatewayConfig) TimezoneFor(ctx context.Context, userID uuid.UUID, def *time.Location) *time.Location {
+	if gc.ResolveTimezone == nil || userID == uuid.Nil {
+		return def
+	}
+	name := gc.ResolveTimezone(ctx, userID)
+	if name == "" {
+		return def
+	}
+	if loc, err := time.LoadLocation(name); err == nil {
+		return loc
+	}
+	return def
 }
 
 // SkillMeta is the planner-facing summary of a skill — enough to choose a role,

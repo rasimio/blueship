@@ -251,7 +251,10 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 	systemPrompt := strings.Join(parts, "\n\n")
 
-	now := time.Now().In(b.tz)
+	// [current_datetime] in the TASK OWNER's timezone (falls back to the
+	// process tz). A heartbeat that reasons about reminder windows must see the
+	// user's wall-clock, not the server's.
+	now := time.Now().In(deps.Config.Gateway.TimezoneFor(ctx, task.UserID, b.tz))
 	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s",
 		now.Format("2006-01-02 15:04 MST (Monday)"), systemPrompt)
 
