@@ -622,6 +622,8 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	//    ask itself as the user message, so it answers the selected text.
 	if ephemeral {
 		if nb, nerr := g.store.GetOrCreateNotebook(ctx, us.UserID.String(), g.cortexModelDisplay()); nerr == nil {
+			// Reset it so each ask is standalone — no prior ask bleeds in.
+			_ = g.store.ClearSessionMessages(ctx, nb.ID)
 			runCfg.SessionID = nb.ID
 			runCfg.CompactSummary = ""
 		} else {

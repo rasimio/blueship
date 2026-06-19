@@ -144,6 +144,16 @@ func (s *Store) GetOrCreateNotebook(ctx context.Context, userID, model string) (
 	return &sess, nil
 }
 
+// ClearSessionMessages deletes all messages in a session. Used to reset the
+// private notebook session before each ask so it stays standalone — without
+// this, accumulated user-only asks (assistant replies aren't persisted on the
+// ephemeral path) form a malformed user/user/user history and the cortex
+// answers a stale earlier ask.
+func (s *Store) ClearSessionMessages(ctx context.Context, sessionID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM chat_messages WHERE session_id = $1`, sessionID)
+	return err
+}
+
 // IsActive checks if a session exists and is active.
 func (s *Store) IsActive(ctx context.Context, sessionID string) (bool, error) {
 	var active bool
