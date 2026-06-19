@@ -631,12 +631,10 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		}
 		runCfg.Ephemeral = true
 		runCfg.MessageBudget = 3000
-		// No tools on the fast ask — it answers from knowledge + the soul's
-		// memory (already in InjectedContext), it does NOT web-research. A tool
-		// call (web_search/browser_fetch) is what broke the stream ("поток
-		// прерван") and isn't what a quick selected-text answer is for; deep
-		// grounded web research is the explicit "🔬 глубоко" path. An empty set
-		// is safe: buildTools returns nil → the tools field is omitted (no 400).
+		// No tools — the fast ask answers from the model's knowledge + memory,
+		// it does NOT do web research (that's the explicit "🔬 глубоко" deep
+		// path). Tools made it call browser_fetch and hang/break the stream on
+		// factual questions ("выручка fonbet" → "гляну в источниках" → прерван).
 		runCfg.AllowedTools = []string{}
 	}
 
