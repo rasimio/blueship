@@ -611,19 +611,15 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	// Ephemeral notebook ask: a fast, focused answer on the SELECTED text — not
-	// a deep turn that drags in the whole chat thread.
-	//  - isolated session id + empty summary → the cortex does NOT load the
-	//    chat history (which is what made it muse for 30s about unrelated chat),
-	//    it sees only the selected text + the soul's memory (InjectedContext).
-	//  - thinking OFF → it streams visible TEXT immediately instead of silent
-	//    `thinking` frames the notebook UI doesn't render.
-	//  - no tools → no slow web/tool round-trips.
-	// (Effort is left as-is — it's not the bottleneck.)
+	// a deep turn that drags in the whole chat thread. Isolated session id +
+	// empty summary → the cortex does NOT load the chat history (which is what
+	// made it muse for ~30s about unrelated chat); it sees only the selected
+	// text + the soul's memory (InjectedContext). No tools → no slow web/tool
+	// round-trips. Thinking/effort are left untouched (thinking-off while
+	// effort=xhigh 400s on the OAuth surface — they're coupled).
 	if ephemeral {
 		runCfg.SessionID = uuid.NewString()
 		runCfg.CompactSummary = ""
-		runCfg.ThinkingMode = ""
-		runCfg.ThinkingBudget = -1
 		runCfg.AllowedTools = []string{}
 	}
 
