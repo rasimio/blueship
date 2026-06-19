@@ -120,6 +120,13 @@ type IterationResult struct {
 	// Pause / continue iterations: IsFinal=false.
 	IsFinal bool
 
+	// Partial marks a salvaged best-effort output delivered on EXHAUSTION —
+	// the acceptance gate never passed, but rather than fail-with-nothing the
+	// scheduler hands the last draft over with a caveat. AgentIterationCompleted
+	// receivers (Saver) must treat it as a PARTIAL artefact (browsable, clearly
+	// caveated), NOT a trusted final fact that enters memory recall.
+	Partial bool
+
 	// ToolCallsJSON is the marshalled tool-trace array for this iteration
 	// (`[{name, input, output, error, ...}, ...]`), serialised by the
 	// handler from whatever its inner agent.Loop returned. The scheduler

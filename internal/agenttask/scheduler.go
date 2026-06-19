@@ -135,6 +135,23 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	for _, t := range s.store.CompleteExhausted(ctx) {
 		s.logger.ErrorContext(ctx, "agent-tasks: task failed (exhausted retries)",
 			"task_id", t.ID, "title", t.Title)
+		// Salvage: rather than leave the owner with nothing, deliver the best
+		// draft with a caveat (a short pointer over the channel; the full
+		// partial report lands as a /artefact page via the Saver hook).
+		if strings.TrimSpace(t.Output) == "" {
+			continue
+		}
+		if s.notify != nil {
+			caveat := "⚠️ «" + t.Title + "» не дотянула до планки достоверности за отведённые итерации. " +
+				"Сохранила лучший доступный черновик в /artefact — он частичный и непроверенный, перепроверь источники."
+			s.notify(ctx, t.UserID, caveat)
+		}
+		if s.deps.AgentIterationCompletedHook != nil {
+			task := core.AgentTask{ID: t.ID, Title: t.Title, UserID: t.UserID, SoulID: t.SoulID}
+			res := core.IterationResult{Output: t.Output, IsFinal: true, Partial: true}
+			go s.deps.AgentIterationCompletedHook(
+				core.WithSoulID(context.Background(), t.SoulID), task, res)
+		}
 	}
 
 	// Crash recovery: reset tasks stuck in 'running' for > 10 min.

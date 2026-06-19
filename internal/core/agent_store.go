@@ -104,23 +104,39 @@ func (s *AgentTaskStore) Complete(ctx context.Context, id uuid.UUID, result stri
 // scheduler can alert the owner ONCE per truly-dead task (rather than firing an
 // alert on every retryable per-iteration failure).
 type ExhaustedTask struct {
-	ID    uuid.UUID `db:"id"`
-	Title string    `db:"title"`
+	ID     uuid.UUID `db:"id"`
+	Title  string    `db:"title"`
+	UserID uuid.UUID `db:"user_id"`
+	SoulID uuid.UUID `db:"soul_id"`
+	// Output is the best-effort draft salvaged from the last non-empty
+	// iteration — delivered to the owner with a caveat instead of nothing.
+	Output string `db:"output"`
 }
 
+// CompleteExhausted force-fails tasks that hit max_iterations without passing
+// the acceptance gate. Rather than discard the work, it SALVAGES the last
+// non-empty iteration draft into agent_tasks.result and returns it, so the
+// caller can deliver it to the owner with a caveat (the draft already sits in
+// agent_task_iterations.output, previously only as forensics).
 func (s *AgentTaskStore) CompleteExhausted(ctx context.Context) []ExhaustedTask {
 	var failed []ExhaustedTask
 	if err := s.db.SelectContext(ctx, &failed, `
-		UPDATE agent_tasks
+		UPDATE agent_tasks t
 		SET status = 'failed',
 		    completed_at = NOW(),
 		    error_message = COALESCE(error_message,
-		        'max_iterations reached without satisfying acceptance criteria')
-		WHERE status = 'pending'
-		  AND schedule IS NULL
-		  AND max_iterations > 0
-		  AND iteration >= max_iterations
-		RETURNING id, title`); err != nil {
+		        'max_iterations reached without satisfying acceptance criteria'),
+		    result = COALESCE(t.result, (
+		        SELECT i.output FROM agent_task_iterations i
+		         WHERE i.task_id = t.id AND COALESCE(i.output, '') <> ''
+		         ORDER BY i.iteration DESC
+		         LIMIT 1
+		    ))
+		WHERE t.status = 'pending'
+		  AND t.schedule IS NULL
+		  AND t.max_iterations > 0
+		  AND t.iteration >= t.max_iterations
+		RETURNING id, title, user_id, soul_id, COALESCE(result, '') AS output`); err != nil {
 		return nil
 	}
 	return failed
