@@ -610,18 +610,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		TGMessageID:      tgMessageID,
 	}
 
-	// Ephemeral notebook ask: a fast, focused answer on the SELECTED text — not
-	// a deep turn that drags in the whole chat thread. Isolated session id +
-	// empty summary → the cortex does NOT load the chat history (which is what
-	// made it muse for ~30s about unrelated chat); it sees only the selected
-	// text + the soul's memory (InjectedContext). Tools/thinking/effort are left
-	// untouched — an empty tools array 400s on the Anthropic API, and
-	// thinking-off while effort=xhigh 400s on the OAuth surface (they're
-	// coupled). The simple ask won't call tools anyway.
-	if ephemeral {
-		runCfg.SessionID = uuid.NewString()
-		runCfg.CompactSummary = ""
-	}
 
 	// Voice transport: use streaming LLM with inline sentence-level TTS.
 	// Each sentence is TTS'd and sent as an audio chunk as soon as the LLM produces it.
