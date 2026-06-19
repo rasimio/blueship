@@ -614,13 +614,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// a deep turn that drags in the whole chat thread. Isolated session id +
 	// empty summary → the cortex does NOT load the chat history (which is what
 	// made it muse for ~30s about unrelated chat); it sees only the selected
-	// text + the soul's memory (InjectedContext). No tools → no slow web/tool
-	// round-trips. Thinking/effort are left untouched (thinking-off while
-	// effort=xhigh 400s on the OAuth surface — they're coupled).
+	// text + the soul's memory (InjectedContext). Tools/thinking/effort are left
+	// untouched — an empty tools array 400s on the Anthropic API, and
+	// thinking-off while effort=xhigh 400s on the OAuth surface (they're
+	// coupled). The simple ask won't call tools anyway.
 	if ephemeral {
 		runCfg.SessionID = uuid.NewString()
 		runCfg.CompactSummary = ""
-		runCfg.AllowedTools = []string{}
 	}
 
 	// Voice transport: use streaming LLM with inline sentence-level TTS.
