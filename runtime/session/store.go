@@ -116,6 +116,34 @@ func (s *Store) GetOrCreate(ctx context.Context, userID, model string) (*Session
 	return s.Create(ctx, userID, model)
 }
 
+// GetOrCreateNotebook returns the soul's private notebook session
+// (source='notebook'), creating it if absent. It's deliberately separate from
+// the visible chat session — GetOrCreate filters source='chat', so notebook
+// asks persisted here never surface in the chat thread (cabinet or Telegram).
+func (s *Store) GetOrCreateNotebook(ctx context.Context, userID, model string) (*Session, error) {
+	var sess Session
+	err := s.db.GetContext(ctx, &sess,
+		`SELECT * FROM chat_sessions
+		 WHERE user_id = $1 AND soul_id = $2 AND active = true AND source = 'notebook'
+		 ORDER BY updated_at DESC
+		 LIMIT 1`,
+		userID, bs.SoulIDFromContext(ctx),
+	)
+	if err == nil {
+		return &sess, nil
+	}
+	err = s.db.QueryRowxContext(ctx,
+		`INSERT INTO chat_sessions (soul_id, user_id, model, source)
+		 VALUES ($3::uuid, $1, $2, 'notebook')
+		 RETURNING *`,
+		userID, model, bs.SoulIDFromContext(ctx),
+	).StructScan(&sess)
+	if err != nil {
+		return nil, fmt.Errorf("create notebook session: %w", err)
+	}
+	return &sess, nil
+}
+
 // IsActive checks if a session exists and is active.
 func (s *Store) IsActive(ctx context.Context, sessionID string) (bool, error) {
 	var active bool

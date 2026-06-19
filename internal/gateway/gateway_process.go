@@ -611,14 +611,22 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	// Ephemeral notebook ask: a fast, private answer on the SELECTED text.
-	//  - loop Ephemeral → the loop persists neither the user message nor the
-	//    assistant reply (the ask never lands in the chat thread).
+	//  - a dedicated source='notebook' session → the ask is isolated from the
+	//    chat thread (cabinet/Telegram read source='chat'), so it never pollutes
+	//    the conversation, yet the cortex still answers the ask (it's the user
+	//    message) with the soul's memory (InjectedContext).
+	//  - loop Ephemeral → the assistant reply is not persisted.
 	//  - MessageBudget small → the cortex sees only a little recent history
-	//    instead of the whole 30K chat (which made it muse for ~30s about
-	//    unrelated chat). Combined with SkipUserAppend=false (set below) the
-	//    loop includes the ask itself as the user message, so it answers the
-	//    selected text — not stale history.
+	//    instead of the whole 30K chat (which made it muse for ~30s).
+	//  - SkipUserAppend=false (set in gateway_reflex) → the loop includes the
+	//    ask itself as the user message, so it answers the selected text.
 	if ephemeral {
+		if nb, nerr := g.store.GetOrCreateNotebook(ctx, us.UserID.String(), g.cortexModelDisplay()); nerr == nil {
+			runCfg.SessionID = nb.ID
+			runCfg.CompactSummary = ""
+		} else {
+			g.logger.Warn("notebook ask: notebook session unavailable, using chat session", "error", nerr)
+		}
 		runCfg.Ephemeral = true
 		runCfg.MessageBudget = 3000
 	}
