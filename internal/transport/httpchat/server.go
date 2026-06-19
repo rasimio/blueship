@@ -114,6 +114,10 @@ type chatRequest struct {
 	// quote chip. Empty for non-reply turns; Telegram replies use
 	// the gateway's tg_message_id index instead.
 	ReplyToMessageID string `json:"reply_to_message_id,omitempty"`
+	// Source tags the origin. "notebook" → an ephemeral, private ask:
+	// the turn uses memory for context but persists nothing and never
+	// appears in the chat thread. Empty = a normal chat turn.
+	Source string `json:"source,omitempty"`
 }
 
 // chatAttachment is one file attached to a cabinet message. The caller
@@ -291,6 +295,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			Text:             text,
 			Images:           images,
 			ReplyToMessageID: req.ReplyToMessageID,
+			Ephemeral:        req.Source == "notebook",
 		}}, sink); err != nil {
 		s.logger.Warn("httpchat: process error", "error", err)
 		sink.event("error", err.Error())

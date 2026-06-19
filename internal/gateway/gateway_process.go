@@ -102,6 +102,7 @@ func (g *Gateway) ProcessInboundForUser(ctx context.Context, userID, soulID uuid
 			text:             m.Text,
 			images:           m.Images,
 			replyToMessageID: m.ReplyToMessageID,
+			ephemeral:        m.Ephemeral,
 		})
 	}
 	if len(pending) == 0 {
@@ -206,11 +207,26 @@ func (g *Gateway) getOrInitPlatformUser(ctx context.Context, userID, soulID uuid
 	return us, nil
 }
 
+// appendUnlessEphemeral persists a chat message unless the turn is ephemeral (a
+// private notebook ask) — then it's a no-op, leaving no chat_messages trace.
+func (g *Gateway) appendUnlessEphemeral(ctx context.Context, sessionID string, msg bs.Message) error {
+	if bs.EphemeralFromContext(ctx) {
+		return nil
+	}
+	return g.store.Append(ctx, sessionID, msg)
+}
+
 func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pendingMsg, sink bs.ResponseSink) {
 	us.Mu.Lock()
 	defer us.Mu.Unlock()
 	us.LoopBusy = true
 	defer func() { us.LoopBusy = false }()
+
+	// Ephemeral turn (private notebook ask): context from memory, but persist
+	// nothing. Tagged on ctx so the downstream append sites no-op via
+	// appendUnlessEphemeral; the encoder + turn-hook are gated by the local.
+	ephemeral := len(msgs) > 0 && msgs[0].ephemeral
+	ctx = bs.WithEphemeral(ctx, ephemeral)
 
 	// Stash the originating chat id on the context so tool handlers can
 	// surface it (e.g. coderun stores it on the task row to notify the
@@ -294,7 +310,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// Memory encoding: Recall → Compare → React (non-blocking). Detaches
 	// from the request ctx but re-carries the soul so its writes stay
 	// tenant-attributed.
-	if msgText != "" && g.deps.MessageEncoder != nil {
+	if msgText != "" && g.deps.MessageEncoder != nil && !ephemeral {
 		go g.deps.MessageEncoder(bs.WithSoulID(context.Background(), us.SoulID), us.UserID.String(), msgText)
 	}
 
@@ -786,8 +802,10 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 					assistantMsgID = parsed
 				}
 			}
-			g.scanAndSaveLinks(ctx, us, sessionUUID, assistantMsgID, "assistant", reply)
-			g.emitTurnCompleted(us, sess)
+			if !ephemeral {
+				g.scanAndSaveLinks(ctx, us, sessionUUID, assistantMsgID, "assistant", reply)
+				g.emitTurnCompleted(us, sess)
+			}
 		}
 		return
 	}
@@ -842,7 +860,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			if _, isStream := sink.(bs.TextStreamSink); !isStream {
 				sink.SendText(ctx, reply)
 			}
-			g.emitTurnCompleted(us, sess)
+			if !ephemeral {
+				g.emitTurnCompleted(us, sess)
+			}
 		}
 		// LEGACY: sendDebugDump — per-turn debug.md attachment for the
 		// owner. Parked with the rest of the legacy commands; restore in
@@ -986,7 +1006,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		g.executePostActions(ctx, us, postActions, reply)
 	}
 
-	g.emitTurnCompleted(us, sess)
+	if !ephemeral {
+		g.emitTurnCompleted(us, sess)
+	}
 
 	// LEGACY: sendDebugDump — see the dispatch-side comment in handleUpdate.
 	// if us.DebugMode || g.deps.Config.Gateway.Debug {

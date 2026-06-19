@@ -448,7 +448,7 @@ func (g *Gateway) runInteraction(
 	// cortex directly with the full content; persist the user turn
 	// once, matching the interaction-tier append-once pattern below.
 	if hasHeavyContent(content) {
-		if err = g.store.Append(ctx, cortexCfg.SessionID, bs.Message{
+		if err = g.appendUnlessEphemeral(ctx, cortexCfg.SessionID, bs.Message{
 			Role:             "user",
 			Content:          content,
 			ReplyToMessageID: cortexCfg.ReplyToMessageID,
@@ -469,7 +469,7 @@ func (g *Gateway) runInteraction(
 	// reflex pre-pass is net overhead: streaming Cortex is its own latency
 	// handshake, and a cheap difficulty gate mis-routes ~half the hard turns.
 	if onReflexDone == nil && g.deps.Config.Gateway.SkipReflexOnText {
-		if err = g.store.Append(ctx, cortexCfg.SessionID, bs.Message{
+		if err = g.appendUnlessEphemeral(ctx, cortexCfg.SessionID, bs.Message{
 			Role:             "user",
 			Content:          content,
 			ReplyToMessageID: cortexCfg.ReplyToMessageID,
@@ -532,7 +532,7 @@ func (g *Gateway) runInteraction(
 	}
 
 	// Persist the user message once; both tiers read it, neither re-appends.
-	if err = g.store.Append(ctx, cortexCfg.SessionID, bs.Message{Role: "user", Content: content}); err != nil {
+	if err = g.appendUnlessEphemeral(ctx, cortexCfg.SessionID, bs.Message{Role: "user", Content: content}); err != nil {
 		return "", nil, false, fmt.Errorf("interaction: append user message: %w", err)
 	}
 
@@ -563,7 +563,7 @@ func (g *Gateway) runInteraction(
 	if esc == nil {
 		// Simple turn — Reflex answered it. Persist its reply as the turn.
 		if strings.TrimSpace(reflexReply) != "" {
-			if aerr := g.store.Append(ctx, cortexCfg.SessionID, bs.Message{
+			if aerr := g.appendUnlessEphemeral(ctx, cortexCfg.SessionID, bs.Message{
 				Role:    "assistant",
 				Content: []bs.ContentBlock{{Type: "text", Text: reflexReply}},
 			}); aerr != nil {
@@ -720,7 +720,7 @@ func (g *Gateway) PersistInterrupted(_ context.Context, chatID, partial string) 
 	} else {
 		text += g.deps.Config.UI.InterruptSuffix
 	}
-	if err := g.store.Append(ctx, sess.ID, bs.Message{
+	if err := g.appendUnlessEphemeral(ctx, sess.ID, bs.Message{
 		Role:    "assistant",
 		Content: []bs.ContentBlock{{Type: "text", Text: text}},
 	}); err != nil {

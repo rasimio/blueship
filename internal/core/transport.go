@@ -19,6 +19,11 @@ type InboundMessage struct {
 	// session store's tg_message_id index — that path doesn't use
 	// this field.
 	ReplyToMessageID string
+	// Ephemeral marks a private, read-only ask (e.g. the notebook "ask
+	// Arlene" on selected text): use the soul's memory for context but
+	// persist nothing — no chat_messages, no memory encoding, no
+	// turn-completed hook, never shown in the chat thread.
+	Ephemeral bool
 }
 
 // ResponseSink delivers pipeline output back to the user via the originating transport.
