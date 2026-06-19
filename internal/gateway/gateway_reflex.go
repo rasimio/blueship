@@ -456,7 +456,7 @@ func (g *Gateway) runInteraction(
 		}); err != nil {
 			return "", nil, false, fmt.Errorf("interaction: append user message (heavy bypass): %w", err)
 		}
-		cortexCfg.SkipUserAppend = true
+		cortexCfg.SkipUserAppend = !bs.EphemeralFromContext(ctx)
 		g.logger.Info("interaction: heavy content, bypassing reflex tier", "session_id", cortexCfg.SessionID)
 		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
 		return reply, traces, true, err
@@ -477,7 +477,7 @@ func (g *Gateway) runInteraction(
 		}); err != nil {
 			return "", nil, false, fmt.Errorf("interaction: append user message (skip-reflex): %w", err)
 		}
-		cortexCfg.SkipUserAppend = true
+		cortexCfg.SkipUserAppend = !bs.EphemeralFromContext(ctx)
 		g.logger.Info("interaction: skip reflex on text, cortex direct", "session_id", cortexCfg.SessionID)
 		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
 		return reply, traces, false, err
@@ -577,7 +577,7 @@ func (g *Gateway) runInteraction(
 	// Escalation — run the Cortex tier with the full registry. The user
 	// message is already persisted; Cortex persists its own answer normally.
 	g.logger.Info("interaction: escalating to cortex", "reason", truncateStr(esc.Reason, 120))
-	cortexCfg.SkipUserAppend = true
+	cortexCfg.SkipUserAppend = !bs.EphemeralFromContext(ctx)
 	if esc.Guidance != "" {
 		note := "[escalation note] " + esc.Guidance
 		if cortexCfg.ReflexGuidance != "" {

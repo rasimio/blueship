@@ -610,6 +610,19 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		TGMessageID:      tgMessageID,
 	}
 
+	// Ephemeral notebook ask: a fast, private answer on the SELECTED text.
+	//  - loop Ephemeral → the loop persists neither the user message nor the
+	//    assistant reply (the ask never lands in the chat thread).
+	//  - MessageBudget small → the cortex sees only a little recent history
+	//    instead of the whole 30K chat (which made it muse for ~30s about
+	//    unrelated chat). Combined with SkipUserAppend=false (set below) the
+	//    loop includes the ask itself as the user message, so it answers the
+	//    selected text — not stale history.
+	if ephemeral {
+		runCfg.Ephemeral = true
+		runCfg.MessageBudget = 3000
+	}
+
 
 	// Voice transport: use streaming LLM with inline sentence-level TTS.
 	// Each sentence is TTS'd and sent as an audio chunk as soon as the LLM produces it.
