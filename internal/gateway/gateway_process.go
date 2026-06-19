@@ -610,6 +610,23 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		TGMessageID:      tgMessageID,
 	}
 
+	// Ephemeral notebook ask: a fast, focused answer on the SELECTED text — not
+	// a deep turn that drags in the whole chat thread.
+	//  - isolated session id + empty summary → the cortex does NOT load the
+	//    chat history (which is what made it muse for 30s about unrelated chat),
+	//    it sees only the selected text + the soul's memory (InjectedContext).
+	//  - thinking OFF → it streams visible TEXT immediately instead of silent
+	//    `thinking` frames the notebook UI doesn't render.
+	//  - no tools → no slow web/tool round-trips.
+	// (Effort is left as-is — it's not the bottleneck.)
+	if ephemeral {
+		runCfg.SessionID = uuid.NewString()
+		runCfg.CompactSummary = ""
+		runCfg.ThinkingMode = ""
+		runCfg.ThinkingBudget = -1
+		runCfg.AllowedTools = []string{}
+	}
+
 	// Voice transport: use streaming LLM with inline sentence-level TTS.
 	// Each sentence is TTS'd and sent as an audio chunk as soon as the LLM produces it.
 	streamSink, isStreaming := sink.(bs.StreamingVoiceSink)
