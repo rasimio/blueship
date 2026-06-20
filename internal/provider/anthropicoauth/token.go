@@ -81,22 +81,28 @@ func (s *TokenStore) Save() error {
 	s.mu.RLock()
 	data := s.data
 	s.mu.RUnlock()
+	return writeTokenFile(s.filePath, data)
+}
 
+// writeTokenFile atomically persists token data. It's lock-free (data passed by
+// value) so it can be called both from Save (under RLock) and from
+// refreshLocked (which already holds the write lock) without deadlocking.
+func writeTokenFile(filePath string, data TokenData) error {
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal tokens: %w", err)
 	}
 
-	dir := filepath.Dir(s.filePath)
+	dir := filepath.Dir(filePath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create token dir: %w", err)
 	}
 
-	tmp := s.filePath + ".tmp"
+	tmp := filePath + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		return fmt.Errorf("write tmp: %w", err)
 	}
-	if err := os.Rename(tmp, s.filePath); err != nil {
+	if err := os.Rename(tmp, filePath); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("rename tmp: %w", err)
 	}
@@ -237,11 +243,15 @@ func (s *TokenStore) refreshLocked() error {
 		ExpiresAt: expiresAt,
 	}
 
-	go func() {
-		if err := s.Save(); err != nil {
-			s.logger.Error("anthropic-oauth: save refreshed tokens", "error", err)
-		}
-	}()
+	// Persist synchronously BEFORE returning. The refresh token rotates
+	// server-side on every refresh, so an async save that a restart (a deploy)
+	// catches mid-flight leaves the now-invalid OLD token on disk — the next
+	// start then fails with invalid_grant (exactly what bit prod 2026-06-20
+	// during a day of frequent redeploys). We already hold the write lock, so
+	// call the lock-free writer directly.
+	if err := writeTokenFile(s.filePath, s.data); err != nil {
+		s.logger.Error("anthropic-oauth: save refreshed tokens", "error", err)
+	}
 
 	s.logger.Info("anthropic-oauth: token refreshed", "expires_in", tokenResp.ExpiresIn)
 	return nil
