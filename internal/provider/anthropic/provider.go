@@ -187,7 +187,7 @@ type apiResponse struct {
 // Temperature is forced to 0 (→ omitted) whenever thinking is active, since the
 // API requires the default temperature with extended thinking.
 func applyThinkingAndEffort(apiReq *apiRequest, req bs.CompletionRequest) {
-	if req.Effort != "" {
+	if req.Effort != "" && modelSupportsEffort(req.Model) {
 		apiReq.OutputConfig = &outputConfig{Effort: req.Effort}
 	}
 	switch req.ThinkingMode {
@@ -203,6 +203,16 @@ func applyThinkingAndEffort(apiReq *apiRequest, req bs.CompletionRequest) {
 			apiReq.Temperature = 0
 		}
 	}
+}
+
+// modelSupportsEffort reports whether the model accepts output_config.effort.
+// The Haiku family rejects it ("This model does not support the effort
+// parameter") while Opus/Sonnet 4.x accept it. Gating here lets any role be
+// configured with an effort value regardless of model — for a model that can't
+// use it the param is silently dropped instead of 400ing the whole request, so
+// e.g. recurring can run on Haiku or Opus interchangeably.
+func modelSupportsEffort(model string) bool {
+	return !strings.Contains(strings.ToLower(model), "haiku")
 }
 
 // thinkingActive reports whether the request asked for any thinking — used to
