@@ -498,6 +498,23 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 					rawAttachments = append(rawAttachments, rawAttachment{
 						name: msg.Document.FileName, mime: "application/pdf", kind: "pdf", data: data,
 					})
+				case "docx":
+					// Word .docx has no native Anthropic content block, so we
+					// unzip word/document.xml and inline the prose as text —
+					// the same shape a PDF or a source file lands in.
+					if docText, derr := attachment.ExtractDocxText(data); derr != nil {
+						g.logger.Warn("failed to extract docx text", "error", derr, "file", msg.Document.FileName, "size", len(data))
+						text = appendDocInline(text, fmt.Sprintf("[docx: %s — could not read this Word file]", msg.Document.FileName))
+					} else {
+						text = appendDocInline(text, fmt.Sprintf("[docx: %s]\n%s", msg.Document.FileName, docText))
+					}
+					docMime := msg.Document.MimeType
+					if docMime == "" {
+						docMime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+					}
+					rawAttachments = append(rawAttachments, rawAttachment{
+						name: msg.Document.FileName, mime: docMime, kind: "docx", data: data,
+					})
 				case "text":
 					text = appendDocInline(text, fmt.Sprintf("[file: %s]\n```\n%s\n```", msg.Document.FileName, strings.ReplaceAll(string(data), "\r\n", "\n")))
 					mime := msg.Document.MimeType
@@ -508,7 +525,13 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 						name: msg.Document.FileName, mime: mime, kind: "text", data: data,
 					})
 				default:
-					g.logger.Info("ignoring unsupported document", "file", msg.Document.FileName, "mime", msg.Document.MimeType)
+					// Unsupported format (xlsx / pptx / legacy .doc / archive /
+					// arbitrary binary). Inline a short notice rather than
+					// dropping it silently — a document-only message would
+					// otherwise leave `text` empty, trip the `text=="" && no
+					// images` guard below, and the bot would never reply at all.
+					g.logger.Info("unsupported document — inlining notice", "file", msg.Document.FileName, "mime", msg.Document.MimeType)
+					text = appendDocInline(text, fmt.Sprintf("[file: %s — I can't read this format yet; send a PDF, a .docx, or a text file]", msg.Document.FileName))
 				}
 			}
 		}

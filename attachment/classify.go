@@ -34,6 +34,12 @@ const (
 	// doesn't translate to 25 MB of prompt — only of bytes-on-the-wire.
 	MaxPDFBytes int64 = 25 << 20
 
+	// MaxDocxBytes — a Word .docx is a ZIP, so embedded images can push a
+	// real report past the text cap; 25 MB matches the PDF allowance. The
+	// extracted prose is still bounded by DocxTextHeadCap, so a fat .docx
+	// costs bytes-on-the-wire, not prompt tokens.
+	MaxDocxBytes int64 = 25 << 20
+
 	// MaxAnyBytes is the upper bound across kinds — useful as the
 	// download / multipart-read cap on transports that don't know the
 	// kind until they've sniffed the bytes. Per-kind enforcement
@@ -67,6 +73,17 @@ func Kind(mime, name string, data []byte) string {
 	if isPDFSignature(data) || mimeLower == "application/pdf" || ext == ".pdf" {
 		return "pdf"
 	}
+	// DOCX (Word OOXML): a ZIP whose payload is word/document.xml. We
+	// classify on the declared type (ext / MIME) gated by the ZIP magic, so
+	// a renamed PDF can't slip in, but a correctly-named .docx whose MIME
+	// arrives as octet-stream (Telegram does this) still lands here.
+	// ExtractDocxText re-validates by actually opening the archive. Other
+	// OOXML (xlsx / pptx) and legacy binary .doc fall through to ""
+	// (unsupported) — the transport inlines a notice rather than going
+	// silent on the user.
+	if isZipSignature(data) && (ext == ".docx" || mimeLower == mimeDocx) {
+		return "docx"
+	}
 	// Text: any UTF-8 buffer that isn't an image / PDF. Catches
 	// every source file we'd want to inline (incl. SVG, which is
 	// XML text — we'll send the markup as a fenced code block and
@@ -87,6 +104,8 @@ func MaxBytesForKind(kind string) int64 {
 		return MaxImageBytes
 	case "pdf":
 		return MaxPDFBytes
+	case "docx":
+		return MaxDocxBytes
 	case "text":
 		return MaxTextBytes
 	}
@@ -151,6 +170,18 @@ func isImageSignature(data []byte) bool {
 // archives and misclassify them.
 func isPDFSignature(data []byte) bool {
 	return len(data) >= 4 && data[0] == '%' && data[1] == 'P' && data[2] == 'D' && data[3] == 'F'
+}
+
+// isZipSignature checks for the ZIP local-file-header magic "PK\x03\x04" (and
+// the empty-archive "PK\x05\x06" / spanned "PK\x07\x08" variants for
+// completeness). Every OOXML file — .docx / .xlsx / .pptx — is a ZIP, so this
+// is the guard that stops a renamed non-archive from being treated as one;
+// the ext / MIME check decides which OOXML kind it actually is.
+func isZipSignature(data []byte) bool {
+	return len(data) >= 4 && data[0] == 'P' && data[1] == 'K' &&
+		((data[2] == 0x03 && data[3] == 0x04) ||
+			(data[2] == 0x05 && data[3] == 0x06) ||
+			(data[2] == 0x07 && data[3] == 0x08))
 }
 
 // looksLikeUTF8Text returns true when the buffer's first 8 KiB are

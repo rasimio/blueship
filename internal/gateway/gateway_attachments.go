@@ -105,6 +105,19 @@ func (g *Gateway) attachmentBlocksByIDs(ctx context.Context, us *UserState, ids 
 				Type: "text",
 				Text: fmt.Sprintf("[%s: %s — pdf]\n%s", labelPrefix, rec.Name, text),
 			})
+		case "docx":
+			docText, derr := attachment.ExtractDocxText(data)
+			if derr != nil {
+				out = append(out, bs.ContentBlock{
+					Type: "text",
+					Text: fmt.Sprintf("[%s: %s — docx unreadable]", labelPrefix, rec.Name),
+				})
+				continue
+			}
+			out = append(out, bs.ContentBlock{
+				Type: "text",
+				Text: fmt.Sprintf("[%s: %s — docx]\n%s", labelPrefix, rec.Name, docText),
+			})
 		case "text":
 			out = append(out, bs.ContentBlock{
 				Type: "text",

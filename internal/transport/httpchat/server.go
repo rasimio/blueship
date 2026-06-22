@@ -242,6 +242,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			} else {
 				text = appendInlineFile(text, fmt.Sprintf("[pdf: %s — %d pages]%s", att.Name, pages, pdfText))
 			}
+		case "docx":
+			docText, derr := attachment.ExtractDocxText(data)
+			if derr != nil {
+				s.logger.Warn("httpchat: docx extract failed", "name", att.Name, "size", len(data), "err", derr)
+				text = appendInlineFile(text, fmt.Sprintf("[docx: %s — extraction failed: %v]", att.Name, derr))
+			} else {
+				text = appendInlineFile(text, fmt.Sprintf("[docx: %s]\n%s", att.Name, docText))
+			}
 		case "text":
 			// Mirror Telegram's text-doc inlining: fenced code block keeps the
 			// model honest about where the file starts and ends, the filename
