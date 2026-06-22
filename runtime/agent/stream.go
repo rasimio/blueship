@@ -153,12 +153,8 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			}
 		}
 
-		if turnText := bs.ExtractText(resp.Content); turnText != "" {
-			if accumulated.Len() > 0 {
-				accumulated.WriteString("\n\n")
-			}
-			accumulated.WriteString(turnText)
-		}
+		// Collect this turn's text, de-duped (see appendTurnText).
+		appendTurnText(&accumulated, bs.ExtractText(resp.Content))
 
 		switch resp.StopReason {
 		case "end_turn", "max_tokens":

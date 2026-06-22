@@ -178,13 +178,10 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			}
 		}
 
-		// Collect text from this turn
-		if turnText := bs.ExtractText(resp.Content); turnText != "" {
-			if accumulated.Len() > 0 {
-				accumulated.WriteString("\n\n")
-			}
-			accumulated.WriteString(turnText)
-		}
+		// Collect this turn's text, de-duped (see appendTurnText — guards the
+		// heartbeat "reminder prose + memory_update, then same reminder again"
+		// double-message).
+		appendTurnText(&accumulated, bs.ExtractText(resp.Content))
 
 		// 6. Check stop reason
 		switch resp.StopReason {
