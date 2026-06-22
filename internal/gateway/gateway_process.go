@@ -631,11 +631,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		}
 		runCfg.Ephemeral = true
 		runCfg.MessageBudget = 3000
-		// No tools — the fast ask answers from the model's knowledge + memory,
-		// it does NOT do web research (that's the explicit "🔬 глубоко" deep
-		// path). Tools made it call browser_fetch and hang/break the stream on
-		// factual questions ("выручка fonbet" → "гляну в источниках" → прерван).
-		runCfg.AllowedTools = []string{}
+		// Full tools — the notebook ask is a real cortex turn (⌘J): it can
+		// web_search / browser_fetch for live facts, read memory, etc. runCfg
+		// keeps the soul's full AllowedTools (set above). Ephemeral tool loops
+		// work because RunStream carries the assistant + tool_result turns in
+		// memory for ephemeral runs (still nothing persisted to the DB).
 	}
 
 

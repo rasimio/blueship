@@ -72,6 +72,12 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 
 	var accumulated strings.Builder
 	var traces []ToolTrace
+	// An ephemeral run (a private notebook ask) persists nothing, so it can't
+	// reload its own assistant + tool_result turns from the DB between turns —
+	// they'd vanish and a tool call could never feed its result back. Carry the
+	// whole conversation in memory instead, seeded from the DB on turn 0. This
+	// is what lets the notebook ask use real tools (web_search, browser_fetch).
+	var convo []bs.Message
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		effectiveSystem := cfg.SystemPrompt
@@ -79,9 +85,15 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			effectiveSystem += SummaryHeader + compactSummary
 		}
 
-		messages, err := a.store.MessagesForAPI(ctx, cfg.SessionID, tokenBudget)
-		if err != nil {
-			return "", nil, fmt.Errorf("load messages: %w", err)
+		var messages []bs.Message
+		if cfg.Ephemeral && convo != nil {
+			messages = convo
+		} else {
+			m, lerr := a.store.MessagesForAPI(ctx, cfg.SessionID, tokenBudget)
+			if lerr != nil {
+				return "", nil, fmt.Errorf("load messages: %w", lerr)
+			}
+			messages = m
 		}
 
 		if turn == 0 && cfg.ReflexGuidance != "" && cfg.InjectedContext != "" {
@@ -96,6 +108,12 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 				prefix := bs.ContentBlock{Type: "text", Text: "[context]\n" + cfg.InjectedContext + "[/context]\n\n"}
 				last.Content = append([]bs.ContentBlock{prefix}, blocks...)
 			}
+		}
+
+		// Seed the in-memory conversation once (with the turn-0 context prefix
+		// already applied) so subsequent ephemeral turns build on it.
+		if cfg.Ephemeral && convo == nil {
+			convo = messages
 		}
 
 		req := bs.CompletionRequest{
@@ -151,6 +169,8 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			if err != nil {
 				return "", nil, fmt.Errorf("append assistant message: %w", err)
 			}
+		} else {
+			convo = append(convo, bs.Message{Role: "assistant", Content: resp.Content})
 		}
 
 		// Collect this turn's text, de-duped (see appendTurnText).
@@ -219,6 +239,8 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 				if err != nil {
 					return "", nil, fmt.Errorf("append tool results: %w", err)
 				}
+			} else {
+				convo = append(convo, bs.Message{Role: "user", Content: toolResults})
 			}
 			continue
 
