@@ -42,14 +42,13 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 // --- Request types ---
 
 type responsesRequest struct {
-	Model           string           `json:"model"`
-	Instructions    string           `json:"instructions"`
-	Input           []any            `json:"input"`
-	Stream          bool             `json:"stream"`
-	Store           bool             `json:"store"`
-	MaxOutputTokens int              `json:"max_output_tokens,omitempty"`
-	Reasoning       *reasoningConfig `json:"reasoning,omitempty"`
-	Tools           []responseTool   `json:"tools,omitempty"`
+	Model        string           `json:"model"`
+	Instructions string           `json:"instructions"`
+	Input        []any            `json:"input"`
+	Stream       bool             `json:"stream"`
+	Store        bool             `json:"store"`
+	Reasoning    *reasoningConfig `json:"reasoning,omitempty"`
+	Tools        []responseTool   `json:"tools,omitempty"`
 }
 
 // reasoningConfig maps to the Codex Responses API reasoning object. Only
@@ -167,14 +166,13 @@ func buildRequest(req bs.CompletionRequest) responsesRequest {
 	}
 
 	return responsesRequest{
-		Model:           req.Model,
-		Instructions:    instructions,
-		Input:           input,
-		Stream:          true,
-		Store:           false,
-		MaxOutputTokens: req.MaxTokens,
-		Reasoning:       codexReasoning(req.Effort),
-		Tools:           buildTools(req.Tools),
+		Model:        req.Model,
+		Instructions: instructions,
+		Input:        input,
+		Stream:       true,
+		Store:        false,
+		Reasoning:    codexReasoning(req.Effort),
+		Tools:        buildTools(req.Tools),
 	}
 }
 
