@@ -92,7 +92,8 @@ func evaluateGrounding(ctx context.Context, deps core.AgentDeps, task core.Agent
 		return GroundingVerdict{Met: true, Reason: "no LLM configured for grounding eval"}
 	}
 
-	model := pickGroundingModel(deps)
+	modelRef := pickGroundingModel(deps)
+	model := modelRef.ForRouter()
 	if model == "" {
 		return GroundingVerdict{Met: true, Reason: "no model configured for grounding eval"}
 	}
@@ -100,11 +101,13 @@ func evaluateGrounding(ctx context.Context, deps core.AgentDeps, task core.Agent
 	user := buildGroundingUserMessage(report, docs)
 
 	resp, err := deps.LLM.Complete(ctx, core.CompletionRequest{
-		Model:       model,
-		System:      groundingSystemPrompt,
-		Messages:    []core.Message{{Role: "user", Content: core.NormalizeContent(user)}},
-		MaxTokens:   groundingMaxOutputToks,
-		Temperature: 0.2,
+		Model:        model,
+		System:       groundingSystemPrompt,
+		Messages:     []core.Message{{Role: "user", Content: core.NormalizeContent(user)}},
+		MaxTokens:    groundingMaxOutputToks,
+		Temperature:  0.2,
+		Effort:       modelRef.Effort,
+		ThinkingMode: modelRef.ThinkingMode,
 	})
 	if err != nil {
 		deps.Logger.Warn("grounding evaluator: llm call failed",
@@ -139,22 +142,22 @@ func evaluateGrounding(ctx context.Context, deps core.AgentDeps, task core.Agent
 // Production should always have a row at role='grounding_evaluator';
 // fallbacks exist so the gate degrades gracefully on a misconfigured
 // dev install rather than refusing every task.
-func pickGroundingModel(deps core.AgentDeps) string {
+func pickGroundingModel(deps core.AgentDeps) core.ModelRef {
 	if deps.ModelStore != nil {
-		if m := deps.ModelStore.ForRouter("grounding_evaluator"); m != "" {
-			return m
+		if ref := deps.ModelStore.Get("grounding_evaluator"); ref.Name != "" {
+			return ref
 		}
-		if m := deps.ModelStore.ForRouter("compact"); m != "" {
-			return m
+		if ref := deps.ModelStore.Get("compact"); ref.Name != "" {
+			return ref
 		}
-		if m := deps.ModelStore.ForRouter("cortex"); m != "" {
-			return m
+		if ref := deps.ModelStore.Get("cortex"); ref.Name != "" {
+			return ref
 		}
 	}
 	if deps.Config != nil {
-		return deps.Config.Models.Primary.ForRouter()
+		return deps.Config.Models.Primary
 	}
-	return ""
+	return core.ModelRef{}
 }
 
 // buildGroundingUserMessage assembles the user prompt: report header,

@@ -656,6 +656,12 @@ func (g *Gateway) ClassifyInterjection(ctx context.Context, transcript, inflight
 	if model == "" {
 		return bs.InterjectionUnclear, fmt.Errorf("reflex model not configured")
 	}
+	var effort, thinkingMode string
+	if g.deps.ModelStore != nil {
+		ref := g.deps.ModelStore.Get("reflex")
+		effort = ref.Effort
+		thinkingMode = ref.ThinkingMode
+	}
 	if g.reflexInterjectionPrompt == "" {
 		return bs.InterjectionUnclear, fmt.Errorf("reflex-interjection prompt not loaded")
 	}
@@ -669,10 +675,12 @@ func (g *Gateway) ClassifyInterjection(ctx context.Context, transcript, inflight
 		strings.TrimSpace(string(tail)), transcript)
 
 	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
-		Model:     model,
-		MaxTokens: 16,
-		System:    g.reflexInterjectionPrompt,
-		Messages:  []bs.Message{{Role: "user", Content: prompt}},
+		Model:        model,
+		MaxTokens:    16,
+		Effort:       effort,
+		ThinkingMode: thinkingMode,
+		System:       g.reflexInterjectionPrompt,
+		Messages:     []bs.Message{{Role: "user", Content: prompt}},
 	})
 	if err != nil {
 		return bs.InterjectionUnclear, fmt.Errorf("classify interjection: %w", err)

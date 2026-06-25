@@ -19,6 +19,8 @@ type Compactor struct {
 	logger       *slog.Logger
 	model        string
 	maxTokens    int
+	effort       string
+	thinkingMode string
 	threshold    int
 	keepTokens   int
 	systemPrompt string
@@ -30,12 +32,14 @@ func NewCompactor(provider bs.CompletionProvider, cfg *bs.Config, logger *slog.L
 		return nil
 	}
 	return &Compactor{
-		provider:   provider,
-		logger:     logger,
-		model:      cfg.Models.Compact.ForRouter(),
-		maxTokens:  cfg.Limits.CompactOutput,
-		threshold:  cfg.Limits.CompactThreshold,
-		keepTokens: cfg.Limits.CompactKeep,
+		provider:     provider,
+		logger:       logger,
+		model:        cfg.Models.Compact.ForRouter(),
+		maxTokens:    cfg.Limits.CompactOutput,
+		effort:       cfg.Models.Compact.Effort,
+		thinkingMode: cfg.Models.Compact.ThinkingMode,
+		threshold:    cfg.Limits.CompactThreshold,
+		keepTokens:   cfg.Limits.CompactKeep,
 	}
 }
 
@@ -86,6 +90,8 @@ func (c *Compactor) summarize(ctx context.Context, dialogue string) (string, err
 		MaxTokens:      c.maxTokens,
 		System:         c.systemPrompt,
 		ThinkingBudget: 0,
+		Effort:         c.effort,
+		ThinkingMode:   c.thinkingMode,
 		Messages:       []bs.Message{{Role: "user", Content: dialogue}},
 	})
 	if err != nil {

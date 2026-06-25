@@ -56,6 +56,12 @@ func (g *Gateway) extractInsight(ctx context.Context, response, extractType stri
 	if model == "" {
 		return truncateStr(response, 200) // fallback
 	}
+	var effort, thinkingMode string
+	if g.deps.ModelStore != nil {
+		ref := g.deps.ModelStore.Get("reflex")
+		effort = ref.Effort
+		thinkingMode = ref.ThinkingMode
+	}
 
 	if g.extractInsightPrompt == "" {
 		g.logger.Warn("extract-insight prompt not in DB, skipping")
@@ -64,10 +70,12 @@ func (g *Gateway) extractInsight(ctx context.Context, response, extractType stri
 	prompt := fmt.Sprintf(g.extractInsightPrompt, extractType, truncateStr(response, 1500))
 
 	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
-		Model:     model,
-		MaxTokens: 128,
-		System:    g.reflexSystemPrompt,
-		Messages:  []bs.Message{{Role: "user", Content: prompt}},
+		Model:        model,
+		MaxTokens:    128,
+		Effort:       effort,
+		ThinkingMode: thinkingMode,
+		System:       g.reflexSystemPrompt,
+		Messages:     []bs.Message{{Role: "user", Content: prompt}},
 	})
 	if err != nil {
 		g.logger.Warn("extractInsight failed", "error", err)
@@ -118,6 +126,12 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 	if model == "" {
 		return nil, fmt.Errorf("reflex model not configured")
 	}
+	var effort, thinkingMode string
+	if g.deps.ModelStore != nil {
+		ref := g.deps.ModelStore.Get("reflex")
+		effort = ref.Effort
+		thinkingMode = ref.ThinkingMode
+	}
 
 	g.logger.Info("calling reflex", "model", model)
 
@@ -127,9 +141,11 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 		now.Format("2006-01-02 15:04 MST (Monday)"), g.reflexSystemPrompt)
 
 	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
-		Model:     model,
-		MaxTokens: 512,
-		System:    reflexSystem,
+		Model:        model,
+		MaxTokens:    512,
+		Effort:       effort,
+		ThinkingMode: thinkingMode,
+		System:       reflexSystem,
 		Messages: []bs.Message{
 			{Role: "user", Content: prompt},
 		},

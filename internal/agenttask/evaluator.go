@@ -733,11 +733,13 @@ Be strict: half-done work is not done. Criteria like "code is reviewed" require 
 	// so we pass a small positive epsilon to mean "deterministic" without
 	// breaking the sentinel contract for the rest of the codebase.
 	resp, err := deps.LLM.Complete(ctx, core.CompletionRequest{
-		Model:       model,
-		System:      system,
-		Messages:    []core.Message{{Role: "user", Content: core.NormalizeContent(user)}},
-		MaxTokens:   256,
-		Temperature: 0.01,
+		Model:        model,
+		System:       system,
+		Messages:     []core.Message{{Role: "user", Content: core.NormalizeContent(user)}},
+		MaxTokens:    256,
+		Temperature:  0.01,
+		Effort:       deps.Config.Models.Primary.Effort,
+		ThinkingMode: deps.Config.Models.Primary.ThinkingMode,
 	})
 	if err != nil {
 		deps.Logger.Warn("acceptance evaluator: llm call failed", "task_id", task.ID, "error", err)

@@ -68,8 +68,12 @@ func runReflexPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Locati
 
 	// Resolve reflex model.
 	reflexModel := ""
+	var reflexEffort, reflexThinkingMode string
 	if deps.ModelStore != nil {
 		reflexModel = deps.ModelStore.ForRouter("reflex")
+		ref := deps.ModelStore.Get("reflex")
+		reflexEffort = ref.Effort
+		reflexThinkingMode = ref.ThinkingMode
 	}
 	if reflexModel == "" {
 		deps.Logger.Warn("reflex model not configured, using fallback")
@@ -82,10 +86,12 @@ func runReflexPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Locati
 	// Call reflex LLM.
 	deps.Logger.Info("agent-tasks: calling reflex", "model", reflexModel)
 	resp, err := deps.LLM.Complete(ctx, core.CompletionRequest{
-		Model:     reflexModel,
-		MaxTokens: 512,
-		System:    reflexSystem,
-		Messages:  []core.Message{{Role: "user", Content: reflexPrompt}},
+		Model:        reflexModel,
+		MaxTokens:    512,
+		Effort:       reflexEffort,
+		ThinkingMode: reflexThinkingMode,
+		System:       reflexSystem,
+		Messages:     []core.Message{{Role: "user", Content: reflexPrompt}},
 	})
 	if err != nil {
 		deps.Logger.Warn("agent-tasks: reflex failed, using fallback", "error", err)

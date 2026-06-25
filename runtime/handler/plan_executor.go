@@ -193,7 +193,15 @@ func (e *StructuredGoalExecutor) planPhase(ctx context.Context, task core.AgentT
 		desc = *task.Description
 	}
 
-	_ = modelRole // reserved for future per-role prompt selection
+	var effort, thinkingMode string
+	if deps.ModelStore != nil {
+		ref := deps.ModelStore.Get(modelRole)
+		effort = ref.Effort
+		thinkingMode = ref.ThinkingMode
+	} else if deps.Config != nil {
+		effort = deps.Config.Models.Primary.Effort
+		thinkingMode = deps.Config.Models.Primary.ThinkingMode
+	}
 
 	systemPrompt, err := deps.Prompts.Get(ctx, "goal-plan-system")
 	if err != nil {
@@ -206,10 +214,12 @@ func (e *StructuredGoalExecutor) planPhase(ctx context.Context, task core.AgentT
 	planPrompt := fmt.Sprintf(goalPlanUser, task.Title, desc, buildToolsList(deps))
 
 	resp, err := deps.LLM.Complete(ctx, core.CompletionRequest{
-		Model:     model,
-		MaxTokens: deps.Config.Limits.MaxOutputTokens,
-		System:    systemPrompt,
-		Messages:  []core.Message{{Role: "user", Content: planPrompt}},
+		Model:        model,
+		MaxTokens:    deps.Config.Limits.MaxOutputTokens,
+		Effort:       effort,
+		ThinkingMode: thinkingMode,
+		System:       systemPrompt,
+		Messages:     []core.Message{{Role: "user", Content: planPrompt}},
 	})
 	if err != nil {
 		return core.IterationResult{}, fmt.Errorf("planning LLM: %w", err)
