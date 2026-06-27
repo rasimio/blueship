@@ -161,5 +161,8 @@ func (a *Loop) calculateBudget(systemPrompt string, tools []bs.ToolDefinition) i
 	if budget < minBudget {
 		budget = minBudget
 	}
+	if cap := a.cfg.Limits.ChatMessageBudget; cap > 0 && budget > cap {
+		budget = cap
+	}
 	return budget
 }

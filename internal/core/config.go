@@ -166,13 +166,14 @@ type ModelsConfig struct {
 
 // LimitsConfig defines token budget limits.
 type LimitsConfig struct {
-	MaxContext       int // Opus input budget (default: 180000)
-	CompactThreshold int // trigger compaction above this (default: 40000)
-	CompactKeep      int // keep recent messages intact (default: 30000)
-	MaxOutputTokens  int // agent loop max output (default: 8192)
-	CompactOutput    int // haiku compaction output (default: 2048)
-	ThinkingBudget   int // extended thinking budget (default: 0 = disabled)
-	MinMessageBudget int // minimum token budget for messages (default: 10000)
+	MaxContext        int // Opus input budget (default: 180000)
+	ChatMessageBudget int // recent session history budget for chat turns (default: 6000)
+	CompactThreshold  int // trigger compaction above this (default: 40000)
+	CompactKeep       int // keep recent messages intact (default: 30000)
+	MaxOutputTokens   int // agent loop max output (default: 8192)
+	CompactOutput     int // haiku compaction output (default: 2048)
+	ThinkingBudget    int // extended thinking budget (default: 0 = disabled)
+	MinMessageBudget  int // minimum token budget for messages (default: 10000)
 }
 
 // TimeoutsConfig defines timeouts for external calls.
@@ -259,6 +260,9 @@ func (c *Config) ApplyDefaults() {
 	// Limits
 	if c.Limits.MaxContext == 0 {
 		c.Limits.MaxContext = 180000
+	}
+	if c.Limits.ChatMessageBudget == 0 {
+		c.Limits.ChatMessageBudget = 6000
 	}
 	if c.Limits.CompactThreshold == 0 {
 		c.Limits.CompactThreshold = 40000
