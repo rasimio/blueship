@@ -167,14 +167,17 @@ func (s *Store) MessagesForAPI(ctx context.Context, sessionID string, maxTokens 
 		return nil, nil
 	}
 
-	var selected []Message
-	tokenSum := 0
-	for _, m := range msgs {
-		if maxTokens > 0 && tokenSum+m.TokenEstimate > maxTokens {
-			break
-		}
-		tokenSum += m.TokenEstimate
-		selected = append(selected, m)
+	return messagesForAPIFromRows(msgs, maxTokens), nil
+}
+
+func messagesForAPIFromRows(msgs []Message, maxTokens int) []bs.Message {
+	if len(msgs) == 0 {
+		return nil
+	}
+
+	selected := selectMessagesForAPI(msgs, maxTokens)
+	if len(selected) == 0 {
+		return nil
 	}
 
 	for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
@@ -190,7 +193,89 @@ func (s *Store) MessagesForAPI(ctx context.Context, sessionID string, maxTokens 
 	result = trimOrphanedLeading(result)
 	result = sanitizeOrphanedToolUse(result)
 
-	return result, nil
+	return result
+}
+
+func selectMessagesForAPI(msgs []Message, maxTokens int) []Message {
+	var selected []Message
+	tokenSum := 0
+	for _, m := range msgs {
+		if maxTokens > 0 && tokenSum+m.TokenEstimate > maxTokens {
+			break
+		}
+		tokenSum += m.TokenEstimate
+		selected = append(selected, m)
+	}
+
+	required := latestToolResultTurnSize(msgs)
+	if required > 0 && len(selected) < required {
+		selected = append([]Message(nil), msgs[:required]...)
+	}
+
+	if len(selected) == 0 {
+		selected = append(selected, msgs[0])
+	}
+
+	return selected
+}
+
+func latestToolResultTurnSize(msgs []Message) int {
+	if len(msgs) == 0 || !messageHasToolResult(msgs[0]) {
+		return 0
+	}
+
+	resultIDs := messageToolResultIDs(msgs[0])
+	seenToolUse := false
+	for i := 1; i < len(msgs); i++ {
+		if messageHasMatchingToolUse(msgs[i], resultIDs) {
+			seenToolUse = true
+			continue
+		}
+		if seenToolUse && msgs[i].Role == "user" && !messageHasToolResult(msgs[i]) {
+			return i + 1
+		}
+	}
+
+	return 0
+}
+
+func messageHasToolResult(msg Message) bool {
+	for _, block := range messageBlocks(msg) {
+		if block.Type == "tool_result" {
+			return true
+		}
+	}
+	return false
+}
+
+func messageToolResultIDs(msg Message) map[string]bool {
+	ids := make(map[string]bool)
+	for _, block := range messageBlocks(msg) {
+		if block.Type == "tool_result" && block.ToolUseID != "" {
+			ids[block.ToolUseID] = true
+		}
+	}
+	return ids
+}
+
+func messageHasMatchingToolUse(msg Message, resultIDs map[string]bool) bool {
+	for _, block := range messageBlocks(msg) {
+		if block.Type != "tool_use" {
+			continue
+		}
+		if len(resultIDs) == 0 || resultIDs[block.ID] {
+			return true
+		}
+	}
+	return false
+}
+
+func messageBlocks(msg Message) []bs.ContentBlock {
+	var blocks []bs.ContentBlock
+	if err := json.Unmarshal(msg.Content, &blocks); err == nil {
+		return blocks
+	}
+	return nil
 }
 
 // AllMessagesForAPI returns ALL messages formatted for Claude API (no LIMIT).
