@@ -423,7 +423,7 @@ type pendingMsg struct {
 	// natively); 0 / empty for Telegram inbound. When both are set
 	// the direct id wins.
 	replyToMessageID string
-	// ephemeral marks a private, read-only ask (notebook "ask Arlene"):
+	// ephemeral marks a private, read-only notebook ask:
 	// context from memory, but no persistence — see core.WithEphemeral.
 	ephemeral bool
 }

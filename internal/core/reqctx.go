@@ -69,7 +69,7 @@ func SoulIDFromContextOK(ctx context.Context) (uuid.UUID, bool) {
 }
 
 // ephemeralCtxKey marks a turn as EPHEMERAL — a private, read-only ask (e.g. a
-// notebook "ask Arlene" on selected text) that should use the soul's memory for
+// notebook ask on selected text) that should use the soul's memory for
 // context but persist NOTHING: no chat_messages rows, no memory encoding, no
 // turn-completed hook. It must never appear in the chat thread. Default (unset)
 // is a normal, fully-persisted turn.
