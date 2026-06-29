@@ -74,10 +74,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		}
 		tools = kept
 	}
-	tokenBudget := a.calculateBudget(cfg.SystemPrompt, tools)
-	if cfg.MessageBudget > 0 {
-		tokenBudget = cfg.MessageBudget
-	}
+	tokenBudget := a.effectiveMessageBudget(cfg, cfg.SystemPrompt, tools)
 
 	// Pre-existing compact summary from previous runs
 	compactSummary := cfg.CompactSummary
@@ -111,50 +108,61 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		emitTiming(cfg, "agent.compaction", started, "role="+cfg.Role)
 	}
 
+	turnContext := buildTurnContext(cfg.ReflexGuidance, cfg.InjectedContext)
+	loadStarted := time.Now()
+	dialogMessages, loadErr := a.store.DialogMessagesForAPI(ctx, cfg.SessionID, tokenBudget)
+	emitTiming(cfg, "agent.load_dialog_messages", loadStarted, fmt.Sprintf("role=%s budget=%d", cfg.Role, tokenBudget))
+	if loadErr != nil {
+		return nil, fmt.Errorf("load dialog messages: %w", loadErr)
+	}
+	dialogTokens := estimateMessagesTokens(dialogMessages)
+	convo := cloneMessages(dialogMessages)
+
 	// Accumulate text and tool traces across all turns.
 	var accumulated strings.Builder
 	var traces []ToolTrace
+	toolTurns := 0
+	forceFinal := false
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
-		// 2. Build effective system prompt with compaction summary
-		effectiveSystem := cfg.SystemPrompt
-		if compactSummary != "" {
-			effectiveSystem += SummaryHeader + compactSummary
-		}
-
-		// 3. Load messages (always from DB — compaction already persisted)
-		loadStarted := time.Now()
-		messages, err := a.store.MessagesForAPI(ctx, cfg.SessionID, tokenBudget)
-		emitTiming(cfg, "agent.load_messages", loadStarted, fmt.Sprintf("role=%s turn=%d budget=%d", cfg.Role, turn+1, tokenBudget))
-		if err != nil {
-			return nil, fmt.Errorf("load messages: %w", err)
-		}
-
-		// On the first turn, prepend reflex guidance + injected context to the last user message.
-		// Not stored in DB — ephemeral context (e.g. memory traces, matched rules).
-		if turn == 0 && cfg.ReflexGuidance != "" && cfg.InjectedContext != "" {
-			cfg.InjectedContext = cfg.ReflexGuidance + "\n\n" + cfg.InjectedContext
-		} else if turn == 0 && cfg.ReflexGuidance != "" {
-			cfg.InjectedContext = cfg.ReflexGuidance
-		}
-		if turn == 0 && cfg.InjectedContext != "" && len(messages) > 0 {
-			last := &messages[len(messages)-1]
-			if last.Role == "user" {
-				blocks := bs.NormalizeContent(last.Content)
-				prefix := bs.ContentBlock{Type: "text", Text: "[context]\n" + cfg.InjectedContext + "[/context]\n\n"}
-				last.Content = append([]bs.ContentBlock{prefix}, blocks...)
+		baseSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, "")
+		effectiveSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, turnContext)
+		messages := cloneMessages(convo)
+		turnTools := tools
+		if forceFinal {
+			turnTools = nil
+			if len(messages) > 0 {
+				appendFinalAnswerDirective(&messages[len(messages)-1])
 			}
+		}
+		scratchpadTokens := estimateMessagesTokens(convo) - dialogTokens
+		if scratchpadTokens < 0 {
+			scratchpadTokens = 0
 		}
 
 		// 4. Call LLM
-		a.logger.Info("calling LLM", "model", cfg.Model, "tools", len(tools), "messages", len(messages))
+		a.logger.Info("calling LLM",
+			"model", cfg.Model,
+			"role", cfg.Role,
+			"tools", len(turnTools),
+			"messages", len(messages),
+			"force_final", forceFinal,
+			"message_budget", tokenBudget,
+			"base_system_tokens_estimate", estimateTextTokens(baseSystem),
+			"system_tokens_estimate", estimateTextTokens(effectiveSystem),
+			"tool_schema_tokens_estimate", estimateToolSchemaTokens(turnTools),
+			"dialog_message_tokens_estimate", dialogTokens,
+			"scratchpad_tokens_estimate", scratchpadTokens,
+			"message_tokens_estimate", estimateMessagesTokens(messages),
+			"turn_context_tokens_estimate", estimateTextTokens(turnContext),
+		)
 		llmStarted := time.Now()
 		resp, err := a.provider.Complete(ctx, bs.CompletionRequest{
 			Model:          cfg.Model,
 			MaxTokens:      cfg.MaxTokens,
 			System:         effectiveSystem,
 			Messages:       messages,
-			Tools:          tools,
+			Tools:          turnTools,
 			ThinkingBudget: chooseThinkingBudget(cfg.ThinkingBudget, a.cfg.Limits.ThinkingBudget),
 			ThinkingMode:   cfg.ThinkingMode,
 			Effort:         cfg.Effort,
@@ -175,19 +183,21 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		// 5. Store assistant response (skipped for an ephemeral run). Detached
 		// ctx so a long turn that just consumed the iteration budget can't lose
 		// this state write.
+		assistantMsg := bs.Message{
+			Role:    "assistant",
+			Content: resp.Content,
+		}
 		if !cfg.Ephemeral {
 			appendStarted := time.Now()
 			pctx, pcancel := persistCtx(ctx)
-			err = a.store.AppendWithTokens(pctx, cfg.SessionID, bs.Message{
-				Role:    "assistant",
-				Content: resp.Content,
-			}, resp.Usage.OutputTokens)
+			err = a.store.AppendWithTokens(pctx, cfg.SessionID, assistantMsg, resp.Usage.OutputTokens)
 			pcancel()
 			emitTiming(cfg, "agent.append_assistant", appendStarted, fmt.Sprintf("role=%s turn=%d", cfg.Role, turn+1))
 			if err != nil {
 				return nil, fmt.Errorf("append assistant message: %w", err)
 			}
 		}
+		convo = append(convo, assistantMsg)
 
 		// Collect this turn's text, de-duped (see appendTurnText — guards the
 		// heartbeat "reminder prose + memory_update, then same reminder again"
@@ -212,6 +222,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			return &RunResult{Text: text, ToolTraces: traces}, nil
 
 		case "tool_use":
+			toolTurns++
 			var toolResults []bs.ContentBlock
 			for _, block := range resp.Content {
 				if block.Type != "tool_use" {
@@ -257,18 +268,31 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 				return &RunResult{Text: accumulated.String(), ToolTraces: traces}, nil
 			}
 
+			toolResultMsg := bs.Message{
+				Role:    "user",
+				Content: toolResults,
+			}
 			if !cfg.Ephemeral {
 				appendStarted := time.Now()
 				pctx, pcancel := persistCtx(ctx)
-				err = a.store.Append(pctx, cfg.SessionID, bs.Message{
-					Role:    "user",
-					Content: toolResults,
-				})
+				err = a.store.Append(pctx, cfg.SessionID, toolResultMsg)
 				pcancel()
 				emitTiming(cfg, "agent.append_tool_results", appendStarted, fmt.Sprintf("role=%s turn=%d tools=%d", cfg.Role, turn+1, len(toolResults)))
 				if err != nil {
 					return nil, fmt.Errorf("append tool results: %w", err)
 				}
+			}
+			convo = append(convo, toolResultMsg)
+			if toolTurns >= maxToolTurnsForRole(cfg.Role) {
+				forceFinal = true
+				if turn+1 >= cfg.MaxTurns {
+					cfg.MaxTurns = turn + 2
+				}
+				a.logger.Warn("tool turn budget exhausted; forcing final answer",
+					"role", cfg.Role,
+					"tool_turns", toolTurns,
+					"next_turn", turn+2,
+				)
 			}
 
 			continue

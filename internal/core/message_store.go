@@ -14,6 +14,11 @@ type MessageStore interface {
 	// MessagesForAPI loads recent messages fitting within maxTokens budget.
 	MessagesForAPI(ctx context.Context, sessionID string, maxTokens int) ([]Message, error)
 
+	// DialogMessagesForAPI loads recent visible dialogue fitting within maxTokens
+	// budget. Tool transcripts and other internal blocks are excluded so the
+	// dialogue window is independent from tool scratch/history.
+	DialogMessagesForAPI(ctx context.Context, sessionID string, maxTokens int) ([]Message, error)
+
 	// AllMessagesForAPI loads all messages for a session (used for compaction).
 	AllMessagesForAPI(ctx context.Context, sessionID string) ([]Message, error)
 

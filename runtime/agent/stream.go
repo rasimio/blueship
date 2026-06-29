@@ -67,58 +67,41 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		}
 		tools = kept
 	}
-	tokenBudget := a.calculateBudget(cfg.SystemPrompt, tools)
-	if cfg.MessageBudget > 0 {
-		tokenBudget = cfg.MessageBudget
-	}
+	tokenBudget := a.effectiveMessageBudget(cfg, cfg.SystemPrompt, tools)
 	compactSummary := cfg.CompactSummary
+	turnContext := buildTurnContext(cfg.ReflexGuidance, cfg.InjectedContext)
+	loadStarted := time.Now()
+	dialogMessages, loadErr := a.store.DialogMessagesForAPI(ctx, cfg.SessionID, tokenBudget)
+	emitTiming(cfg, "agent.load_dialog_messages", loadStarted, fmt.Sprintf("role=%s budget=%d", cfg.Role, tokenBudget))
+	if loadErr != nil {
+		return "", nil, fmt.Errorf("load dialog messages: %w", loadErr)
+	}
+	dialogTokens := estimateMessagesTokens(dialogMessages)
 
 	var accumulated strings.Builder
 	var traces []ToolTrace
-	// An ephemeral run (a private notebook ask) persists nothing, so it can't
-	// reload its own assistant + tool_result turns from the DB between turns —
-	// they'd vanish and a tool call could never feed its result back. Carry the
-	// whole conversation in memory instead, seeded from the DB on turn 0. This
-	// is what lets the notebook ask use real tools (web_search, browser_fetch).
-	var convo []bs.Message
+	toolTurns := 0
+	forceFinal := false
+	// Prompt assembly keeps persisted visible dialogue and current-run tool
+	// scratch separate. The DB remains the audit/UI store, but tool turns feed
+	// the next LLM call through this in-memory transcript instead of consuming
+	// the next turn's dialogue budget.
+	convo := cloneMessages(dialogMessages)
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
-		effectiveSystem := cfg.SystemPrompt
-		if compactSummary != "" {
-			effectiveSystem += SummaryHeader + compactSummary
-		}
-
-		var messages []bs.Message
-		if cfg.Ephemeral && convo != nil {
-			messages = convo
-		} else {
-			loadStarted := time.Now()
-			m, lerr := a.store.MessagesForAPI(ctx, cfg.SessionID, tokenBudget)
-			emitTiming(cfg, "agent.load_messages", loadStarted, fmt.Sprintf("role=%s turn=%d budget=%d", cfg.Role, turn+1, tokenBudget))
-			if lerr != nil {
-				return "", nil, fmt.Errorf("load messages: %w", lerr)
-			}
-			messages = m
-		}
-
-		if turn == 0 && cfg.ReflexGuidance != "" && cfg.InjectedContext != "" {
-			cfg.InjectedContext = cfg.ReflexGuidance + "\n\n" + cfg.InjectedContext
-		} else if turn == 0 && cfg.ReflexGuidance != "" {
-			cfg.InjectedContext = cfg.ReflexGuidance
-		}
-		if turn == 0 && cfg.InjectedContext != "" && len(messages) > 0 {
-			last := &messages[len(messages)-1]
-			if last.Role == "user" {
-				blocks := bs.NormalizeContent(last.Content)
-				prefix := bs.ContentBlock{Type: "text", Text: "[context]\n" + cfg.InjectedContext + "[/context]\n\n"}
-				last.Content = append([]bs.ContentBlock{prefix}, blocks...)
+		baseSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, "")
+		effectiveSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, turnContext)
+		messages := cloneMessages(convo)
+		turnTools := tools
+		if forceFinal {
+			turnTools = nil
+			if len(messages) > 0 {
+				appendFinalAnswerDirective(&messages[len(messages)-1])
 			}
 		}
-
-		// Seed the in-memory conversation once (with the turn-0 context prefix
-		// already applied) so subsequent ephemeral turns build on it.
-		if cfg.Ephemeral && convo == nil {
-			convo = messages
+		scratchpadTokens := estimateMessagesTokens(convo) - dialogTokens
+		if scratchpadTokens < 0 {
+			scratchpadTokens = 0
 		}
 
 		req := bs.CompletionRequest{
@@ -126,14 +109,29 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			MaxTokens:      cfg.MaxTokens,
 			System:         effectiveSystem,
 			Messages:       messages,
-			Tools:          tools,
+			Tools:          turnTools,
 			ThinkingBudget: chooseThinkingBudget(cfg.ThinkingBudget, a.cfg.Limits.ThinkingBudget),
 			ThinkingMode:   cfg.ThinkingMode,
 			Effort:         cfg.Effort,
 			Temperature:    cfg.Temperature,
 		}
 
-		a.logger.Info("calling LLM (stream)", "model", cfg.Model, "tools", len(tools), "messages", len(messages), "turn", turn+1)
+		a.logger.Info("calling LLM (stream)",
+			"model", cfg.Model,
+			"role", cfg.Role,
+			"tools", len(turnTools),
+			"messages", len(messages),
+			"turn", turn+1,
+			"force_final", forceFinal,
+			"message_budget", tokenBudget,
+			"base_system_tokens_estimate", estimateTextTokens(baseSystem),
+			"system_tokens_estimate", estimateTextTokens(effectiveSystem),
+			"tool_schema_tokens_estimate", estimateToolSchemaTokens(turnTools),
+			"dialog_message_tokens_estimate", dialogTokens,
+			"scratchpad_tokens_estimate", scratchpadTokens,
+			"message_tokens_estimate", estimateMessagesTokens(messages),
+			"turn_context_tokens_estimate", estimateTextTokens(turnContext),
+		)
 
 		llmStarted := time.Now()
 		resp, err := streamProvider.StreamComplete(ctx, req, cb)
@@ -166,21 +164,21 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			"turn", turn+1,
 		)
 
+		assistantMsg := bs.Message{
+			Role:    "assistant",
+			Content: resp.Content,
+		}
 		if !cfg.Ephemeral {
 			appendStarted := time.Now()
 			pctx, pcancel := persistCtx(ctx)
-			err = a.store.AppendWithTokens(pctx, cfg.SessionID, bs.Message{
-				Role:    "assistant",
-				Content: resp.Content,
-			}, resp.Usage.OutputTokens)
+			err = a.store.AppendWithTokens(pctx, cfg.SessionID, assistantMsg, resp.Usage.OutputTokens)
 			pcancel()
 			emitTiming(cfg, "agent.append_assistant", appendStarted, fmt.Sprintf("role=%s turn=%d", cfg.Role, turn+1))
 			if err != nil {
 				return "", nil, fmt.Errorf("append assistant message: %w", err)
 			}
-		} else {
-			convo = append(convo, bs.Message{Role: "assistant", Content: resp.Content})
 		}
+		convo = append(convo, assistantMsg)
 
 		// Collect this turn's text, de-duped (see appendTurnText).
 		appendTurnText(&accumulated, bs.ExtractText(resp.Content))
@@ -202,6 +200,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			return text, traces, nil
 
 		case "tool_use":
+			toolTurns++
 			var toolResults []bs.ContentBlock
 			for _, block := range resp.Content {
 				if block.Type != "tool_use" {
@@ -242,17 +241,28 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 				return accumulated.String(), traces, nil
 			}
 
+			toolResultMsg := bs.Message{Role: "user", Content: toolResults}
 			if !cfg.Ephemeral {
 				appendStarted := time.Now()
 				pctx, pcancel := persistCtx(ctx)
-				err = a.store.Append(pctx, cfg.SessionID, bs.Message{Role: "user", Content: toolResults})
+				err = a.store.Append(pctx, cfg.SessionID, toolResultMsg)
 				pcancel()
 				emitTiming(cfg, "agent.append_tool_results", appendStarted, fmt.Sprintf("role=%s turn=%d tools=%d", cfg.Role, turn+1, len(toolResults)))
 				if err != nil {
 					return "", nil, fmt.Errorf("append tool results: %w", err)
 				}
-			} else {
-				convo = append(convo, bs.Message{Role: "user", Content: toolResults})
+			}
+			convo = append(convo, toolResultMsg)
+			if toolTurns >= maxToolTurnsForRole(cfg.Role) {
+				forceFinal = true
+				if turn+1 >= cfg.MaxTurns {
+					cfg.MaxTurns = turn + 2
+				}
+				a.logger.Warn("tool turn budget exhausted; forcing final answer",
+					"role", cfg.Role,
+					"tool_turns", toolTurns,
+					"next_turn", turn+2,
+				)
 			}
 			continue
 

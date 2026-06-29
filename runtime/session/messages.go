@@ -170,6 +170,26 @@ func (s *Store) MessagesForAPI(ctx context.Context, sessionID string, maxTokens 
 	return messagesForAPIFromRows(msgs, maxTokens), nil
 }
 
+// DialogMessagesForAPI returns recent visible dialogue for prompt assembly.
+// It deliberately strips old tool_use/tool_result transcript blocks so the
+// message budget represents user/assistant conversation, not internal scratch.
+func (s *Store) DialogMessagesForAPI(ctx context.Context, sessionID string, maxTokens int) ([]bs.Message, error) {
+	var msgs []Message
+	err := s.db.SelectContext(ctx, &msgs,
+		`SELECT id, session_id, role, content, tool_use_id, token_estimate, created_at
+		 FROM chat_messages
+		 WHERE session_id = $1
+		 ORDER BY created_at DESC
+		 LIMIT 500`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get dialog messages for API: %w", err)
+	}
+
+	return dialogMessagesForAPIFromRows(msgs, maxTokens), nil
+}
+
 func messagesForAPIFromRows(msgs []Message, maxTokens int) []bs.Message {
 	if len(msgs) == 0 {
 		return nil
@@ -196,6 +216,21 @@ func messagesForAPIFromRows(msgs []Message, maxTokens int) []bs.Message {
 	return result
 }
 
+func dialogMessagesForAPIFromRows(msgs []Message, maxTokens int) []bs.Message {
+	if len(msgs) == 0 {
+		return nil
+	}
+
+	selected := selectDialogMessagesWithinBudget(msgs, maxTokens)
+	if len(selected) == 0 {
+		return nil
+	}
+	for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
+		selected[i], selected[j] = selected[j], selected[i]
+	}
+	return trimLeadingToUser(selected)
+}
+
 func selectMessagesForAPI(msgs []Message, maxTokens int) []Message {
 	var selected []Message
 	tokenSum := 0
@@ -217,6 +252,73 @@ func selectMessagesForAPI(msgs []Message, maxTokens int) []Message {
 	}
 
 	return selected
+}
+
+type dialogMessageCandidate struct {
+	msg    bs.Message
+	tokens int
+}
+
+func selectDialogMessagesWithinBudget(msgs []Message, maxTokens int) []bs.Message {
+	var selected []bs.Message
+	tokenSum := 0
+	for _, stored := range msgs {
+		candidate, ok := visibleDialogCandidate(stored)
+		if !ok {
+			continue
+		}
+		if maxTokens > 0 && tokenSum+candidate.tokens > maxTokens {
+			if len(selected) == 0 {
+				selected = append(selected, candidate.msg)
+			}
+			break
+		}
+		tokenSum += candidate.tokens
+		selected = append(selected, candidate.msg)
+	}
+	return selected
+}
+
+func visibleDialogCandidate(stored Message) (dialogMessageCandidate, bool) {
+	if stored.Role != "user" && stored.Role != "assistant" {
+		return dialogMessageCandidate{}, false
+	}
+	blocks := bs.NormalizeContent(stored.ToAPIMessage().Content)
+	cleaned := make([]bs.ContentBlock, 0, len(blocks))
+	for _, b := range blocks {
+		if b.Type == "tool_use" || b.Type == "tool_result" {
+			continue
+		}
+		cleaned = append(cleaned, b)
+	}
+	if len(cleaned) == 0 {
+		return dialogMessageCandidate{}, false
+	}
+	return dialogMessageCandidate{
+		msg: bs.Message{
+			Role:    stored.Role,
+			Content: contentFromBlocks(cleaned),
+		},
+		tokens: bs.EstimateTokens(cleaned),
+	}, true
+}
+
+func contentFromBlocks(blocks []bs.ContentBlock) any {
+	if len(blocks) == 1 && blocks[0].Type == "text" {
+		return blocks[0].Text
+	}
+	return blocks
+}
+
+func trimLeadingToUser(msgs []bs.Message) []bs.Message {
+	start := 0
+	for start < len(msgs) && msgs[start].Role != "user" {
+		start++
+	}
+	if start >= len(msgs) {
+		return nil
+	}
+	return msgs[start:]
 }
 
 func latestToolResultTurnSize(msgs []Message) int {

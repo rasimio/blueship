@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 
 	bs "github.com/rasimio/blueship/internal/core"
 )
@@ -40,15 +41,17 @@ type RunConfig struct {
 	// targeting it can be resolved into our chat_messages.id via
 	// session.Store.LookupByTGMessageID. 0 = not from Telegram.
 	TGMessageID int64
-	// InjectedContext is prepended to the first user turn (not stored in session).
-	// Used for automatic memory/context injection before the LLM call.
+	// InjectedContext is added to the per-run turn context (not stored in session).
+	// Used for automatic memory/context injection before the LLM call without
+	// consuming the visible dialogue message budget.
 	InjectedContext string
 	// Role selects which tools to send (via RoleToolStore).
 	// Empty or unknown role = all tools (backwards-compatible for cloud models).
 	Role string
 	// ReflexGuidance is a high-priority directive from the reflex phase.
 	// Contains expanded matched rules formatted as instructions.
-	// Prepended to InjectedContext so it gets maximum attention from the model.
+	// Prepended to InjectedContext inside the turn context so it gets maximum
+	// attention from the model without consuming visible dialogue budget.
 	ReflexGuidance string
 	// ToolOverride overrides role-based tool selection with an explicit list.
 	// nil = use role default; empty slice = no tools.
@@ -168,4 +171,77 @@ func (a *Loop) calculateBudget(systemPrompt string, tools []bs.ToolDefinition) i
 		budget = cap
 	}
 	return budget
+}
+
+func (a *Loop) effectiveMessageBudget(cfg RunConfig, systemPrompt string, tools []bs.ToolDefinition) int {
+	if cfg.MessageBudget > 0 {
+		return cfg.MessageBudget
+	}
+	return a.calculateBudget(systemPrompt, tools)
+}
+
+func effectiveSystemPrompt(systemPrompt, compactSummary, turnContext string) string {
+	effective := systemPrompt
+	if compactSummary != "" {
+		effective += SummaryHeader + compactSummary
+	}
+	if turnContext != "" {
+		effective += "\n\n## Turn context\n[turn_context]\n" + turnContext + "\n[/turn_context]"
+	}
+	return effective
+}
+
+func buildTurnContext(reflexGuidance, injectedContext string) string {
+	var parts []string
+	if s := strings.TrimSpace(reflexGuidance); s != "" {
+		parts = append(parts, s)
+	}
+	if s := strings.TrimSpace(injectedContext); s != "" {
+		parts = append(parts, s)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func cloneMessages(messages []bs.Message) []bs.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	cloned := make([]bs.Message, len(messages))
+	copy(cloned, messages)
+	return cloned
+}
+
+func estimateTextTokens(s string) int {
+	if s == "" {
+		return 0
+	}
+	return len([]rune(s)) / 3
+}
+
+func estimateToolSchemaTokens(tools []bs.ToolDefinition) int {
+	if len(tools) == 0 {
+		return 0
+	}
+	data, _ := json.Marshal(tools)
+	return len(data) / 3
+}
+
+func maxToolTurnsForRole(role string) int {
+	switch role {
+	case "cortex":
+		return 3
+	case "background":
+		return 8
+	default:
+		return 5
+	}
+}
+
+func appendFinalAnswerDirective(msg *bs.Message) {
+	if msg == nil || msg.Role != "user" {
+		return
+	}
+	blocks := bs.NormalizeContent(msg.Content)
+	directive := bs.ContentBlock{Type: "text", Text: "\n\n[tool_limit]\nNo more tools are available for this turn. Use the tool results already provided and answer the user's request now. Do not ask to run another search.\n[/tool_limit]"}
+	msg.Content = append(blocks, directive)
 }

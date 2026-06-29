@@ -84,6 +84,57 @@ func TestMessagesForAPINeverDropsOversizedPlainLatestMessage(t *testing.T) {
 	}
 }
 
+func TestDialogMessagesForAPISkipsToolTranscript(t *testing.T) {
+	msgs := []Message{
+		storedMessage(t, "user", []bs.ContentBlock{{
+			Type:      "tool_result",
+			ToolUseID: "call_1",
+			Content:   strings.Repeat("large internal result\n", 1000),
+		}}, 12000),
+		storedMessage(t, "assistant", []bs.ContentBlock{{
+			Type:  "tool_use",
+			ID:    "call_1",
+			Name:  "memory_search",
+			Input: json.RawMessage(`{"query":"profile"}`),
+		}}, 300),
+		storedMessage(t, "user", []bs.ContentBlock{{Type: "text", Text: "visible latest"}}, 100),
+		storedMessage(t, "assistant", []bs.ContentBlock{{Type: "text", Text: "visible older answer"}, {
+			Type:  "tool_use",
+			ID:    "call_older",
+			Name:  "web_search",
+			Input: json.RawMessage(`{"query":"ignored"}`),
+		}}, 100),
+		storedMessage(t, "user", []bs.ContentBlock{{Type: "text", Text: "visible older question"}}, 100),
+	}
+
+	apiMessages := dialogMessagesForAPIFromRows(msgs, 6000)
+	if len(apiMessages) != 3 {
+		t.Fatalf("want only three visible dialog messages, got %d: %#v", len(apiMessages), apiMessages)
+	}
+	if apiMessages[0].Role != "user" || apiMessages[0].Content != "visible older question" {
+		t.Fatalf("dialog should start at older visible user turn, got %#v", apiMessages[0])
+	}
+	blocks := bs.NormalizeContent(apiMessages[1].Content)
+	if len(blocks) != 1 || blocks[0].Type != "text" || blocks[0].Text != "visible older answer" {
+		t.Fatalf("assistant mixed tool_use should keep only visible text, got %#v", blocks)
+	}
+	if apiMessages[2].Content != "visible latest" {
+		t.Fatalf("latest visible user missing, got %#v", apiMessages[2])
+	}
+}
+
+func TestDialogMessagesForAPIDropsPartialLeadingAssistantTurn(t *testing.T) {
+	msgs := []Message{
+		storedMessage(t, "user", []bs.ContentBlock{{Type: "text", Text: "latest question"}}, 100),
+		storedMessage(t, "assistant", []bs.ContentBlock{{Type: "text", Text: "answer without its question"}}, 100),
+	}
+
+	apiMessages := dialogMessagesForAPIFromRows(msgs, 6000)
+	if len(apiMessages) != 1 || apiMessages[0].Role != "user" {
+		t.Fatalf("want leading assistant dropped, got %#v", apiMessages)
+	}
+}
+
 func storedMessage(t *testing.T, role string, blocks []bs.ContentBlock, tokens int) Message {
 	t.Helper()
 
