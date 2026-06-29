@@ -27,6 +27,9 @@ type (
 	BotConfig       = core.BotConfig
 	WebSocketConfig = core.WebSocketConfig
 	HTTPChatConfig  = core.HTTPChatConfig
+	TimingSink      = core.TimingSink
+	TimingReport    = core.TimingReport
+	TimingSpan      = core.TimingSpan
 )
 
 // --- S1 reflex: fast-tier classification + rules ---

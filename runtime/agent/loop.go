@@ -88,6 +88,9 @@ type RunConfig struct {
 	// Effort maps to output_config.effort. See CompletionRequest docs.
 	ThinkingMode string
 	Effort       string
+	// OnTiming receives per-component latency spans for observability. It must
+	// not affect loop behavior; callers may leave it nil.
+	OnTiming func(bs.TimingSpan)
 }
 
 // NewLoop creates a new agent loop.

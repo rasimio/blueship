@@ -28,12 +28,15 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	}
 
 	if !cfg.SkipUserAppend {
-		if err := a.store.Append(ctx, cfg.SessionID, bs.Message{
+		started := time.Now()
+		err := a.store.Append(ctx, cfg.SessionID, bs.Message{
 			Role:             "user",
 			Content:          userMessage,
 			ReplyToMessageID: cfg.ReplyToMessageID,
 			TGMessageID:      cfg.TGMessageID,
-		}); err != nil {
+		})
+		emitTiming(cfg, "agent.append_user", started, "role="+cfg.Role)
+		if err != nil {
 			return "", nil, fmt.Errorf("append user message: %w", err)
 		}
 	}
@@ -89,7 +92,9 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		if cfg.Ephemeral && convo != nil {
 			messages = convo
 		} else {
+			loadStarted := time.Now()
 			m, lerr := a.store.MessagesForAPI(ctx, cfg.SessionID, tokenBudget)
+			emitTiming(cfg, "agent.load_messages", loadStarted, fmt.Sprintf("role=%s turn=%d budget=%d", cfg.Role, turn+1, tokenBudget))
 			if lerr != nil {
 				return "", nil, fmt.Errorf("load messages: %w", lerr)
 			}
@@ -130,10 +135,12 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 
 		a.logger.Info("calling LLM (stream)", "model", cfg.Model, "tools", len(tools), "messages", len(messages), "turn", turn+1)
 
+		llmStarted := time.Now()
 		resp, err := streamProvider.StreamComplete(ctx, req, cb)
 		if err != nil {
 			return "", nil, fmt.Errorf("LLM API: %w", err)
 		}
+		emitTiming(cfg, "llm.stream_complete", llmStarted, llmTimingDetail(cfg, turn+1, resp.StopReason, resp.Usage.InputTokens, resp.Usage.OutputTokens))
 
 		// Per-turn usage report: web sinks render a live token-window
 		// indicator that climbs as the session grows. Telegram / voice
@@ -160,12 +167,14 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		)
 
 		if !cfg.Ephemeral {
+			appendStarted := time.Now()
 			pctx, pcancel := persistCtx(ctx)
 			err = a.store.AppendWithTokens(pctx, cfg.SessionID, bs.Message{
 				Role:    "assistant",
 				Content: resp.Content,
 			}, resp.Usage.OutputTokens)
 			pcancel()
+			emitTiming(cfg, "agent.append_assistant", appendStarted, fmt.Sprintf("role=%s turn=%d", cfg.Role, turn+1))
 			if err != nil {
 				return "", nil, fmt.Errorf("append assistant message: %w", err)
 			}
@@ -202,6 +211,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 				start := time.Now()
 				result, isError := a.registry.Execute(ctx, block.Name, block.Input)
 				latencyMs := int(time.Since(start) / time.Millisecond)
+				emitTiming(cfg, "tool.execute", start, toolTimingDetail(cfg, turn+1, block.Name, isError))
 				if cb != nil && cb.OnToolResult != nil {
 					cb.OnToolResult(block.ID, result, isError, latencyMs)
 				}
@@ -233,9 +243,11 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			}
 
 			if !cfg.Ephemeral {
+				appendStarted := time.Now()
 				pctx, pcancel := persistCtx(ctx)
 				err = a.store.Append(pctx, cfg.SessionID, bs.Message{Role: "user", Content: toolResults})
 				pcancel()
+				emitTiming(cfg, "agent.append_tool_results", appendStarted, fmt.Sprintf("role=%s turn=%d tools=%d", cfg.Role, turn+1, len(toolResults)))
 				if err != nil {
 					return "", nil, fmt.Errorf("append tool results: %w", err)
 				}

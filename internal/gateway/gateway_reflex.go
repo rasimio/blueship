@@ -32,7 +32,7 @@ type reflexPipelineResult struct {
 //
 // When result.Silent=true the caller MUST abort the turn without calling
 // cortex or sending any output — a structured rule with Silent=true matched.
-func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText, priorContext string) reflexPipelineResult {
+func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText, priorContext string, timings *turnTimer) reflexPipelineResult {
 	// Interaction tier: skip the ReflexPreparer entirely. The full AME pass
 	// (memory_associate + scoring + diversity filter + emotion detection)
 	// costs ~3-5 s per turn and the streaming reflex doesn't need it — for
@@ -46,11 +46,13 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		engineRuleCount := 0
 		var matchedRules []bs.MatchedRule
 		if us.Deps.RuleEngine != nil {
+			ruleStarted := time.Now()
 			engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
 				UserID:  us.Deps.UserID.String(),
 				Hour:    time.Now().Hour(),
 				Message: msgText,
 			})
+			timings.RecordSince("rule_engine", ruleStarted, "interaction_tier")
 			for _, r := range engineRules {
 				if r.Silent {
 					g.logger.Info("rule engine: silent rule matched, aborting turn",
@@ -82,7 +84,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		}
 	}
 
+	preparerStarted := time.Now()
 	rc := us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText, priorContext)
+	timings.RecordSince("reflex_preparer", preparerStarted, "memory_context")
 	if rc == nil {
 		return reflexPipelineResult{}
 	}
@@ -153,7 +157,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	}
 	reflexPrompt := fmt.Sprintf(g.reflexPlanTemplate, rulesBlock.String(), toolsList, notesBlock, msgText)
 
+	reflexStarted := time.Now()
 	reflexResult, err := g.callReflex(ctx, reflexPrompt)
+	timings.RecordSince("reflex_llm", reflexStarted, "")
 	if err != nil {
 		// Reflex LLM unavailable (e.g. provider 429 / network error).
 		// Don't bail out — keep going with full AME context and let
@@ -201,8 +207,10 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	}
 	for _, pa := range preActionsToRun {
 		paCtx, cancel := context.WithTimeout(ctx, preActionTimeout)
+		actionStarted := time.Now()
 		result, isError := us.Registry.Execute(paCtx, pa.Tool, pa.Input)
 		cancel()
+		timings.RecordSince("reflex.pre_action", actionStarted, fmt.Sprintf("tool=%s error=%t", pa.Tool, isError))
 		inputStr := string(pa.Input)
 		if len(inputStr) > 200 {
 			inputStr = inputStr[:200] + "..."
@@ -280,6 +288,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	// 2. Rules from structured rule engine (condition-based match).
 	var engineRuleCount int
 	if us.Deps.RuleEngine != nil {
+		ruleStarted := time.Now()
 		engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
 			UserID:   us.Deps.UserID.String(),
 			Intent:   reflexResult.Intent,
@@ -287,6 +296,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 			Hour:     time.Now().Hour(),
 			Message:  msgText,
 		})
+		timings.RecordSince("rule_engine", ruleStarted, "reflex_pipeline")
 
 		// Hard-silence gate: if any matched rule is marked Silent, abort the
 		// turn entirely — no cortex call, no message sent. This is the only
@@ -319,8 +329,10 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 			// Execute rule-prescribed pre_actions.
 			for _, pa := range r.PreActions {
 				paCtx, cancel := context.WithTimeout(ctx, preActionTimeout)
+				actionStarted := time.Now()
 				result, isError := us.Registry.Execute(paCtx, pa.Tool, pa.Input)
 				cancel()
+				timings.RecordSince("rule.pre_action", actionStarted, fmt.Sprintf("tool=%s error=%t", pa.Tool, isError))
 				inputStr := string(pa.Input)
 				if len(inputStr) > 200 {
 					inputStr = inputStr[:200] + "..."

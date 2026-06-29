@@ -240,10 +240,14 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// UserState (set in getOrInitUser), not from the inbound ctx.
 	ctx = bs.WithSoulID(ctx, us.SoulID)
 
+	timings := newTurnTimer()
+	defer g.finishTurnTiming(ctx, sink, us, timings)
+
 	typingCtx, stopTyping := context.WithCancel(ctx)
 	go g.keepTypingViaSink(typingCtx, sink)
 	defer stopTyping()
 
+	prepareStarted := time.Now()
 	var blocks []bs.ContentBlock
 	for _, m := range msgs {
 		blocks = append(blocks, m.images...)
@@ -290,6 +294,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			}
 		}
 	}
+	timings.RecordSince("gateway.prepare_content", prepareStarted, fmt.Sprintf("messages=%d blocks=%d", len(msgs), len(blocks)))
 
 	var content any
 	var msgText string
@@ -314,7 +319,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		go g.deps.MessageEncoder(bs.WithSoulID(context.Background(), us.SoulID), us.UserID.String(), msgText)
 	}
 
+	sessionStarted := time.Now()
 	sess, err := g.GetOrCreateSession(ctx, us)
+	timings.RecordSince("gateway.session", sessionStarted, "")
 	if err != nil {
 		g.logger.Error("session error", "error", err)
 		g.sendDebugError(ctx, sink, "session", err)
@@ -397,7 +404,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// "how are you" right after a heavy disclosure has no signal — cosine
 	// search lands on whatever generic emotional record matches "how
 	// are you" best, and the model anchors on the wrong event.
+	priorStarted := time.Now()
 	priorContext := g.buildPriorContext(ctx, sess.ID, 6)
+	timings.RecordSince("gateway.prior_context", priorStarted, "turns=6")
 
 	// Build context and run reflex/cortex pipeline.
 	var injectedCtx, reflexGuidance string
@@ -412,11 +421,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// No-op when a ReflexPreparer is wired: runReflexPipeline does the same
 	// rule engine pass inline and owns both variables.
 	if msgText != "" && us.Deps != nil && us.Deps.RuleEngine != nil && us.Deps.ReflexPreparer == nil {
+		ruleStarted := time.Now()
 		engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
 			UserID:  us.UserID.String(),
 			Hour:    time.Now().Hour(),
 			Message: msgText,
 		})
+		timings.RecordSince("rule_engine", ruleStarted, "no_reflex")
 		for _, r := range engineRules {
 			if r.Silent {
 				g.logger.Info("rule engine: silent rule matched (no-reflex path), aborting turn",
@@ -448,7 +459,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			g.logger.Info("disambiguation: resolved", "tool", chosen.Tool, "label", chosen.Label)
 			// Still run context injection for AME traces.
 			if us.Deps != nil && us.Deps.ContextInjector != nil {
+				contextStarted := time.Now()
 				injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText, priorContext)
+				timings.RecordSince("context_injector", contextStarted, "disambiguation")
 			}
 		} else {
 			// Not a resolution — clear pending and proceed normally.
@@ -463,7 +476,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	var rp reflexPipelineResult
 	if reflexGuidance == "" && msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil && g.reflexModel() != "" {
 		// Reflex/Cortex pipeline: structured context → reflex plan → pre-actions → filtered cortex input.
-		rp = g.runReflexPipeline(ctx, us, msgText, priorContext)
+		pipelineStarted := time.Now()
+		rp = g.runReflexPipeline(ctx, us, msgText, priorContext, timings)
+		timings.RecordSince("reflex_pipeline.total", pipelineStarted, "")
 		if rp.Silent {
 			// Hard rule said "do not respond". Abort the whole turn — no
 			// cortex call, no message sent, no post-actions, no debug dump.
@@ -476,7 +491,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		engineRuleCount = rp.EngineRuleCount
 	} else if msgText != "" && us.Deps != nil && us.Deps.ContextInjector != nil {
 		// Fallback: legacy ContextInjector (no reflex).
+		contextStarted := time.Now()
 		injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText, priorContext)
+		timings.RecordSince("context_injector", contextStarted, "fallback")
 	}
 
 	// Surface the prepared context (AME memories + rule matches + AME
@@ -522,7 +539,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// wrong identity.
 	// [current_datetime] in the USER's timezone (server tz is only a fallback).
 	now := time.Now().In(g.deps.Config.Gateway.TimezoneFor(bs.WithSoulID(ctx, us.SoulID), g.tz))
+	promptStarted := time.Now()
 	soulPrompt, err := g.systemPromptForSoul(ctx, us.SoulID)
+	timings.RecordSince("gateway.system_prompt", promptStarted, "")
 	if err != nil {
 		g.logger.Error("cortex: cannot resolve system prompt, aborting turn",
 			"soul_id", us.SoulID.String(), "chat_id", us.ChatID, "error", err)
@@ -608,6 +627,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		AllowedTools:     g.allowedToolsForSoul(ctx, us.SoulID, turnRegistry),
 		ReplyToMessageID: replyToMessageID,
 		TGMessageID:      tgMessageID,
+		OnTiming:         timings.Add,
 	}
 
 	// Ephemeral notebook ask: a fast, private answer on the SELECTED text.
@@ -637,7 +657,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		// work because RunStream carries the assistant + tool_result turns in
 		// memory for ephemeral runs (still nothing persisted to the DB).
 	}
-
 
 	// Voice transport: use streaming LLM with inline sentence-level TTS.
 	// Each sentence is TTS'd and sent as an audio chunk as soon as the LLM produces it.
@@ -772,7 +791,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		}
 
 		voiceCb := &bs.StreamCallbacks{OnText: onText}
+		interactionStarted := time.Now()
 		reply, _, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, voiceCb, voiceCb, reflexFlush)
+		timings.RecordSince("interaction.total", interactionStarted, "transport=voice")
 		if err != nil {
 			if ctx.Err() != nil {
 				g.logger.Info("voice turn cancelled", "chat_id", us.ChatID)
@@ -850,7 +871,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		// and fall back to the "(no response)" stalled placeholder
 		// because the reply text never reaches a SendText call.
 		cortexCb := buildSinkCallbacks(ctx, sink)
+		interactionStarted := time.Now()
 		reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, cortexCb, cortexCb, nil)
+		timings.RecordSince("interaction.total", interactionStarted, "transport=text")
 		if err != nil {
 			if ctx.Err() != nil {
 				g.logger.Info("turn cancelled", "chat_id", us.ChatID)
@@ -977,7 +1000,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		OnText:    onText,
 		OnToolUse: func(_, name string, _ json.RawMessage) { onToolUse(name) },
 	}
+	interactionStarted := time.Now()
 	reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, tgCb, nil)
+	timings.RecordSince("interaction.total", interactionStarted, "transport=telegram")
 	if err != nil {
 		if ctx.Err() != nil {
 			g.logger.Info("turn cancelled", "chat_id", us.ChatID)

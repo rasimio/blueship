@@ -464,6 +464,17 @@ func (s *sseSink) SendContextInfo(ctx context.Context, info bs.ContextInfo) erro
 	return nil
 }
 
+// SendTiming implements bs.TimingSink: emit a completed per-turn latency
+// breakdown for debug/observability UIs.
+func (s *sseSink) SendTiming(ctx context.Context, report bs.TimingReport) error {
+	s.emit(map[string]any{
+		"type":     "timing",
+		"total_ms": report.TotalMs,
+		"spans":    report.Spans,
+	})
+	return nil
+}
+
 // SendUsage implements bs.UsageSink: emit a "usage" frame with the
 // cortex turn's token counts. The cabinet's window-size chip
 // (next to the Reset button) reads it to show "🪟 N tokens" — a

@@ -33,12 +33,15 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 
 	// 1. Append user message (unless the caller already persisted it).
 	if !cfg.SkipUserAppend {
-		if err := a.store.Append(ctx, cfg.SessionID, bs.Message{
+		started := time.Now()
+		err := a.store.Append(ctx, cfg.SessionID, bs.Message{
 			Role:             "user",
 			Content:          userMessage,
 			ReplyToMessageID: cfg.ReplyToMessageID,
 			TGMessageID:      cfg.TGMessageID,
-		}); err != nil {
+		})
+		emitTiming(cfg, "agent.append_user", started, "role="+cfg.Role)
+		if err != nil {
 			return nil, fmt.Errorf("append user message: %w", err)
 		}
 	}
@@ -80,6 +83,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 	compactSummary := cfg.CompactSummary
 
 	if a.compactor != nil {
+		started := time.Now()
 		preloadMsgs, loadErr := a.store.AllMessagesForAPI(ctx, cfg.SessionID)
 		if loadErr != nil {
 			a.logger.Warn("compaction preload failed", "error", loadErr)
@@ -104,6 +108,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 				}
 			}
 		}
+		emitTiming(cfg, "agent.compaction", started, "role="+cfg.Role)
 	}
 
 	// Accumulate text and tool traces across all turns.
@@ -118,7 +123,9 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		}
 
 		// 3. Load messages (always from DB — compaction already persisted)
+		loadStarted := time.Now()
 		messages, err := a.store.MessagesForAPI(ctx, cfg.SessionID, tokenBudget)
+		emitTiming(cfg, "agent.load_messages", loadStarted, fmt.Sprintf("role=%s turn=%d budget=%d", cfg.Role, turn+1, tokenBudget))
 		if err != nil {
 			return nil, fmt.Errorf("load messages: %w", err)
 		}
@@ -141,6 +148,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 
 		// 4. Call LLM
 		a.logger.Info("calling LLM", "model", cfg.Model, "tools", len(tools), "messages", len(messages))
+		llmStarted := time.Now()
 		resp, err := a.provider.Complete(ctx, bs.CompletionRequest{
 			Model:          cfg.Model,
 			MaxTokens:      cfg.MaxTokens,
@@ -155,6 +163,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		if err != nil {
 			return nil, fmt.Errorf("LLM API: %w", err)
 		}
+		emitTiming(cfg, "llm.complete", llmStarted, llmTimingDetail(cfg, turn+1, resp.StopReason, resp.Usage.InputTokens, resp.Usage.OutputTokens))
 
 		a.logger.Info("LLM response",
 			"stop_reason", resp.StopReason,
@@ -167,12 +176,14 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		// ctx so a long turn that just consumed the iteration budget can't lose
 		// this state write.
 		if !cfg.Ephemeral {
+			appendStarted := time.Now()
 			pctx, pcancel := persistCtx(ctx)
 			err = a.store.AppendWithTokens(pctx, cfg.SessionID, bs.Message{
 				Role:    "assistant",
 				Content: resp.Content,
 			}, resp.Usage.OutputTokens)
 			pcancel()
+			emitTiming(cfg, "agent.append_assistant", appendStarted, fmt.Sprintf("role=%s turn=%d", cfg.Role, turn+1))
 			if err != nil {
 				return nil, fmt.Errorf("append assistant message: %w", err)
 			}
@@ -212,7 +223,9 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 					"tool_use_id", block.ID,
 				)
 
+				toolStarted := time.Now()
 				result, isError := a.registry.Execute(ctx, block.Name, block.Input)
+				emitTiming(cfg, "tool.execute", toolStarted, toolTimingDetail(cfg, turn+1, block.Name, isError))
 				toolResults = append(toolResults, bs.ContentBlock{
 					Type:      "tool_result",
 					ToolUseID: block.ID,
@@ -245,12 +258,14 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			}
 
 			if !cfg.Ephemeral {
+				appendStarted := time.Now()
 				pctx, pcancel := persistCtx(ctx)
 				err = a.store.Append(pctx, cfg.SessionID, bs.Message{
 					Role:    "user",
 					Content: toolResults,
 				})
 				pcancel()
+				emitTiming(cfg, "agent.append_tool_results", appendStarted, fmt.Sprintf("role=%s turn=%d tools=%d", cfg.Role, turn+1, len(toolResults)))
 				if err != nil {
 					return nil, fmt.Errorf("append tool results: %w", err)
 				}

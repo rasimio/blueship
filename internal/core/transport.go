@@ -92,6 +92,26 @@ type ContextInfoSink interface {
 	SendContextInfo(ctx context.Context, info ContextInfo) error
 }
 
+// TimingSink is an optional sink capability for transports that surface
+// per-turn latency breakdowns. Gateway emits it after a turn completes so
+// debug UIs can show where time went without parsing logs.
+type TimingSink interface {
+	SendTiming(ctx context.Context, report TimingReport) error
+}
+
+// TimingReport is the latency breakdown for one inbound turn.
+type TimingReport struct {
+	TotalMs int          `json:"total_ms"`
+	Spans   []TimingSpan `json:"spans,omitempty"`
+}
+
+// TimingSpan is one measured component inside a turn.
+type TimingSpan struct {
+	Name       string `json:"name"`
+	DurationMs int    `json:"duration_ms"`
+	Detail     string `json:"detail,omitempty"`
+}
+
 // ContextInfo carries the structured view of what the gateway injected
 // into the LLM's context for one turn.
 type ContextInfo struct {
