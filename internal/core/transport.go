@@ -162,8 +162,6 @@ type MatchedRule struct {
 	Suppressed bool `json:"suppressed,omitempty"`
 	// SuppressedReason explains why a candidate was not injected.
 	SuppressedReason string `json:"suppressed_reason,omitempty"`
-	// ToolPolicy is any tool gating decision associated with the rule.
-	ToolPolicy string `json:"tool_policy,omitempty"`
 }
 
 // ThinkingSink is an optional sink capability for streaming extended-thinking

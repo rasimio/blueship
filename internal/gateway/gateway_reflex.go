@@ -23,8 +23,6 @@ type reflexPipelineResult struct {
 	SuppressedRules []bs.MatchedRule
 	Strategy        string
 	Silent          bool
-	ToolOverrideSet bool
-	ToolOverride    []string
 }
 
 // runReflexPipeline executes the System 1/2 pipeline:
@@ -90,14 +88,11 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		if hasRules {
 			guidance.WriteString("[/active rules]")
 		}
-		toolOverride, toolOverrideSet := toolOverrideFromRules(activeRules)
 		return reflexPipelineResult{
 			ReflexGuidance:  guidance.String(),
 			EngineRuleCount: engineRuleCount,
 			MatchedRules:    matchedRules,
 			SuppressedRules: suppressedRules,
-			ToolOverrideSet: toolOverrideSet,
-			ToolOverride:    toolOverride,
 		}
 	}
 
@@ -415,7 +410,6 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		}
 	}
 
-	toolOverride, toolOverrideSet := toolOverrideFromRules(activeEngineRules)
 	return reflexPipelineResult{
 		InjectedCtx:     formattedTraces,
 		ReflexGuidance:  guidance.String(),
@@ -426,8 +420,6 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		MatchedRules:    matchedRulesInfo,
 		SuppressedRules: suppressedRulesInfo,
 		Strategy:        rc.Strategy,
-		ToolOverrideSet: toolOverrideSet,
-		ToolOverride:    toolOverride,
 	}
 }
 

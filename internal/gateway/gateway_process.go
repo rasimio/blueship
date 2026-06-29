@@ -412,8 +412,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	var injectedCtx, reflexGuidance string
 	var postActions []bs.PostAction // executed after cortex response
 	var engineRuleCount int
-	var ruleToolOverride []string
-	var ruleToolOverrideSet bool
 
 	// Rule engine pass for agents that run WITHOUT a ReflexPreparer.
 	// Two responsibilities:
@@ -445,7 +443,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			}
 			activeRules = append(activeRules, r)
 		}
-		ruleToolOverride, ruleToolOverrideSet = toolOverrideFromRules(activeRules)
 		engineRuleCount = len(activeRules)
 		if engineRuleCount > 0 {
 			reflexGuidance = formatRulesAsGuidance(engineRules)
@@ -497,9 +494,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		postActions = rp.PostActions
 		preTraces = rp.PreTraces
 		engineRuleCount = rp.EngineRuleCount
-		if rp.ToolOverrideSet {
-			ruleToolOverride, ruleToolOverrideSet = rp.ToolOverride, true
-		}
 	} else if msgText != "" && us.Deps != nil && us.Deps.ContextInjector != nil {
 		// Fallback: legacy ContextInjector (no reflex).
 		contextStarted := time.Now()
@@ -640,9 +634,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		ReplyToMessageID: replyToMessageID,
 		TGMessageID:      tgMessageID,
 		OnTiming:         timings.Add,
-	}
-	if ruleToolOverrideSet {
-		runCfg.ToolOverride = ruleToolOverride
 	}
 
 	// Ephemeral notebook ask: a fast, private answer on the SELECTED text.

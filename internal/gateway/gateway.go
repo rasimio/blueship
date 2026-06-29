@@ -1040,7 +1040,6 @@ func matchedRuleFromActive(r bs.ActiveRule, source string, order int) bs.Matched
 		EligibilityScore: r.EligibilityScore,
 		Suppressed:       r.Suppressed,
 		SuppressedReason: r.SuppressedReason,
-		ToolPolicy:       r.ToolPolicy,
 	}
 }
 
@@ -1054,9 +1053,6 @@ func activeRuleMeta(r bs.ActiveRule) string {
 	}
 	if r.EligibilityScore > 0 {
 		parts = append(parts, fmt.Sprintf("score=%.2f", r.EligibilityScore))
-	}
-	if r.ToolPolicy != "" {
-		parts = append(parts, "tool_policy="+r.ToolPolicy)
 	}
 	return strings.Join(parts, "; ")
 }
@@ -1077,18 +1073,6 @@ func ruleMetaParts(matchType, scope, reason string) []string {
 		parts = append(parts, "reason="+quoteRuleMeta(reason))
 	}
 	return parts
-}
-
-func toolOverrideFromRules(rules []bs.ActiveRule) ([]string, bool) {
-	for _, r := range rules {
-		if r.Suppressed {
-			continue
-		}
-		if r.ToolPolicy == "no_tools" {
-			return []string{}, true
-		}
-	}
-	return nil, false
 }
 
 func quoteRuleMeta(s string) string {

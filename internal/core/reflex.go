@@ -79,7 +79,6 @@ type ActiveRule struct {
 	EligibilityScore float64      `json:"eligibility_score,omitempty"` // deterministic arbitration score
 	Suppressed       bool         `json:"suppressed,omitempty"`        // matched but intentionally not injected
 	SuppressedReason string       `json:"suppressed_reason,omitempty"`
-	ToolPolicy       string       `json:"tool_policy,omitempty"` // no_tools, default
 	PreActions       []ToolAction `json:"pre_actions,omitempty"` // tools to run BEFORE cortex
 	Tools            []string     `json:"tools,omitempty"`       // tools cortex can use
 	// Silent, when true, instructs the gateway to abort the current turn:
