@@ -25,3 +25,34 @@ func TestFormatRulesAsGuidanceIncludesMatchMetadata(t *testing.T) {
 		t.Fatalf("formatted rules missing tools line:\n%s", got)
 	}
 }
+
+func TestFormatRulesAsGuidanceSkipsSuppressedRules(t *testing.T) {
+	got := formatRulesAsGuidance([]bs.ActiveRule{
+		{
+			Trigger:          "suppressed trigger",
+			Action:           "suppressed action",
+			MatchType:        "legacy_keyword",
+			Scope:            "legacy_keyword",
+			Disposition:      "suppressed",
+			Suppressed:       true,
+			SuppressedReason: "lower priority duplicate",
+		},
+		{
+			Trigger:          "active trigger",
+			Action:           "active action",
+			MatchType:        "legacy_keyword",
+			Scope:            "legacy_keyword",
+			Disposition:      "primary",
+			Anchor:           "взлетай",
+			EligibilityScore: 0.96,
+			ToolPolicy:       "no_tools",
+		},
+	})
+
+	if strings.Contains(got, "suppressed trigger") || strings.Contains(got, "suppressed action") {
+		t.Fatalf("formatted rules included suppressed rule:\n%s", got)
+	}
+	if !strings.Contains(got, `RULE #1 (match=legacy_keyword; scope=legacy_keyword; disposition=primary; anchor="взлетай"; score=0.96; tool_policy=no_tools)`) {
+		t.Fatalf("formatted rules missing active arbitration metadata:\n%s", got)
+	}
+}

@@ -460,6 +460,9 @@ func (s *sseSink) SendContextInfo(ctx context.Context, info bs.ContextInfo) erro
 	if len(info.MatchedRules) > 0 {
 		payload["matched_rules"] = info.MatchedRules
 	}
+	if len(info.SuppressedRules) > 0 {
+		payload["suppressed_rules"] = info.SuppressedRules
+	}
 	s.emit(payload)
 	return nil
 }

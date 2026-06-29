@@ -412,6 +412,8 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	var injectedCtx, reflexGuidance string
 	var postActions []bs.PostAction // executed after cortex response
 	var engineRuleCount int
+	var ruleToolOverride []string
+	var ruleToolOverrideSet bool
 
 	// Rule engine pass for agents that run WITHOUT a ReflexPreparer.
 	// Two responsibilities:
@@ -428,7 +430,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			Message: msgText,
 		})
 		timings.RecordSince("rule_engine", ruleStarted, "no_reflex")
+		var activeRules []bs.ActiveRule
 		for _, r := range engineRules {
+			if r.Suppressed {
+				continue
+			}
 			if r.Silent {
 				g.logger.Info("rule engine: silent rule matched (no-reflex path), aborting turn",
 					"rule_id", r.ID,
@@ -437,12 +443,14 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 				)
 				return
 			}
+			activeRules = append(activeRules, r)
 		}
-		engineRuleCount = len(engineRules)
+		ruleToolOverride, ruleToolOverrideSet = toolOverrideFromRules(activeRules)
+		engineRuleCount = len(activeRules)
 		if engineRuleCount > 0 {
 			reflexGuidance = formatRulesAsGuidance(engineRules)
 			g.logger.Info("rule engine: non-silent rules matched (no-reflex path)",
-				"count", len(engineRules),
+				"count", len(activeRules),
 				"chat_id", us.ChatID,
 			)
 		}
@@ -489,6 +497,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		postActions = rp.PostActions
 		preTraces = rp.PreTraces
 		engineRuleCount = rp.EngineRuleCount
+		if rp.ToolOverrideSet {
+			ruleToolOverride, ruleToolOverrideSet = rp.ToolOverride, true
+		}
 	} else if msgText != "" && us.Deps != nil && us.Deps.ContextInjector != nil {
 		// Fallback: legacy ContextInjector (no reflex).
 		contextStarted := time.Now()
@@ -506,9 +517,10 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			Memories: rp.MemoriesCount,
 			// MatchedRules already covers engine + reflex matches (the
 			// dedup happens inside runReflexPipeline via seenRuleIDs).
-			Rules:        len(rp.MatchedRules),
-			MatchedRules: rp.MatchedRules,
-			Strategy:     rp.Strategy,
+			Rules:           len(rp.MatchedRules),
+			MatchedRules:    rp.MatchedRules,
+			SuppressedRules: rp.SuppressedRules,
+			Strategy:        rp.Strategy,
 		})
 	}
 
@@ -628,6 +640,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		ReplyToMessageID: replyToMessageID,
 		TGMessageID:      tgMessageID,
 		OnTiming:         timings.Add,
+	}
+	if ruleToolOverrideSet {
+		runCfg.ToolOverride = ruleToolOverride
 	}
 
 	// Ephemeral notebook ask: a fast, private answer on the SELECTED text.

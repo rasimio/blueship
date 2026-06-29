@@ -118,12 +118,15 @@ type ContextInfo struct {
 	// Memories is the number of AME traces injected into the cortex
 	// system prompt (after diversity filter).
 	Memories int `json:"memories"`
-	// Rules is the total number of rules that fired this turn (rule
-	// engine structured matches + reflex semantic matches).
+	// Rules is the number of active rules injected this turn after
+	// arbitration. Suppressed candidates are reported separately.
 	Rules int `json:"rules"`
-	// MatchedRules is the per-row detail for Rules. May be truncated for
-	// transport size; the count is always Rules.
+	// MatchedRules is the per-row detail for active injected rules. May be
+	// truncated for transport size; the count is always Rules.
 	MatchedRules []MatchedRule `json:"matched_rules,omitempty"`
+	// SuppressedRules are candidate rules found by the rule engine but not
+	// injected into the cortex prompt after deterministic arbitration.
+	SuppressedRules []MatchedRule `json:"suppressed_rules,omitempty"`
 	// Strategy is the AME-suggested emotional strategy for this turn
 	// (warm / sharp / calm / etc).
 	Strategy string `json:"strategy,omitempty"`
@@ -149,6 +152,18 @@ type MatchedRule struct {
 	Reason string `json:"reason,omitempty"`
 	// Rank is the priority/order in which this rule was injected this turn.
 	Rank int `json:"rank,omitempty"`
+	// Disposition is the arbitration result: primary, guardrail, suppressed.
+	Disposition string `json:"disposition,omitempty"`
+	// Anchor is the normalized keyword/topic that caused the match.
+	Anchor string `json:"anchor,omitempty"`
+	// EligibilityScore is the deterministic score assigned by arbitration.
+	EligibilityScore float64 `json:"eligibility_score,omitempty"`
+	// Suppressed marks a candidate that was found but not injected.
+	Suppressed bool `json:"suppressed,omitempty"`
+	// SuppressedReason explains why a candidate was not injected.
+	SuppressedReason string `json:"suppressed_reason,omitempty"`
+	// ToolPolicy is any tool gating decision associated with the rule.
+	ToolPolicy string `json:"tool_policy,omitempty"`
 }
 
 // ThinkingSink is an optional sink capability for streaming extended-thinking

@@ -67,15 +67,21 @@ type RuleContext struct {
 
 // ActiveRule is a rule matched by the rule engine.
 type ActiveRule struct {
-	ID         string       `json:"id"`
-	Trigger    string       `json:"trigger"`
-	Action     string       `json:"action"`
-	MatchType  string       `json:"match_type,omitempty"`  // structured, legacy_keyword, semantic
-	Scope      string       `json:"scope,omitempty"`       // always, keyword, intent, legacy_keyword, etc.
-	Reason     string       `json:"reason,omitempty"`      // human-readable match explanation for debug UIs
-	Rank       int          `json:"rank,omitempty"`        // priority order within the current turn
-	PreActions []ToolAction `json:"pre_actions,omitempty"` // tools to run BEFORE cortex
-	Tools      []string     `json:"tools,omitempty"`       // tools cortex can use
+	ID               string       `json:"id"`
+	Trigger          string       `json:"trigger"`
+	Action           string       `json:"action"`
+	MatchType        string       `json:"match_type,omitempty"`        // structured, legacy_keyword, semantic
+	Scope            string       `json:"scope,omitempty"`             // always, keyword, intent, legacy_keyword, etc.
+	Reason           string       `json:"reason,omitempty"`            // human-readable match explanation for debug UIs
+	Rank             int          `json:"rank,omitempty"`              // priority order within the current turn
+	Disposition      string       `json:"disposition,omitempty"`       // primary, guardrail, suppressed
+	Anchor           string       `json:"anchor,omitempty"`            // normalized keyword/topic that caused the match
+	EligibilityScore float64      `json:"eligibility_score,omitempty"` // deterministic arbitration score
+	Suppressed       bool         `json:"suppressed,omitempty"`        // matched but intentionally not injected
+	SuppressedReason string       `json:"suppressed_reason,omitempty"`
+	ToolPolicy       string       `json:"tool_policy,omitempty"` // no_tools, default
+	PreActions       []ToolAction `json:"pre_actions,omitempty"` // tools to run BEFORE cortex
+	Tools            []string     `json:"tools,omitempty"`       // tools cortex can use
 	// Silent, when true, instructs the gateway to abort the current turn:
 	// no cortex call, no message sent to the transport. Used for hard
 	// "do not respond" rules that cannot be enforced via prompt injection

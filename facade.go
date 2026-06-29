@@ -27,6 +27,9 @@ type (
 	BotConfig       = core.BotConfig
 	WebSocketConfig = core.WebSocketConfig
 	HTTPChatConfig  = core.HTTPChatConfig
+	ContextInfoSink = core.ContextInfoSink
+	ContextInfo     = core.ContextInfo
+	MatchedRule     = core.MatchedRule
 	TimingSink      = core.TimingSink
 	TimingReport    = core.TimingReport
 	TimingSpan      = core.TimingSpan

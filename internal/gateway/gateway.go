@@ -955,16 +955,31 @@ func formatRulesAsGuidance(rules []bs.ActiveRule) string {
 	if len(rules) == 0 {
 		return ""
 	}
+	hasActive := false
+	for _, r := range rules {
+		if !r.Suppressed {
+			hasActive = true
+			break
+		}
+	}
+	if !hasActive {
+		return ""
+	}
 	var b strings.Builder
 	b.WriteString("### Active rules\n")
-	for i, r := range rules {
-		appendActiveRuleGuidance(&b, i+1, r)
+	order := 0
+	for _, r := range rules {
+		if r.Suppressed {
+			continue
+		}
+		order++
+		appendActiveRuleGuidance(&b, order, r)
 	}
 	return b.String()
 }
 
 func appendActiveRuleGuidance(b *strings.Builder, order int, r bs.ActiveRule) {
-	appendRuleHeader(b, order, r.MatchType, r.Scope, r.Reason)
+	appendActiveRuleHeader(b, order, r)
 	if r.Trigger != "" {
 		fmt.Fprintf(b, "WHEN: %s\n", r.Trigger)
 	}
@@ -975,6 +990,15 @@ func appendActiveRuleGuidance(b *strings.Builder, order int, r bs.ActiveRule) {
 		fmt.Fprintf(b, "TOOLS: %s\n", strings.Join(r.Tools, ", "))
 	}
 	b.WriteString("\n")
+}
+
+func appendActiveRuleHeader(b *strings.Builder, order int, r bs.ActiveRule) {
+	meta := activeRuleMeta(r)
+	if meta != "" {
+		fmt.Fprintf(b, "RULE #%d (%s)\n", order, meta)
+	} else {
+		fmt.Fprintf(b, "RULE #%d\n", order)
+	}
 }
 
 func appendRuleGuidance(b *strings.Builder, order int, trigger, action, matchType, scope, reason string) {
@@ -1003,18 +1027,45 @@ func matchedRuleFromActive(r bs.ActiveRule, source string, order int) bs.Matched
 		rank = order
 	}
 	return bs.MatchedRule{
-		ID:        r.ID,
-		Trigger:   r.Trigger,
-		Action:    r.Action,
-		Source:    source,
-		MatchType: r.MatchType,
-		Scope:     r.Scope,
-		Reason:    r.Reason,
-		Rank:      rank,
+		ID:               r.ID,
+		Trigger:          r.Trigger,
+		Action:           r.Action,
+		Source:           source,
+		MatchType:        r.MatchType,
+		Scope:            r.Scope,
+		Reason:           r.Reason,
+		Rank:             rank,
+		Disposition:      r.Disposition,
+		Anchor:           r.Anchor,
+		EligibilityScore: r.EligibilityScore,
+		Suppressed:       r.Suppressed,
+		SuppressedReason: r.SuppressedReason,
+		ToolPolicy:       r.ToolPolicy,
 	}
 }
 
+func activeRuleMeta(r bs.ActiveRule) string {
+	parts := ruleMetaParts(r.MatchType, r.Scope, r.Reason)
+	if r.Disposition != "" {
+		parts = append(parts, "disposition="+r.Disposition)
+	}
+	if r.Anchor != "" {
+		parts = append(parts, "anchor="+quoteRuleMeta(r.Anchor))
+	}
+	if r.EligibilityScore > 0 {
+		parts = append(parts, fmt.Sprintf("score=%.2f", r.EligibilityScore))
+	}
+	if r.ToolPolicy != "" {
+		parts = append(parts, "tool_policy="+r.ToolPolicy)
+	}
+	return strings.Join(parts, "; ")
+}
+
 func ruleMeta(matchType, scope, reason string) string {
+	return strings.Join(ruleMetaParts(matchType, scope, reason), "; ")
+}
+
+func ruleMetaParts(matchType, scope, reason string) []string {
 	parts := make([]string, 0, 3)
 	if matchType != "" {
 		parts = append(parts, "match="+matchType)
@@ -1025,7 +1076,19 @@ func ruleMeta(matchType, scope, reason string) string {
 	if reason != "" {
 		parts = append(parts, "reason="+quoteRuleMeta(reason))
 	}
-	return strings.Join(parts, "; ")
+	return parts
+}
+
+func toolOverrideFromRules(rules []bs.ActiveRule) ([]string, bool) {
+	for _, r := range rules {
+		if r.Suppressed {
+			continue
+		}
+		if r.ToolPolicy == "no_tools" {
+			return []string{}, true
+		}
+	}
+	return nil, false
 }
 
 func quoteRuleMeta(s string) string {

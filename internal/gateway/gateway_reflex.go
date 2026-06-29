@@ -20,8 +20,11 @@ type reflexPipelineResult struct {
 	EngineRuleCount int
 	MemoriesCount   int
 	MatchedRules    []bs.MatchedRule
+	SuppressedRules []bs.MatchedRule
 	Strategy        string
 	Silent          bool
+	ToolOverrideSet bool
+	ToolOverride    []string
 }
 
 // runReflexPipeline executes the System 1/2 pipeline:
@@ -45,6 +48,8 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		hasRules := false
 		engineRuleCount := 0
 		var matchedRules []bs.MatchedRule
+		var suppressedRules []bs.MatchedRule
+		var activeRules []bs.ActiveRule
 		if us.Deps.RuleEngine != nil {
 			ruleStarted := time.Now()
 			engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
@@ -54,6 +59,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 			})
 			timings.RecordSince("rule_engine", ruleStarted, "interaction_tier")
 			for _, r := range engineRules {
+				if r.Suppressed {
+					continue
+				}
 				if r.Silent {
 					g.logger.Info("rule engine: silent rule matched, aborting turn",
 						"rule_id", r.ID, "trigger", r.Trigger, "chat_id", us.ChatID)
@@ -61,6 +69,11 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 				}
 			}
 			for _, r := range engineRules {
+				if r.Suppressed {
+					suppressedRules = append(suppressedRules, matchedRuleFromActive(r, "engine", 0))
+					continue
+				}
+				activeRules = append(activeRules, r)
 				if !hasRules {
 					guidance.WriteString("[active rules]\n")
 					hasRules = true
@@ -69,7 +82,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 				appendActiveRuleGuidance(&guidance, order, r)
 				matchedRules = append(matchedRules, matchedRuleFromActive(r, "engine", order))
 			}
-			engineRuleCount = len(engineRules)
+			engineRuleCount = len(activeRules)
 			if engineRuleCount > 0 {
 				g.logger.Info("rule engine matched (interaction tier)", "count", engineRuleCount)
 			}
@@ -77,10 +90,14 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		if hasRules {
 			guidance.WriteString("[/active rules]")
 		}
+		toolOverride, toolOverrideSet := toolOverrideFromRules(activeRules)
 		return reflexPipelineResult{
 			ReflexGuidance:  guidance.String(),
 			EngineRuleCount: engineRuleCount,
 			MatchedRules:    matchedRules,
+			SuppressedRules: suppressedRules,
+			ToolOverrideSet: toolOverrideSet,
+			ToolOverride:    toolOverride,
 		}
 	}
 
@@ -236,6 +253,8 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	var hasRules bool
 	seenRuleIDs := make(map[string]bool)
 	var matchedRulesInfo []bs.MatchedRule
+	var suppressedRulesInfo []bs.MatchedRule
+	var activeEngineRules []bs.ActiveRule
 
 	// 0. Disambiguation: reflex detected multiple plausible tools.
 	if reflexResult.Intent == "clarification_needed" && len(reflexResult.ClarificationOptions) > 0 {
@@ -303,6 +322,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		// way to enforce "do not respond" reliably; soft prompt instructions
 		// in the rule's Action text are routinely ignored by the cortex LLM.
 		for _, r := range engineRules {
+			if r.Suppressed {
+				continue
+			}
 			if r.Silent {
 				g.logger.Info("rule engine: silent rule matched, aborting turn",
 					"rule_id", r.ID,
@@ -314,10 +336,15 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		}
 
 		for _, r := range engineRules {
+			if r.Suppressed {
+				suppressedRulesInfo = append(suppressedRulesInfo, matchedRuleFromActive(r, "engine", 0))
+				continue
+			}
 			if seenRuleIDs[r.ID] {
 				continue // already added by reflex
 			}
 			seenRuleIDs[r.ID] = true
+			activeEngineRules = append(activeEngineRules, r)
 			if !hasRules {
 				guidance.WriteString("[active rules]\n")
 				hasRules = true
@@ -350,7 +377,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 				}
 			}
 		}
-		engineRuleCount = len(engineRules)
+		engineRuleCount = len(activeEngineRules)
 		if engineRuleCount > 0 {
 			g.logger.Info("rule engine matched", "count", engineRuleCount)
 		}
@@ -388,6 +415,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		}
 	}
 
+	toolOverride, toolOverrideSet := toolOverrideFromRules(activeEngineRules)
 	return reflexPipelineResult{
 		InjectedCtx:     formattedTraces,
 		ReflexGuidance:  guidance.String(),
@@ -396,7 +424,10 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		EngineRuleCount: engineRuleCount,
 		MemoriesCount:   rc.MemoriesCount,
 		MatchedRules:    matchedRulesInfo,
+		SuppressedRules: suppressedRulesInfo,
 		Strategy:        rc.Strategy,
+		ToolOverrideSet: toolOverrideSet,
+		ToolOverride:    toolOverride,
 	}
 }
 
