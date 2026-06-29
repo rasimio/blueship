@@ -63,10 +63,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 					guidance.WriteString("[active rules]\n")
 					hasRules = true
 				}
-				fmt.Fprintf(&guidance, "WHEN: %s\nDO: %s\n\n", r.Trigger, r.Action)
-				matchedRules = append(matchedRules, bs.MatchedRule{
-					ID: r.ID, Trigger: r.Trigger, Action: r.Action, Source: "engine",
-				})
+				order := len(matchedRules) + 1
+				appendActiveRuleGuidance(&guidance, order, r)
+				matchedRules = append(matchedRules, matchedRuleFromActive(r, "engine", order))
 			}
 			engineRuleCount = len(engineRules)
 			if engineRuleCount > 0 {
@@ -263,9 +262,16 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 					guidance.WriteString("[active rules]\n")
 					hasRules = true
 				}
-				fmt.Fprintf(&guidance, "WHEN: %s\nDO: %s\n\n", r.Trigger, r.Action)
+				order := len(matchedRulesInfo) + 1
+				appendRuleGuidance(&guidance, order, r.Trigger, r.Action, "semantic", "", "reflex matched candidate rule")
 				matchedRulesInfo = append(matchedRulesInfo, bs.MatchedRule{
-					ID: r.ID, Trigger: r.Trigger, Action: r.Action, Source: "reflex",
+					ID:        r.ID,
+					Trigger:   r.Trigger,
+					Action:    r.Action,
+					Source:    "reflex",
+					MatchType: "semantic",
+					Reason:    "reflex matched candidate rule",
+					Rank:      order,
 				})
 			}
 		}
@@ -306,10 +312,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 				guidance.WriteString("[active rules]\n")
 				hasRules = true
 			}
-			fmt.Fprintf(&guidance, "WHEN: %s\nDO: %s\n\n", r.Trigger, r.Action)
-			matchedRulesInfo = append(matchedRulesInfo, bs.MatchedRule{
-				ID: r.ID, Trigger: r.Trigger, Action: r.Action, Source: "engine",
-			})
+			order := len(matchedRulesInfo) + 1
+			appendActiveRuleGuidance(&guidance, order, r)
+			matchedRulesInfo = append(matchedRulesInfo, matchedRuleFromActive(r, "engine", order))
 
 			// Execute rule-prescribed pre_actions.
 			for _, pa := range r.PreActions {

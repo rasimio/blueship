@@ -118,6 +118,17 @@ type MatchedRule struct {
 	//   "engine" — structured rule engine (scope/keyword/state)
 	//   "reflex" — semantic match by the reflex classifier
 	Source string `json:"source,omitempty"`
+	// MatchType explains how the subsystem matched it:
+	//   "structured" — metadata.conditions evaluation
+	//   "legacy_keyword" — keyword lookup over legacy trigger/action text
+	//   "semantic" — reflex chose a candidate rule semantically
+	MatchType string `json:"match_type,omitempty"`
+	// Scope is the rule's structured condition scope when known.
+	Scope string `json:"scope,omitempty"`
+	// Reason is a short human-readable explanation, intended for debug UI.
+	Reason string `json:"reason,omitempty"`
+	// Rank is the priority/order in which this rule was injected this turn.
+	Rank int `json:"rank,omitempty"`
 }
 
 // ThinkingSink is an optional sink capability for streaming extended-thinking

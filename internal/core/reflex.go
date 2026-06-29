@@ -70,6 +70,10 @@ type ActiveRule struct {
 	ID         string       `json:"id"`
 	Trigger    string       `json:"trigger"`
 	Action     string       `json:"action"`
+	MatchType  string       `json:"match_type,omitempty"`  // structured, legacy_keyword, semantic
+	Scope      string       `json:"scope,omitempty"`       // always, keyword, intent, legacy_keyword, etc.
+	Reason     string       `json:"reason,omitempty"`      // human-readable match explanation for debug UIs
+	Rank       int          `json:"rank,omitempty"`        // priority order within the current turn
 	PreActions []ToolAction `json:"pre_actions,omitempty"` // tools to run BEFORE cortex
 	Tools      []string     `json:"tools,omitempty"`       // tools cortex can use
 	// Silent, when true, instructs the gateway to abort the current turn:

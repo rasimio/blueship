@@ -957,19 +957,79 @@ func formatRulesAsGuidance(rules []bs.ActiveRule) string {
 	}
 	var b strings.Builder
 	b.WriteString("### Active rules\n")
-	for _, r := range rules {
-		if r.Trigger != "" {
-			fmt.Fprintf(&b, "WHEN: %s\n", r.Trigger)
-		}
-		if r.Action != "" {
-			fmt.Fprintf(&b, "DO: %s\n", r.Action)
-		}
-		if len(r.Tools) > 0 {
-			fmt.Fprintf(&b, "TOOLS: %s\n", strings.Join(r.Tools, ", "))
-		}
-		b.WriteString("\n")
+	for i, r := range rules {
+		appendActiveRuleGuidance(&b, i+1, r)
 	}
 	return b.String()
+}
+
+func appendActiveRuleGuidance(b *strings.Builder, order int, r bs.ActiveRule) {
+	appendRuleHeader(b, order, r.MatchType, r.Scope, r.Reason)
+	if r.Trigger != "" {
+		fmt.Fprintf(b, "WHEN: %s\n", r.Trigger)
+	}
+	if r.Action != "" {
+		fmt.Fprintf(b, "DO: %s\n", r.Action)
+	}
+	if len(r.Tools) > 0 {
+		fmt.Fprintf(b, "TOOLS: %s\n", strings.Join(r.Tools, ", "))
+	}
+	b.WriteString("\n")
+}
+
+func appendRuleGuidance(b *strings.Builder, order int, trigger, action, matchType, scope, reason string) {
+	appendRuleHeader(b, order, matchType, scope, reason)
+	if trigger != "" {
+		fmt.Fprintf(b, "WHEN: %s\n", trigger)
+	}
+	if action != "" {
+		fmt.Fprintf(b, "DO: %s\n", action)
+	}
+	b.WriteString("\n")
+}
+
+func appendRuleHeader(b *strings.Builder, order int, matchType, scope, reason string) {
+	meta := ruleMeta(matchType, scope, reason)
+	if meta != "" {
+		fmt.Fprintf(b, "RULE #%d (%s)\n", order, meta)
+	} else {
+		fmt.Fprintf(b, "RULE #%d\n", order)
+	}
+}
+
+func matchedRuleFromActive(r bs.ActiveRule, source string, order int) bs.MatchedRule {
+	rank := r.Rank
+	if rank == 0 {
+		rank = order
+	}
+	return bs.MatchedRule{
+		ID:        r.ID,
+		Trigger:   r.Trigger,
+		Action:    r.Action,
+		Source:    source,
+		MatchType: r.MatchType,
+		Scope:     r.Scope,
+		Reason:    r.Reason,
+		Rank:      rank,
+	}
+}
+
+func ruleMeta(matchType, scope, reason string) string {
+	parts := make([]string, 0, 3)
+	if matchType != "" {
+		parts = append(parts, "match="+matchType)
+	}
+	if scope != "" {
+		parts = append(parts, "scope="+scope)
+	}
+	if reason != "" {
+		parts = append(parts, "reason="+quoteRuleMeta(reason))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func quoteRuleMeta(s string) string {
+	return `"` + strings.ReplaceAll(s, `"`, `'`) + `"`
 }
 
 // sendDebugError sends the actual error via sink when debug mode is on.
