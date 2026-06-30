@@ -47,17 +47,20 @@ type (
 
 // --- S2 cortex: the agent turn + tools + agent tasks ---
 type (
-	Message         = core.Message
-	ContentBlock    = core.ContentBlock
-	ToolDefinition  = core.ToolDefinition
-	ToolHandler     = core.ToolHandler
-	ToolRegistry    = core.ToolRegistry
-	Usage           = core.Usage
-	AgentHandler    = core.AgentHandler
-	AgentTask       = core.AgentTask
-	AgentDeps       = core.AgentDeps
-	IterationResult = core.IterationResult
-	SkillMeta       = core.SkillMeta
+	Message              = core.Message
+	ContentBlock         = core.ContentBlock
+	ToolDefinition       = core.ToolDefinition
+	ToolHandler          = core.ToolHandler
+	ToolRegistry         = core.ToolRegistry
+	ToolSelector         = core.ToolSelector
+	ToolSelection        = core.ToolSelection
+	ToolSelectionRequest = core.ToolSelectionRequest
+	Usage                = core.Usage
+	AgentHandler         = core.AgentHandler
+	AgentTask            = core.AgentTask
+	AgentDeps            = core.AgentDeps
+	IterationResult      = core.IterationResult
+	SkillMeta            = core.SkillMeta
 )
 
 // --- Providers: LLM + capability ports ---

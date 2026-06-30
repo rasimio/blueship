@@ -41,32 +41,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		}
 	}
 
-	var tools []bs.ToolDefinition
-	if cfg.ToolOverride != nil {
-		tools = a.registry.DefinitionsForNames(cfg.ToolOverride)
-	} else if cfg.Role != "" && a.roleTools != nil {
-		if names := a.roleTools.Get(cfg.Role); names != nil {
-			tools = a.registry.DefinitionsForNames(names)
-		} else {
-			tools = a.registry.Definitions()
-		}
-	} else {
-		tools = a.registry.Definitions()
-	}
-	// Apply the per-soul allowlist (Vaelum cabinet tool config), if set.
-	if cfg.AllowedTools != nil {
-		allow := make(map[string]bool, len(cfg.AllowedTools))
-		for _, n := range cfg.AllowedTools {
-			allow[n] = true
-		}
-		kept := make([]bs.ToolDefinition, 0, len(tools))
-		for _, t := range tools {
-			if allow[t.Name] {
-				kept = append(kept, t)
-			}
-		}
-		tools = kept
-	}
+	tools := a.selectTools(cfg)
 	budgetDecision := a.effectiveMessageBudget(cfg, cfg.SystemPrompt, tools)
 	tokenBudget := budgetDecision.Budget
 	compactSummary := cfg.CompactSummary
@@ -121,6 +96,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			"model", cfg.Model,
 			"role", cfg.Role,
 			"tools", len(turnTools),
+			"tool_selection_source", cfg.ToolSelectionSource,
 			"messages", len(messages),
 			"turn", turn+1,
 			"force_final", forceFinal,

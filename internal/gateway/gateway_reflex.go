@@ -17,6 +17,7 @@ type reflexPipelineResult struct {
 	ReflexGuidance  string
 	PostActions     []bs.PostAction
 	PreTraces       []agent.ToolTrace
+	CortexTools     []string
 	EngineRuleCount int
 	MemoriesCount   int
 	MatchedRules    []bs.MatchedRule
@@ -48,6 +49,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		var matchedRules []bs.MatchedRule
 		var suppressedRules []bs.MatchedRule
 		var activeRules []bs.ActiveRule
+		var cortexTools []string
 		if us.Deps.RuleEngine != nil {
 			ruleStarted := time.Now()
 			engineRules := us.Deps.RuleEngine(ctx, bs.RuleContext{
@@ -72,6 +74,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 					continue
 				}
 				activeRules = append(activeRules, r)
+				cortexTools = append(cortexTools, r.Tools...)
 				if !hasRules {
 					guidance.WriteString("[active rules]\n")
 					hasRules = true
@@ -90,6 +93,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		}
 		return reflexPipelineResult{
 			ReflexGuidance:  guidance.String(),
+			CortexTools:     dedupeStrings(cortexTools),
 			EngineRuleCount: engineRuleCount,
 			MatchedRules:    matchedRules,
 			SuppressedRules: suppressedRules,
@@ -204,6 +208,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		reflexResult.MatchedRules = nil
 		reflexResult.PreActions = nil
 		reflexResult.PostActions = nil
+		reflexResult.Tools = nil
 	}
 	formattedTraces := rc.FormattedTraces
 	if lowConfidence {
@@ -250,6 +255,8 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	var matchedRulesInfo []bs.MatchedRule
 	var suppressedRulesInfo []bs.MatchedRule
 	var activeEngineRules []bs.ActiveRule
+	var cortexTools []string
+	cortexTools = append(cortexTools, reflexResult.Tools...)
 
 	// 0. Disambiguation: reflex detected multiple plausible tools.
 	if reflexResult.Intent == "clarification_needed" && len(reflexResult.ClarificationOptions) > 0 {
@@ -340,6 +347,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 			}
 			seenRuleIDs[r.ID] = true
 			activeEngineRules = append(activeEngineRules, r)
+			cortexTools = append(cortexTools, r.Tools...)
 			if !hasRules {
 				guidance.WriteString("[active rules]\n")
 				hasRules = true
@@ -415,6 +423,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		ReflexGuidance:  guidance.String(),
 		PostActions:     reflexResult.PostActions,
 		PreTraces:       preTraces,
+		CortexTools:     dedupeStrings(cortexTools),
 		EngineRuleCount: engineRuleCount,
 		MemoriesCount:   rc.MemoriesCount,
 		MatchedRules:    matchedRulesInfo,
@@ -534,6 +543,8 @@ func (g *Gateway) runInteraction(
 	reflexCfg.MaxTurns = 1
 	reflexCfg.Ephemeral = true
 	reflexCfg.SkipUserAppend = true
+	reflexCfg.ToolOverride = nil
+	reflexCfg.ToolSelectionSource = ""
 	reflexCfg.MaxTokens = 0
 	reflexCfg.Temperature = 0
 	// Tight history window for the fast tier — routing/answer decisions need

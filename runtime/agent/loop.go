@@ -56,6 +56,9 @@ type RunConfig struct {
 	// ToolOverride overrides role-based tool selection with an explicit list.
 	// nil = use role default; empty slice = no tools.
 	ToolOverride []string
+	// ToolSelectionSource is diagnostic text describing why ToolOverride was
+	// chosen. It is logged only; empty means role/default selection.
+	ToolSelectionSource string
 	// AllowedTools is a hard per-soul allowlist applied AFTER role/override
 	// selection — the Vaelum cabinet's per-soul tool config. nil = no
 	// filtering. A tool absent from this list is dropped even if a role or
@@ -163,6 +166,35 @@ func (a *Loop) effectiveMessageBudget(cfg RunConfig, systemPrompt string, tools 
 		SystemPrompt:   systemPrompt,
 		Tools:          tools,
 	})
+}
+
+func (a *Loop) selectTools(cfg RunConfig) []bs.ToolDefinition {
+	var tools []bs.ToolDefinition
+	if cfg.ToolOverride != nil {
+		tools = a.registry.DefinitionsForNames(cfg.ToolOverride)
+	} else if cfg.Role != "" && a.roleTools != nil {
+		if names := a.roleTools.Get(cfg.Role); names != nil {
+			tools = a.registry.DefinitionsForNames(names)
+		} else {
+			tools = a.registry.Definitions()
+		}
+	} else {
+		tools = a.registry.Definitions()
+	}
+	if cfg.AllowedTools == nil {
+		return tools
+	}
+	allow := make(map[string]bool, len(cfg.AllowedTools))
+	for _, n := range cfg.AllowedTools {
+		allow[n] = true
+	}
+	kept := make([]bs.ToolDefinition, 0, len(tools))
+	for _, t := range tools {
+		if allow[t.Name] {
+			kept = append(kept, t)
+		}
+	}
+	return kept
 }
 
 func effectiveSystemPrompt(systemPrompt, compactSummary, turnContext string) string {

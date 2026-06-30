@@ -56,6 +56,12 @@ type Config struct {
 	// back to "no allowlist" — every registered tool is available.
 	RoleTools map[string][]string
 
+	// ToolSelector optionally narrows a role's tool allowlist per turn. It is
+	// a host-owned policy hook: BlueShip supplies generic turn facts, the host
+	// supplies domain-specific packs and keywords. Nil preserves the role
+	// default exactly.
+	ToolSelector ToolSelector `yaml:"-" json:"-"`
+
 	// ToolMeta carries per-tool cabinet metadata (display category + the
 	// `core` flag marking internal machinery users may not disable).
 	// Supplied by the host; nil disables tool-catalog publishing and

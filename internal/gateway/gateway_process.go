@@ -412,6 +412,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	var injectedCtx, reflexGuidance string
 	var postActions []bs.PostAction // executed after cortex response
 	var engineRuleCount int
+	var forcedCortexTools []string
 
 	// Rule engine pass for agents that run WITHOUT a ReflexPreparer.
 	// Two responsibilities:
@@ -442,6 +443,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 				return
 			}
 			activeRules = append(activeRules, r)
+			forcedCortexTools = append(forcedCortexTools, r.Tools...)
 		}
 		engineRuleCount = len(activeRules)
 		if engineRuleCount > 0 {
@@ -460,6 +462,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	if len(us.PendingDisambiguation) > 0 && msgText != "" {
 		if chosen := resolveDisambiguation(msgText, us.PendingDisambiguation); chosen != nil {
 			reflexGuidance = fmt.Sprintf("[DISAMBIGUATION RESOLVED]\nThe user chose: %s\nCall %s.\n", chosen.Label, chosen.Tool)
+			forcedCortexTools = append(forcedCortexTools, chosen.Tool)
 			us.PendingDisambiguation = nil
 			g.logger.Info("disambiguation: resolved", "tool", chosen.Tool, "label", chosen.Label)
 			// Still run context injection for AME traces.
@@ -494,6 +497,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		postActions = rp.PostActions
 		preTraces = rp.PreTraces
 		engineRuleCount = rp.EngineRuleCount
+		forcedCortexTools = append(forcedCortexTools, rp.CortexTools...)
 	} else if msgText != "" && us.Deps != nil && us.Deps.ContextInjector != nil {
 		// Fallback: legacy ContextInjector (no reflex).
 		contextStarted := time.Now()
@@ -637,6 +641,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		ReplyToMessageID:    replyToMessageID,
 		TGMessageID:         tgMessageID,
 		OnTiming:            timings.Add,
+	}
+	if !ephemeral {
+		g.applyToolSelector(ctx, turnRegistry, &runCfg, msgText, forcedCortexTools, false)
 	}
 
 	// Ephemeral notebook ask: a fast, private answer on the SELECTED text.

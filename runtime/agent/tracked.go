@@ -46,34 +46,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		}
 	}
 
-	// Select tools: ToolOverride > Role-based > all.
-	var tools []bs.ToolDefinition
-	if cfg.ToolOverride != nil {
-		// Reflex explicitly selected tools (empty slice = no tools).
-		tools = a.registry.DefinitionsForNames(cfg.ToolOverride)
-	} else if cfg.Role != "" && a.roleTools != nil {
-		if names := a.roleTools.Get(cfg.Role); names != nil {
-			tools = a.registry.DefinitionsForNames(names)
-		} else {
-			tools = a.registry.Definitions()
-		}
-	} else {
-		tools = a.registry.Definitions()
-	}
-	// Apply the per-soul allowlist (Vaelum cabinet tool config), if set.
-	if cfg.AllowedTools != nil {
-		allow := make(map[string]bool, len(cfg.AllowedTools))
-		for _, n := range cfg.AllowedTools {
-			allow[n] = true
-		}
-		kept := make([]bs.ToolDefinition, 0, len(tools))
-		for _, t := range tools {
-			if allow[t.Name] {
-				kept = append(kept, t)
-			}
-		}
-		tools = kept
-	}
+	tools := a.selectTools(cfg)
 	budgetDecision := a.effectiveMessageBudget(cfg, cfg.SystemPrompt, tools)
 	tokenBudget := budgetDecision.Budget
 
@@ -146,6 +119,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			"model", cfg.Model,
 			"role", cfg.Role,
 			"tools", len(turnTools),
+			"tool_selection_source", cfg.ToolSelectionSource,
 			"messages", len(messages),
 			"force_final", forceFinal,
 			"message_budget", tokenBudget,
