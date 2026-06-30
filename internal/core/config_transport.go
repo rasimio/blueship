@@ -110,6 +110,12 @@ type HTTPChatConfig struct {
 	// its own platform name (e.g. "vaelum").
 	TransportName string
 
+	// ValidateUserSoul authorizes an already-authenticated user against the
+	// requested soul before the internal daemon endpoint starts a turn. The
+	// platform normally resolves this tuple itself, but the daemon must still
+	// reject stale or forged user/soul pairs at the trust boundary.
+	ValidateUserSoul func(ctx context.Context, userID, soulID uuid.UUID) error `yaml:"-" json:"-"`
+
 	// Extras, when non-nil, is called once with the server's mux during
 	// startup so the host daemon can mount additional internal
 	// API routes on the same port and share the bearer-token middleware.

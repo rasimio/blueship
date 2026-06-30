@@ -30,13 +30,14 @@ import (
 
 // Server is the HTTP/SSE chat transport.
 type Server struct {
-	gw            *gateway.Gateway
-	port          int
-	token         string
-	transportName string // source tag on inbound messages (e.g. the platform name)
-	extras        func(*http.ServeMux)
-	reset         func(ctx context.Context, userID string) (string, string, error)
-	logger        *slog.Logger
+	gw               *gateway.Gateway
+	port             int
+	token            string
+	transportName    string // source tag on inbound messages (e.g. the platform name)
+	validateUserSoul func(ctx context.Context, userID, soulID uuid.UUID) error
+	extras           func(*http.ServeMux)
+	reset            func(ctx context.Context, userID string) (string, string, error)
+	logger           *slog.Logger
 }
 
 // NewServer creates an HTTP chat server attached to an existing Gateway.
@@ -48,11 +49,11 @@ type Server struct {
 // open a fresh one (equivalent of the Telegram /reset command).
 // transportName is the source tag stamped on inbound messages (used for
 // session source / observability); empty defaults to "http".
-func NewServer(gw *gateway.Gateway, port int, token, transportName string, extras func(*http.ServeMux), reset func(context.Context, string) (string, string, error), logger *slog.Logger) *Server {
+func NewServer(gw *gateway.Gateway, port int, token, transportName string, validateUserSoul func(context.Context, uuid.UUID, uuid.UUID) error, extras func(*http.ServeMux), reset func(context.Context, string) (string, string, error), logger *slog.Logger) *Server {
 	if transportName == "" {
 		transportName = "http"
 	}
-	return &Server{gw: gw, port: port, token: token, transportName: transportName, extras: extras, reset: reset, logger: logger}
+	return &Server{gw: gw, port: port, token: token, transportName: transportName, validateUserSoul: validateUserSoul, extras: extras, reset: reset, logger: logger}
 }
 
 // Run starts the HTTP server. Blocks until ctx is done.
@@ -172,6 +173,13 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid soul_id", http.StatusBadRequest)
 		return
 	}
+	if s.validateUserSoul != nil {
+		if err := s.validateUserSoul(r.Context(), userID, soulID); err != nil {
+			s.logger.Warn("httpchat: user/soul validation failed", "user_id", userID, "soul_id", soulID, "err", err)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
 
 	ctx := bs.WithSoulID(r.Context(), soulID)
 	oldID, newID, err := s.reset(ctx, userID.String())
@@ -201,6 +209,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, "invalid soul_id", http.StatusBadRequest)
 		return
+	}
+	if s.validateUserSoul != nil {
+		if err := s.validateUserSoul(r.Context(), userID, soulID); err != nil {
+			s.logger.Warn("httpchat: user/soul validation failed", "user_id", userID, "soul_id", soulID, "err", err)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 	if req.Text == "" && len(req.Attachments) == 0 {
 		http.Error(w, "empty message", http.StatusBadRequest)
