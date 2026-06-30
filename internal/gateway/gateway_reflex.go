@@ -541,6 +541,7 @@ func (g *Gateway) runInteraction(
 	// messages, enough for short-term continuity; full context lives on the
 	// cortex side when escalation happens.
 	reflexCfg.MessageBudget = 4000
+	reflexCfg.MessageBudgetSource = "interaction.reflex.default"
 	// AllowedTools cleared — reflex's only tool is the system `escalate`
 	// sentinel, which must not be dropped by the per-soul cabinet allowlist.
 	reflexCfg.AllowedTools = nil
@@ -555,6 +556,15 @@ func (g *Gateway) runInteraction(
 	if g.deps.ModelStore != nil {
 		ref := g.deps.ModelStore.Get("reflex")
 		reflexCfg.MaxTokens = ref.MaxTokens
+		if ref.MessageBudget > 0 {
+			decision := bs.ResolveMessageBudget(bs.MessageBudgetRequest{
+				Role:     "reflex",
+				ModelRef: ref,
+				Config:   g.deps.Config,
+			})
+			reflexCfg.MessageBudget = decision.Budget
+			reflexCfg.MessageBudgetSource = decision.Source
+		}
 		reflexCfg.Temperature = ref.Temperature
 		reflexCfg.ThinkingMode = ref.ThinkingMode
 		reflexCfg.Effort = ref.Effort

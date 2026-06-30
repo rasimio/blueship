@@ -142,6 +142,7 @@ type ModelRef struct {
 	Provider       string
 	Name           string
 	MaxTokens      int
+	MessageBudget  int
 	ThinkingBudget int
 	Temperature    float64
 	// ThinkingMode / Effort map to CompletionRequest fields of the same name.

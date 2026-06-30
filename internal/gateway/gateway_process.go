@@ -589,6 +589,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	if cortexRef.MaxTokens > 0 {
 		cortexMaxTokens = cortexRef.MaxTokens
 	}
+	turnMessageBudget := g.messageBudgetForRole("cortex", cortexRef)
 
 	// Reply metadata: the first pendingMsg in the batch carries
 	// the user-visible reply target. Cabinet-originated replies set
@@ -618,22 +619,24 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	runCfg := agent.RunConfig{
-		SessionID:        sess.ID,
-		SystemPrompt:     systemWithTime,
-		CompactSummary:   derefString(sess.CompactSummary),
-		Model:            g.cortexModel(),
-		MaxTokens:        cortexMaxTokens,
-		MaxTurns:         g.deps.Config.Gateway.MaxTurns,
-		InjectedContext:  injectedCtx,
-		ReflexGuidance:   reflexGuidance,
-		Role:             "cortex",
-		Temperature:      cortexTemp,
-		ThinkingMode:     cortexRef.ThinkingMode,
-		Effort:           cortexRef.Effort,
-		AllowedTools:     g.allowedToolsForSoul(ctx, us.SoulID, turnRegistry),
-		ReplyToMessageID: replyToMessageID,
-		TGMessageID:      tgMessageID,
-		OnTiming:         timings.Add,
+		SessionID:           sess.ID,
+		SystemPrompt:        systemWithTime,
+		CompactSummary:      derefString(sess.CompactSummary),
+		Model:               g.cortexModel(),
+		MaxTokens:           cortexMaxTokens,
+		MaxTurns:            g.deps.Config.Gateway.MaxTurns,
+		InjectedContext:     injectedCtx,
+		ReflexGuidance:      reflexGuidance,
+		Role:                "cortex",
+		Temperature:         cortexTemp,
+		MessageBudget:       turnMessageBudget.Budget,
+		MessageBudgetSource: turnMessageBudget.Source,
+		ThinkingMode:        cortexRef.ThinkingMode,
+		Effort:              cortexRef.Effort,
+		AllowedTools:        g.allowedToolsForSoul(ctx, us.SoulID, turnRegistry),
+		ReplyToMessageID:    replyToMessageID,
+		TGMessageID:         tgMessageID,
+		OnTiming:            timings.Add,
 	}
 
 	// Ephemeral notebook ask: a fast, private answer on the SELECTED text.
@@ -657,6 +660,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		}
 		runCfg.Ephemeral = true
 		runCfg.MessageBudget = 3000
+		runCfg.MessageBudgetSource = "notebook.ephemeral"
 		// Full tools — the notebook ask is a real cortex turn (⌘J): it can
 		// web_search / browser_fetch for live facts, read memory, etc. runCfg
 		// keeps the soul's full AllowedTools (set above). Ephemeral tool loops

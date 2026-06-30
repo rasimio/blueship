@@ -231,14 +231,30 @@ func (e *StructuredGoalExecutor) execDecideStep(ctx context.Context, task core.A
 
 	systemPrompt := decideSystem
 
+	messageBudget := 0
+	messageBudgetSource := ""
+	if deps.ModelStore != nil {
+		ref := deps.ModelStore.Get(modelRole)
+		if ref.MessageBudget > 0 {
+			decision := core.ResolveMessageBudget(core.MessageBudgetRequest{
+				Role:     modelRole,
+				ModelRef: ref,
+				Config:   deps.Config,
+			})
+			messageBudget = decision.Budget
+			messageBudgetSource = decision.Source
+		}
+	}
 	loop := agent.NewLoop(deps.LLM, deps.Store, deps.Registry, deps.RoleTools, deps.Config, deps.Logger)
 	reply, err := loop.Run(ctx, agent.RunConfig{
-		SessionID:    sessID,
-		SystemPrompt: systemPrompt,
-		Model:        model,
-		MaxTokens:    256,
-		MaxTurns:     1,
-		Role:         modelRole,
+		SessionID:           sessID,
+		SystemPrompt:        systemPrompt,
+		Model:               model,
+		MaxTokens:           256,
+		MessageBudget:       messageBudget,
+		MessageBudgetSource: messageBudgetSource,
+		MaxTurns:            1,
+		Role:                modelRole,
 	}, decisionPrompt)
 	if err != nil {
 		return core.IterationResult{}, fmt.Errorf("decide: %w", err)

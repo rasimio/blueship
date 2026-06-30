@@ -85,6 +85,80 @@ func TestRunTrackedUsesVisibleDialogAndCurrentToolScratchpad(t *testing.T) {
 	}
 }
 
+func TestRunTrackedCompactsToolResultOnlyForPrompt(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "user", Content: "read this"}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{
+		{
+			Content: []bs.ContentBlock{{
+				Type:  "tool_use",
+				ID:    "call_1",
+				Name:  "browser_fetch",
+				Input: json.RawMessage(`{"url":"https://example.com"}`),
+			}},
+			StopReason: "tool_use",
+			Usage:      bs.Usage{InputTokens: 10, OutputTokens: 3},
+		},
+		{
+			Content:    []bs.ContentBlock{{Type: "text", Text: "done"}},
+			StopReason: "end_turn",
+			Usage:      bs.Usage{InputTokens: 20, OutputTokens: 2},
+		},
+	}}
+	longText := strings.Repeat("A", maxPromptBrowserFetchTextChars+2000)
+	registry := bs.NewToolRegistry()
+	registry.Register("browser_fetch", "fetch", json.RawMessage(`{"type":"object"}`), func(context.Context, json.RawMessage) (any, error) {
+		return map[string]any{
+			"url":         "https://example.com",
+			"title":       "Example",
+			"text":        longText,
+			"source_kind": "html",
+		}, nil
+	})
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, registry, nil, &bs.Config{}, logger)
+	if _, err := loop.RunTracked(context.Background(), RunConfig{
+		SessionID:      "s1",
+		SystemPrompt:   "base system",
+		Model:          "test-model",
+		MaxTokens:      64,
+		MaxTurns:       3,
+		MessageBudget:  6000,
+		SkipUserAppend: true,
+	}, "ignored"); err != nil {
+		t.Fatalf("RunTracked failed: %v", err)
+	}
+
+	if len(provider.requests) != 2 {
+		t.Fatalf("want two provider calls, got %d", len(provider.requests))
+	}
+	promptBlocks := bs.NormalizeContent(provider.requests[1].Messages[2].Content)
+	if len(promptBlocks) != 1 {
+		t.Fatalf("want one prompt tool result, got %#v", promptBlocks)
+	}
+	promptResult, _ := promptBlocks[0].Content.(string)
+	if strings.Contains(promptResult, longText) {
+		t.Fatalf("prompt tool result should be compacted")
+	}
+	if !strings.Contains(promptResult, `"truncated":true`) || !strings.Contains(promptResult, `"original_text_chars"`) {
+		t.Fatalf("prompt tool result missing truncation provenance: %s", promptResult)
+	}
+
+	var rawPersisted string
+	for _, msg := range store.appended {
+		for _, block := range bs.NormalizeContent(msg.Content) {
+			if block.Type == "tool_result" && block.Name == "browser_fetch" {
+				rawPersisted, _ = block.Content.(string)
+			}
+		}
+	}
+	if !strings.Contains(rawPersisted, longText) {
+		t.Fatalf("persisted tool result should keep raw output")
+	}
+}
+
 type scriptedProvider struct {
 	requests  []bs.CompletionRequest
 	responses []*bs.CompletionResponse
@@ -152,5 +226,9 @@ func (s *fakeMessageStore) LatestAssistantMessageID(context.Context, string) (st
 }
 
 func (s *fakeMessageStore) RecordLastInputTokens(context.Context, string, int) error {
+	return nil
+}
+
+func (s *fakeMessageStore) RecordLLMUsage(context.Context, bs.LLMUsageRecord) error {
 	return nil
 }

@@ -74,7 +74,8 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		}
 		tools = kept
 	}
-	tokenBudget := a.effectiveMessageBudget(cfg, cfg.SystemPrompt, tools)
+	budgetDecision := a.effectiveMessageBudget(cfg, cfg.SystemPrompt, tools)
+	tokenBudget := budgetDecision.Budget
 
 	// Pre-existing compact summary from previous runs
 	compactSummary := cfg.CompactSummary
@@ -148,6 +149,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			"messages", len(messages),
 			"force_final", forceFinal,
 			"message_budget", tokenBudget,
+			"message_budget_source", budgetDecision.Source,
 			"base_system_tokens_estimate", estimateTextTokens(baseSystem),
 			"system_tokens_estimate", estimateTextTokens(effectiveSystem),
 			"tool_schema_tokens_estimate", estimateToolSchemaTokens(turnTools),
@@ -172,6 +174,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			return nil, fmt.Errorf("LLM API: %w", err)
 		}
 		emitTiming(cfg, "llm.complete", llmStarted, llmTimingDetail(cfg, turn+1, resp.StopReason, resp.Usage.InputTokens, resp.Usage.OutputTokens))
+		a.recordLLMUsage(ctx, cfg, cfg.Model, turnTools, messages, baseSystem, effectiveSystem, tokenBudget, budgetDecision.Source, turnContext, dialogTokens, scratchpadTokens, resp.Usage, resp.StopReason, llmStarted)
 
 		a.logger.Info("LLM response",
 			"stop_reason", resp.StopReason,
@@ -224,6 +227,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		case "tool_use":
 			toolTurns++
 			var toolResults []bs.ContentBlock
+			var promptToolResults []bs.ContentBlock
 			for _, block := range resp.Content {
 				if block.Type != "tool_use" {
 					continue
@@ -237,13 +241,15 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 				toolStarted := time.Now()
 				result, isError := a.registry.Execute(ctx, block.Name, block.Input)
 				emitTiming(cfg, "tool.execute", toolStarted, toolTimingDetail(cfg, turn+1, block.Name, isError))
-				toolResults = append(toolResults, bs.ContentBlock{
+				resultBlock := bs.ContentBlock{
 					Type:      "tool_result",
 					ToolUseID: block.ID,
 					Name:      block.Name,
 					Content:   result,
 					IsError:   isError,
-				})
+				}
+				toolResults = append(toolResults, resultBlock)
+				promptToolResults = append(promptToolResults, compactToolResultBlockForPrompt(resultBlock))
 				inputStr := string(block.Input)
 				if len(inputStr) > 200 {
 					inputStr = inputStr[:200] + "..."
@@ -272,6 +278,10 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 				Role:    "user",
 				Content: toolResults,
 			}
+			promptToolResultMsg := bs.Message{
+				Role:    "user",
+				Content: promptToolResults,
+			}
 			if !cfg.Ephemeral {
 				appendStarted := time.Now()
 				pctx, pcancel := persistCtx(ctx)
@@ -282,7 +292,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 					return nil, fmt.Errorf("append tool results: %w", err)
 				}
 			}
-			convo = append(convo, toolResultMsg)
+			convo = append(convo, promptToolResultMsg)
 			if toolTurns >= maxToolTurnsForRole(cfg.Role) {
 				forceFinal = true
 				if turn+1 >= cfg.MaxTurns {

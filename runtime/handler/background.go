@@ -286,6 +286,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 	routerModel := deps.Config.Models.Primary.ForRouter()
 	displayModel := deps.Config.Models.Primary.Name
+	roleMaxTokens := deps.Config.Limits.MaxOutputTokens
+	roleMessageBudget := 0
+	roleMessageBudgetSource := ""
 	var roleEffort, roleThinkingMode string
 	if deps.ModelStore != nil {
 		if m := deps.ModelStore.ForRouter(modelRole); m != "" {
@@ -293,6 +296,18 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		}
 		if ref := deps.ModelStore.Get(modelRole); ref.Name != "" {
 			displayModel = ref.Name
+			if ref.MaxTokens > 0 {
+				roleMaxTokens = ref.MaxTokens
+			}
+			if ref.MessageBudget > 0 {
+				decision := core.ResolveMessageBudget(core.MessageBudgetRequest{
+					Role:     modelRole,
+					ModelRef: ref,
+					Config:   deps.Config,
+				})
+				roleMessageBudget = decision.Budget
+				roleMessageBudgetSource = decision.Source
+			}
 			roleEffort = ref.Effort
 			roleThinkingMode = ref.ThinkingMode
 		}
@@ -507,15 +522,17 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	loop.SetCompactor(agent.NewCompactor(deps.LLM, deps.Config, deps.Logger))
 
 	result, err := loop.RunTracked(ctx, agent.RunConfig{
-		SessionID:       sessID,
-		SystemPrompt:    systemPrompt,
-		InjectedContext: injectedCtx,
-		Model:           routerModel,
-		MaxTokens:       deps.Config.Limits.MaxOutputTokens,
-		MaxTurns:        deps.Config.Gateway.MaxTurns,
-		Role:            modelRole,
-		Effort:          roleEffort,
-		ThinkingMode:    roleThinkingMode,
+		SessionID:           sessID,
+		SystemPrompt:        systemPrompt,
+		InjectedContext:     injectedCtx,
+		Model:               routerModel,
+		MaxTokens:           roleMaxTokens,
+		MessageBudget:       roleMessageBudget,
+		MessageBudgetSource: roleMessageBudgetSource,
+		MaxTurns:            deps.Config.Gateway.MaxTurns,
+		Role:                modelRole,
+		Effort:              roleEffort,
+		ThinkingMode:        roleThinkingMode,
 	}, msg)
 	if err != nil {
 		return core.IterationResult{}, fmt.Errorf("agent loop: %w", err)

@@ -47,4 +47,43 @@ type MessageStore interface {
 	// live `usage` SSE frame). Called from the agent loop after every
 	// LLM call. No-op on empty sessionID.
 	RecordLastInputTokens(ctx context.Context, sessionID string, inputTokens int) error
+
+	// RecordLLMUsage persists one provider call for budget monitoring.
+	// Implementations should resolve user/soul/source from sessionID.
+	RecordLLMUsage(ctx context.Context, usage LLMUsageRecord) error
+}
+
+// LLMUsageRecorder is the narrow write side of MessageStore used by host
+// code that makes direct LLM calls outside the agent loop.
+type LLMUsageRecorder interface {
+	RecordLLMUsage(ctx context.Context, usage LLMUsageRecord) error
+}
+
+// LLMUsageRecord stores provider-reported usage and local prompt-layout
+// estimates so operators can separate real spend from prompt bloat.
+type LLMUsageRecord struct {
+	SessionID                   string
+	Role                        string
+	Provider                    string
+	Model                       string
+	InputTokens                 int
+	OutputTokens                int
+	CacheCreationTokens         int
+	CacheReadTokens             int
+	StopReason                  string
+	MessageCount                int
+	ToolCount                   int
+	BaseSystemTokensEstimate    int
+	SystemTokensEstimate        int
+	ToolSchemaTokensEstimate    int
+	DialogMessageTokensEstimate int
+	ScratchpadTokensEstimate    int
+	MessageTokensEstimate       int
+	TurnContextTokensEstimate   int
+	InjectedContextTokens       int
+	MessageBudget               int
+	MessageBudgetSource         string
+	MaxContext                  int
+	DeepContext                 bool
+	LatencyMS                   int
 }

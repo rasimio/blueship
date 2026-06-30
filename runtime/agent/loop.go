@@ -78,6 +78,9 @@ type RunConfig struct {
 	// the last ~15-20 turns — Sonnet on 30 K of session history was the
 	// dominant per-turn latency, and routing decisions don't need long memory.
 	MessageBudget int
+	// MessageBudgetSource explains where MessageBudget came from. It is stored
+	// in llm_usage so prompt-budget regressions can be diagnosed from data.
+	MessageBudgetSource string
 	// ThinkingBudget per-RunConfig override of a.cfg.Limits.ThinkingBudget.
 	//   0  = inherit global (default)
 	//   -1 = explicitly disabled (forces no thinking even if global > 0)
@@ -151,33 +154,15 @@ func chooseThinkingBudget(cfgValue, globalDefault int) int {
 	return globalDefault
 }
 
-func (a *Loop) calculateBudget(systemPrompt string, tools []bs.ToolDefinition) int {
-	maxContext := a.cfg.Limits.MaxContext
-
-	systemTokens := len([]rune(systemPrompt)) / 3
-
-	toolSchemaTokens := 0
-	if len(tools) > 0 {
-		data, _ := json.Marshal(tools)
-		toolSchemaTokens = len(data) / 3
-	}
-
-	minBudget := a.cfg.Limits.MinMessageBudget
-	budget := maxContext - systemTokens - toolSchemaTokens
-	if budget < minBudget {
-		budget = minBudget
-	}
-	if cap := a.cfg.Limits.ChatMessageBudget; cap > 0 && budget > cap {
-		budget = cap
-	}
-	return budget
-}
-
-func (a *Loop) effectiveMessageBudget(cfg RunConfig, systemPrompt string, tools []bs.ToolDefinition) int {
-	if cfg.MessageBudget > 0 {
-		return cfg.MessageBudget
-	}
-	return a.calculateBudget(systemPrompt, tools)
+func (a *Loop) effectiveMessageBudget(cfg RunConfig, systemPrompt string, tools []bs.ToolDefinition) bs.MessageBudgetDecision {
+	return bs.ResolveMessageBudget(bs.MessageBudgetRequest{
+		Role:           cfg.Role,
+		ExplicitBudget: cfg.MessageBudget,
+		ExplicitSource: cfg.MessageBudgetSource,
+		Config:         a.cfg,
+		SystemPrompt:   systemPrompt,
+		Tools:          tools,
+	})
 }
 
 func effectiveSystemPrompt(systemPrompt, compactSummary, turnContext string) string {

@@ -67,7 +67,8 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		}
 		tools = kept
 	}
-	tokenBudget := a.effectiveMessageBudget(cfg, cfg.SystemPrompt, tools)
+	budgetDecision := a.effectiveMessageBudget(cfg, cfg.SystemPrompt, tools)
+	tokenBudget := budgetDecision.Budget
 	compactSummary := cfg.CompactSummary
 	turnContext := buildTurnContext(cfg.ReflexGuidance, cfg.InjectedContext)
 	loadStarted := time.Now()
@@ -124,6 +125,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			"turn", turn+1,
 			"force_final", forceFinal,
 			"message_budget", tokenBudget,
+			"message_budget_source", budgetDecision.Source,
 			"base_system_tokens_estimate", estimateTextTokens(baseSystem),
 			"system_tokens_estimate", estimateTextTokens(effectiveSystem),
 			"tool_schema_tokens_estimate", estimateToolSchemaTokens(turnTools),
@@ -139,6 +141,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			return "", nil, fmt.Errorf("LLM API: %w", err)
 		}
 		emitTiming(cfg, "llm.stream_complete", llmStarted, llmTimingDetail(cfg, turn+1, resp.StopReason, resp.Usage.InputTokens, resp.Usage.OutputTokens))
+		a.recordLLMUsage(ctx, cfg, cfg.Model, turnTools, messages, baseSystem, effectiveSystem, tokenBudget, budgetDecision.Source, turnContext, dialogTokens, scratchpadTokens, resp.Usage, resp.StopReason, llmStarted)
 
 		// Per-turn usage report: web sinks render a live token-window
 		// indicator that climbs as the session grows. Telegram / voice
@@ -202,6 +205,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		case "tool_use":
 			toolTurns++
 			var toolResults []bs.ContentBlock
+			var promptToolResults []bs.ContentBlock
 			for _, block := range resp.Content {
 				if block.Type != "tool_use" {
 					continue
@@ -223,13 +227,15 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 					outputStr = outputStr[:500] + "..."
 				}
 				traces = append(traces, ToolTrace{Name: block.Name, Input: inputStr, Output: outputStr, Error: isError})
-				toolResults = append(toolResults, bs.ContentBlock{
+				resultBlock := bs.ContentBlock{
 					Type:      "tool_result",
 					ToolUseID: block.ID,
 					Name:      block.Name,
 					Content:   result,
 					IsError:   isError,
-				})
+				}
+				toolResults = append(toolResults, resultBlock)
+				promptToolResults = append(promptToolResults, compactToolResultBlockForPrompt(resultBlock))
 			}
 
 			// See RunTracked: a tool_use stop with no tool_use blocks must not
@@ -242,6 +248,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			}
 
 			toolResultMsg := bs.Message{Role: "user", Content: toolResults}
+			promptToolResultMsg := bs.Message{Role: "user", Content: promptToolResults}
 			if !cfg.Ephemeral {
 				appendStarted := time.Now()
 				pctx, pcancel := persistCtx(ctx)
@@ -252,7 +259,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 					return "", nil, fmt.Errorf("append tool results: %w", err)
 				}
 			}
-			convo = append(convo, toolResultMsg)
+			convo = append(convo, promptToolResultMsg)
 			if toolTurns >= maxToolTurnsForRole(cfg.Role) {
 				forceFinal = true
 				if turn+1 >= cfg.MaxTurns {
