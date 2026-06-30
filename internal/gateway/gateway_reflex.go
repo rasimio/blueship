@@ -35,14 +35,20 @@ type reflexPipelineResult struct {
 // When result.Silent=true the caller MUST abort the turn without calling
 // cortex or sending any output — a structured rule with Silent=true matched.
 func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText, priorContext string, timings *turnTimer) reflexPipelineResult {
-	// Interaction tier: skip the ReflexPreparer entirely. The full AME pass
-	// (memory_associate + scoring + diversity filter + emotion detection)
-	// costs ~3-5 s per turn and the streaming reflex doesn't need it — for
-	// chatty/social turns it answers from session history alone, and for
-	// memory-needing turns it escalates to cortex which still has the full
-	// chat history and all tools. We only run the structured rule engine
-	// here (cheap; catches Silent rules and injects scope-based guidance).
+	// Interaction tier: the fast reflex-answer layer is transport-level and is
+	// usually skipped for text, but Cortex still needs AME traces. Run context
+	// prep + RuleEngine here without calling the old reflex planner LLM.
 	if g.deps.Config.Gateway.InteractionTier {
+		var rc *bs.ReflexContext
+		if us.Deps.ReflexPreparer != nil {
+			preparerStarted := time.Now()
+			rc = us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText, priorContext)
+			timings.RecordSince("context_prep", preparerStarted, "interaction_tier")
+			if rc != nil {
+				us.LastStrategy = rc.Strategy
+			}
+		}
+
 		var guidance strings.Builder
 		hasRules := false
 		engineRuleCount := 0
@@ -91,12 +97,22 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		if hasRules {
 			guidance.WriteString("[/active rules]")
 		}
+		var injectedCtx, strategy string
+		var memoriesCount int
+		if rc != nil {
+			injectedCtx = rc.FormattedTraces
+			strategy = rc.Strategy
+			memoriesCount = rc.MemoriesCount
+		}
 		return reflexPipelineResult{
+			InjectedCtx:     injectedCtx,
 			ReflexGuidance:  guidance.String(),
 			CortexTools:     dedupeStrings(cortexTools),
 			EngineRuleCount: engineRuleCount,
+			MemoriesCount:   memoriesCount,
 			MatchedRules:    matchedRules,
 			SuppressedRules: suppressedRules,
+			Strategy:        strategy,
 		}
 	}
 

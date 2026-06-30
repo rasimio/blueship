@@ -408,7 +408,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	priorContext := g.buildPriorContext(ctx, sess.ID, 6)
 	timings.RecordSince("gateway.prior_context", priorStarted, "turns=6")
 
-	// Build context and run reflex/cortex pipeline.
+	// Build Cortex context and run the turn preflight. The old reflex planner
+	// is optional; AME context prep must not depend on whether that LLM tier is
+	// enabled for this transport.
 	var injectedCtx, reflexGuidance string
 	var postActions []bs.PostAction // executed after cortex response
 	var engineRuleCount int
@@ -482,8 +484,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// surface MemoriesCount + MatchedRules + Strategy to the web cabinet
 	// via a SendContextInfo frame.
 	var rp reflexPipelineResult
-	if reflexGuidance == "" && msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil && g.reflexModel() != "" {
-		// Reflex/Cortex pipeline: structured context → reflex plan → pre-actions → filtered cortex input.
+	if reflexGuidance == "" && msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil &&
+		(g.reflexModel() != "" || g.deps.Config.Gateway.InteractionTier) {
+		// Context/preflight pipeline:
+		//   interaction tier: AME context + RuleEngine, no reflex planner LLM.
+		//   legacy tier: AME context → reflex planner → pre-actions → RuleEngine.
 		pipelineStarted := time.Now()
 		rp = g.runReflexPipeline(ctx, us, msgText, priorContext, timings)
 		timings.RecordSince("reflex_pipeline.total", pipelineStarted, "")
