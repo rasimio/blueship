@@ -117,7 +117,7 @@ func TestInteractionTierRunsHostReflexPreActions(t *testing.T) {
 	if !strings.Contains(result.ReflexGuidance, "[memory grounding]") {
 		t.Fatalf("no-match grounding guidance missing:\n%s", result.ReflexGuidance)
 	}
-	if !strings.Contains(result.ReflexGuidance, "Do not add unsupported reassurance") {
+	if !strings.Contains(result.ReflexGuidance, "I do not have enough saved evidence to judge that") {
 		t.Fatalf("unsupported reassurance guard missing:\n%s", result.ReflexGuidance)
 	}
 }
@@ -133,6 +133,7 @@ func TestAppendResearchGuidanceRequiresSourceMention(t *testing.T) {
 		"[research usage]",
 		"Search results are navigation only",
 		"name the source/domain in the reply",
+		"official publisher/company/source",
 		"mixed research + action requests",
 		"[/research]",
 	} {
