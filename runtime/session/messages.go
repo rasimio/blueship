@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -260,13 +261,24 @@ type dialogMessageCandidate struct {
 }
 
 func selectDialogMessagesWithinBudget(msgs []Message, maxTokens int) []bs.Message {
-	var selected []bs.Message
-	tokenSum := 0
+	var candidates []dialogMessageCandidate
 	for _, stored := range msgs {
 		candidate, ok := visibleDialogCandidate(stored)
 		if !ok {
 			continue
 		}
+		candidates = append(candidates, candidate)
+	}
+	if isTranslationWorkflow(candidates) {
+		candidates = applyTranslationHistoryLayout(candidates)
+	}
+	return selectDialogCandidatesWithinBudget(candidates, maxTokens)
+}
+
+func selectDialogCandidatesWithinBudget(candidates []dialogMessageCandidate, maxTokens int) []bs.Message {
+	var selected []bs.Message
+	tokenSum := 0
+	for _, candidate := range candidates {
 		if maxTokens > 0 && tokenSum+candidate.tokens > maxTokens {
 			if len(selected) == 0 {
 				selected = append(selected, candidate.msg)
@@ -277,6 +289,108 @@ func selectDialogMessagesWithinBudget(msgs []Message, maxTokens int) []bs.Messag
 		selected = append(selected, candidate.msg)
 	}
 	return selected
+}
+
+const translationFullRecentMessages = 8
+
+func applyTranslationHistoryLayout(candidates []dialogMessageCandidate) []dialogMessageCandidate {
+	if len(candidates) <= translationFullRecentMessages {
+		return candidates
+	}
+	shaped := make([]dialogMessageCandidate, len(candidates))
+	copy(shaped, candidates)
+	for i := translationFullRecentMessages; i < len(shaped); i++ {
+		shaped[i] = compactOlderTranslationCandidate(shaped[i])
+	}
+	return shaped
+}
+
+func compactOlderTranslationCandidate(candidate dialogMessageCandidate) dialogMessageCandidate {
+	text := strings.TrimSpace(dialogMessageText(candidate.msg))
+	if text == "" {
+		return candidate
+	}
+	originalRunes := len([]rune(text))
+	stub := fmt.Sprintf(
+		"[history compacted: older %s turn in translation workflow; original_runes=%d; original_tokens_est=%d; contains_hebrew=%t; preview=%q]",
+		candidate.msg.Role,
+		originalRunes,
+		candidate.tokens,
+		containsHebrew(text),
+		compactPreview(text, 180),
+	)
+	blocks := []bs.ContentBlock{{Type: "text", Text: stub}}
+	return dialogMessageCandidate{
+		msg: bs.Message{
+			Role:    candidate.msg.Role,
+			Content: stub,
+		},
+		tokens: bs.EstimateTokens(blocks),
+	}
+}
+
+func isTranslationWorkflow(candidates []dialogMessageCandidate) bool {
+	limit := len(candidates)
+	if limit > 6 {
+		limit = 6
+	}
+	for i := 0; i < limit; i++ {
+		text := dialogMessageText(candidates[i].msg)
+		if text == "" {
+			continue
+		}
+		if containsTranslationCue(text) && (containsHebrew(text) || i == 0) {
+			return true
+		}
+		if containsHebrew(text) && (len([]rune(text)) > 400 || strings.Contains(strings.ToLower(text), "[reply to:")) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsTranslationCue(text string) bool {
+	lower := strings.ToLower(text)
+	cues := []string{
+		"переведи", "перевод", "перевести", "трансл", "иврит", "hebrew", "translate", "translation", "עברית",
+	}
+	for _, cue := range cues {
+		if strings.Contains(lower, cue) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsHebrew(text string) bool {
+	for _, r := range text {
+		if r >= 0x0590 && r <= 0x05FF {
+			return true
+		}
+	}
+	return false
+}
+
+func dialogMessageText(msg bs.Message) string {
+	var parts []string
+	for _, block := range bs.NormalizeContent(msg.Content) {
+		if block.Type == "text" && block.Text != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func compactPreview(text string, maxRunes int) string {
+	oneLine := strings.Join(strings.Fields(text), " ")
+	runes := []rune(oneLine)
+	if len(runes) <= maxRunes {
+		return oneLine
+	}
+	if maxRunes <= 1 {
+		return "…"
+	}
+	return string(runes[:maxRunes-1]) + "…"
 }
 
 func visibleDialogCandidate(stored Message) (dialogMessageCandidate, bool) {

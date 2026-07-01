@@ -229,10 +229,7 @@ func cloneMessages(messages []bs.Message) []bs.Message {
 }
 
 func estimateTextTokens(s string) int {
-	if s == "" {
-		return 0
-	}
-	return len([]rune(s)) / 3
+	return bs.EstimateTextTokens(s)
 }
 
 func estimateToolSchemaTokens(tools []bs.ToolDefinition) int {
@@ -240,7 +237,19 @@ func estimateToolSchemaTokens(tools []bs.ToolDefinition) int {
 		return 0
 	}
 	data, _ := json.Marshal(tools)
-	return len(data) / 3
+	return bs.EstimateTextTokens(string(data))
+}
+
+func effectiveDialogBudget(totalPromptBudget int, systemPrompt, compactSummary, turnContext string, tools []bs.ToolDefinition) (dialogBudget int, promptOverhead int) {
+	if totalPromptBudget <= 0 {
+		return totalPromptBudget, 0
+	}
+	promptOverhead = estimateTextTokens(effectiveSystemPrompt(systemPrompt, compactSummary, turnContext)) + estimateToolSchemaTokens(tools)
+	dialogBudget = totalPromptBudget - promptOverhead
+	if dialogBudget < 1 {
+		dialogBudget = 1
+	}
+	return dialogBudget, promptOverhead
 }
 
 func maxToolTurnsForRole(role string) int {

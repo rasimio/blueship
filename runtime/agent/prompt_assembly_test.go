@@ -159,6 +159,43 @@ func TestRunTrackedCompactsToolResultOnlyForPrompt(t *testing.T) {
 	}
 }
 
+func TestRunTrackedLoadsDialogWithEffectivePromptBudget(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "user", Content: "hello"}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{{
+		Content:    []bs.ContentBlock{{Type: "text", Text: "done"}},
+		StopReason: "end_turn",
+		Usage:      bs.Usage{InputTokens: 10, OutputTokens: 2},
+	}}}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, bs.NewToolRegistry(), nil, &bs.Config{}, logger)
+	cfg := RunConfig{
+		SessionID:       "s1",
+		SystemPrompt:    strings.Repeat("מערכת ", 200),
+		Model:           "test-model",
+		MaxTokens:       64,
+		MaxTurns:        1,
+		MessageBudget:   5000,
+		SkipUserAppend:  true,
+		InjectedContext: strings.Repeat("זיכרון ", 100),
+		ReflexGuidance:  "rule trace",
+	}
+	if _, err := loop.RunTracked(context.Background(), cfg, "ignored"); err != nil {
+		t.Fatalf("RunTracked failed: %v", err)
+	}
+
+	turnContext := buildTurnContext(cfg.ReflexGuidance, cfg.InjectedContext)
+	wantBudget, wantOverhead := effectiveDialogBudget(cfg.MessageBudget, cfg.SystemPrompt, cfg.CompactSummary, turnContext, nil)
+	if store.lastDialogBudget != wantBudget {
+		t.Fatalf("DialogMessagesForAPI budget = %d, want %d (overhead %d)", store.lastDialogBudget, wantBudget, wantOverhead)
+	}
+	if store.lastDialogBudget >= cfg.MessageBudget {
+		t.Fatalf("dialog budget should be reduced below total prompt budget, got %d >= %d", store.lastDialogBudget, cfg.MessageBudget)
+	}
+}
+
 type scriptedProvider struct {
 	requests  []bs.CompletionRequest
 	responses []*bs.CompletionResponse
@@ -175,10 +212,11 @@ func (p *scriptedProvider) Complete(_ context.Context, req bs.CompletionRequest)
 }
 
 type fakeMessageStore struct {
-	dialog      []bs.Message
-	dialogLoads int
-	rawLoads    int
-	appended    []bs.Message
+	dialog           []bs.Message
+	dialogLoads      int
+	lastDialogBudget int
+	rawLoads         int
+	appended         []bs.Message
 }
 
 func (s *fakeMessageStore) Append(_ context.Context, _ string, msg bs.Message) error {
@@ -196,8 +234,9 @@ func (s *fakeMessageStore) MessagesForAPI(context.Context, string, int) ([]bs.Me
 	return nil, nil
 }
 
-func (s *fakeMessageStore) DialogMessagesForAPI(context.Context, string, int) ([]bs.Message, error) {
+func (s *fakeMessageStore) DialogMessagesForAPI(_ context.Context, _ string, maxTokens int) ([]bs.Message, error) {
 	s.dialogLoads++
+	s.lastDialogBudget = maxTokens
 	return cloneMessages(s.dialog), nil
 }
 

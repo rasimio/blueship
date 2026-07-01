@@ -128,9 +128,10 @@ var (
 	NewLLMRouter        = core.NewLLMRouter
 	InitDeps            = core.InitDeps
 
-	NormalizeContent = core.NormalizeContent
-	EstimateTokens   = core.EstimateTokens
-	ExtractText      = core.ExtractText
+	NormalizeContent   = core.NormalizeContent
+	EstimateTokens     = core.EstimateTokens
+	EstimateTextTokens = core.EstimateTextTokens
+	ExtractText        = core.ExtractText
 
 	WithSoulID          = core.WithSoulID
 	SoulIDFromContext   = core.SoulIDFromContext

@@ -135,6 +135,42 @@ func TestDialogMessagesForAPIDropsPartialLeadingAssistantTurn(t *testing.T) {
 	}
 }
 
+func TestDialogMessagesForAPICompactsOlderTranslationHistory(t *testing.T) {
+	longHebrew := strings.Repeat("שלום עולם ", 240)
+	msgs := []Message{
+		storedMessage(t, "user", []bs.ContentBlock{{Type: "text", Text: "переведи ответ на иврит: שלום"}}, 10),
+		storedMessage(t, "assistant", []bs.ContentBlock{{Type: "text", Text: "recent assistant 1"}}, 10),
+		storedMessage(t, "user", []bs.ContentBlock{{Type: "text", Text: "recent user 1"}}, 10),
+		storedMessage(t, "assistant", []bs.ContentBlock{{Type: "text", Text: "recent assistant 2"}}, 10),
+		storedMessage(t, "user", []bs.ContentBlock{{Type: "text", Text: "recent user 2"}}, 10),
+		storedMessage(t, "assistant", []bs.ContentBlock{{Type: "text", Text: "recent assistant 3"}}, 10),
+		storedMessage(t, "user", []bs.ContentBlock{{Type: "text", Text: "recent user 3"}}, 10),
+		storedMessage(t, "assistant", []bs.ContentBlock{{Type: "text", Text: "recent assistant 4"}}, 10),
+		storedMessage(t, "user", []bs.ContentBlock{{Type: "text", Text: longHebrew}}, 1000),
+		storedMessage(t, "assistant", []bs.ContentBlock{{Type: "text", Text: longHebrew}}, 1000),
+		storedMessage(t, "user", []bs.ContentBlock{{Type: "text", Text: "old user plain context"}}, 10),
+	}
+
+	apiMessages := dialogMessagesForAPIFromRows(msgs, 50000)
+	rendered := renderAPIMessagesText(apiMessages)
+
+	if !strings.Contains(rendered, "переведи ответ на иврит: שלום") {
+		t.Fatalf("latest translation request should stay full, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "[history compacted: older user turn in translation workflow") {
+		t.Fatalf("older user turn should be compacted, got %q", rendered)
+	}
+	if !strings.Contains(rendered, "[history compacted: older assistant turn in translation workflow") {
+		t.Fatalf("older assistant turn should be compacted, got %q", rendered)
+	}
+	if strings.Contains(rendered, strings.Repeat("שלום עולם ", 40)) {
+		t.Fatalf("older Hebrew payload should not survive as full text")
+	}
+	if !strings.Contains(rendered, "recent assistant 4") {
+		t.Fatalf("recent turns should stay full, got %q", rendered)
+	}
+}
+
 func storedMessage(t *testing.T, role string, blocks []bs.ContentBlock, tokens int) Message {
 	t.Helper()
 
@@ -147,6 +183,18 @@ func storedMessage(t *testing.T, role string, blocks []bs.ContentBlock, tokens i
 		Content:       data,
 		TokenEstimate: tokens,
 	}
+}
+
+func renderAPIMessagesText(msgs []bs.Message) string {
+	var parts []string
+	for _, msg := range msgs {
+		for _, block := range bs.NormalizeContent(msg.Content) {
+			if block.Type == "text" {
+				parts = append(parts, block.Text)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func hasAPIBlock(msg bs.Message, blockType string, id string) bool {

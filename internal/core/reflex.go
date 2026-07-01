@@ -108,7 +108,7 @@ const (
 
 // ReflexContext is the structured output of the context preparation phase.
 // It separates AME traces from candidate rules so the reflex can classify rules
-// independently, then the gateway reassembles the final context.
+// independently. Rules are injected only through [active_rules], not as memory.
 type ReflexContext struct {
 	// FormattedTraces contains AME traces (facts, reflections, episodes, relations)
 	// formatted as [memory], [insight], [episode], [relation] lines. No rules.
@@ -116,7 +116,8 @@ type ReflexContext struct {
 	// CandidateRules are rules found by keyword + semantic search.
 	// Sent to reflex for classification.
 	CandidateRules []CandidateRule
-	// FullContext is the complete formatted context (traces + rules) for fallback.
+	// FullContext is the fallback formatted memory context. It intentionally
+	// excludes rules; procedural rules belong in [active_rules].
 	FullContext string
 	// ActiveNotes is a formatted summary of active notes/tasks for reflex classification.
 	ActiveNotes string

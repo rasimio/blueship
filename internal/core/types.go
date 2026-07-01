@@ -125,24 +125,78 @@ func NormalizeContent(content any) []ContentBlock {
 	}
 }
 
+// EstimateTextTokens estimates prompt tokens from text conservatively.
+//
+// The old rune/3 heuristic badly undercounted long Hebrew / non-ASCII payloads:
+// in production a ~165 KB Hebrew-heavy history estimated at ~31K tokens landed
+// near ~80K actual Anthropic input tokens. For non-ASCII-heavy text, byte size is
+// a better guardrail than rune count.
+func EstimateTextTokens(text string) int {
+	if text == "" {
+		return 0
+	}
+
+	runes := 0
+	nonASCII := 0
+	hasHebrew := false
+	for _, r := range text {
+		runes++
+		if r > 127 {
+			nonASCII++
+		}
+		if r >= 0x0590 && r <= 0x05FF {
+			hasHebrew = true
+		}
+	}
+
+	estimate := ceilDiv(runes, 3)
+	if hasHebrew || nonASCII*3 >= runes {
+		estimate = maxInt(estimate, ceilDiv(len(text), 2))
+		estimate = maxInt(estimate, ceilDiv(runes*5, 6)) // ~= runes / 1.2
+	}
+	if estimate <= 0 {
+		return 1
+	}
+	return estimate
+}
+
+func ceilDiv(n, d int) int {
+	if d <= 0 {
+		return 0
+	}
+	if n <= 0 {
+		return 0
+	}
+	return (n + d - 1) / d
+}
+
+func maxInt(values ...int) int {
+	max := 0
+	for _, v := range values {
+		if v > max {
+			max = v
+		}
+	}
+	return max
+}
+
 // EstimateTokens estimates token count from content blocks.
-// Uses ~3 chars per token as a compromise for mixed Latin/Cyrillic text.
 func EstimateTokens(blocks []ContentBlock) int {
 	total := 0
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			total += len([]rune(b.Text)) / 3
+			total += EstimateTextTokens(b.Text)
 		case "tool_use":
-			total += len([]rune(b.Name))/3 + len(b.Input)/3 + len([]rune(b.ThoughtSignature))/3
+			total += EstimateTextTokens(b.Name) + EstimateTextTokens(string(b.Input)) + EstimateTextTokens(b.ThoughtSignature)
 		case "image":
 			total += 1600
 		case "tool_result":
 			if s, ok := b.Content.(string); ok {
-				total += len([]rune(s)) / 3
+				total += EstimateTextTokens(s)
 			} else {
 				data, _ := json.Marshal(b.Content)
-				total += len(data) / 3
+				total += EstimateTextTokens(string(data))
 			}
 		}
 	}

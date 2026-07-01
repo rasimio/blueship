@@ -54,11 +54,11 @@ func calculatedMessageBudget(req MessageBudgetRequest) int {
 		return 0
 	}
 
-	systemTokens := len([]rune(req.SystemPrompt)) / 3
+	systemTokens := EstimateTextTokens(req.SystemPrompt)
 	toolSchemaTokens := 0
 	if len(req.Tools) > 0 {
 		data, _ := json.Marshal(req.Tools)
-		toolSchemaTokens = len(data) / 3
+		toolSchemaTokens = EstimateTextTokens(string(data))
 	}
 
 	budget := maxContext - systemTokens - toolSchemaTokens
