@@ -392,7 +392,8 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	var preTraces []agent.ToolTrace
 	preActionsToRun := reflexResult.PreActions
 	if len(disambiguationOptions) == 0 {
-		preActionsToRun = append(preActionsToRun, g.hostReflexPreActions(ctx, us, msgText, priorContext, reflexResult.Intent, rc)...)
+		hostActions := g.hostReflexPreActions(ctx, us, msgText, priorContext, reflexResult.Intent, rc)
+		preActionsToRun = append(hostActions, preActionsToRun...)
 	}
 	g.runReflexPreActions(ctx, us, timings, preActionsToRun, &preTraces, &researchBlock)
 
