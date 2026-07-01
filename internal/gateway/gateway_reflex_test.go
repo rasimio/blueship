@@ -7,11 +7,27 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
 	bs "github.com/rasimio/blueship/internal/core"
 )
+
+type reflexProviderFunc func(context.Context, bs.CompletionRequest) (*bs.CompletionResponse, error)
+
+func (f reflexProviderFunc) Complete(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
+	return f(ctx, req)
+}
+
+type staticModelStore struct{}
+
+func (staticModelStore) Load(context.Context) error                           { return nil }
+func (staticModelStore) Get(string) bs.ModelRef                               { return bs.ModelRef{Provider: "test", Name: "reflex"} }
+func (staticModelStore) ForRouter(string) string                              { return "test:reflex" }
+func (staticModelStore) Update(context.Context, string, string, string) error { return nil }
+func (staticModelStore) Roles() []string                                      { return []string{"reflex"} }
+func (staticModelStore) Refresh(context.Context) error                        { return nil }
 
 func TestInteractionTierPreparesCortexContextWithoutReflexLLM(t *testing.T) {
 	userID := uuid.New()
@@ -119,6 +135,60 @@ func TestInteractionTierRunsHostReflexPreActions(t *testing.T) {
 	}
 	if !strings.Contains(result.ReflexGuidance, "I do not have enough saved evidence to judge that") {
 		t.Fatalf("unsupported reassurance guard missing:\n%s", result.ReflexGuidance)
+	}
+}
+
+func TestLegacyReflexHostPreActionsOverridePlannerPreActions(t *testing.T) {
+	userID := uuid.New()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	g := &Gateway{
+		deps: &bs.Deps{
+			Config: &bs.Config{
+				ReflexPreActionSelector: func(ctx context.Context, req bs.ReflexPreActionRequest) []bs.ToolAction {
+					return []bs.ToolAction{{Tool: "memory_associate", Input: json.RawMessage(`{"message":"x"}`)}}
+				},
+			},
+			ModelStore: staticModelStore{},
+		},
+		provider: reflexProviderFunc(func(context.Context, bs.CompletionRequest) (*bs.CompletionResponse, error) {
+			return &bs.CompletionResponse{Content: []bs.ContentBlock{{
+				Type: "text",
+				Text: `{"intent":"free_reflection","confidence":0.95,"pre_actions":[{"tool":"browser_search","input":{"query":"x"}}],"tools":[]}`,
+			}}}, nil
+		}),
+		logger:             logger,
+		tz:                 time.UTC,
+		reflexPlanTemplate: "%s\n%s\n%s\n%s",
+	}
+
+	browserSearchCalled := false
+	reg := bs.NewToolRegistry()
+	reg.Register("memory_associate", "associate", json.RawMessage(`{"type":"object"}`), func(ctx context.Context, input json.RawMessage) (any, error) {
+		return map[string]any{"results": []string{}}, nil
+	})
+	reg.Register("browser_search", "search", json.RawMessage(`{"type":"object"}`), func(ctx context.Context, input json.RawMessage) (any, error) {
+		browserSearchCalled = true
+		return map[string]any{"results": []string{}}, nil
+	})
+	us := &UserState{
+		UserID:   userID,
+		ChatID:   "telegram:1",
+		Registry: reg,
+		Deps: &bs.Deps{
+			UserID: userID,
+			ReflexPreparer: func(ctx context.Context, userID, message, priorContext string) *bs.ReflexContext {
+				return &bs.ReflexContext{FormattedTraces: "[retrieval]\nno_match", Strategy: "neutral"}
+			},
+		},
+	}
+
+	result := g.runReflexPipeline(context.Background(), us, "Как ты думаешь, я хороший разработчик?", "prior", newTurnTimer())
+
+	if browserSearchCalled {
+		t.Fatal("planner browser_search should not run when host pre-actions are present")
+	}
+	if len(result.PreTraces) != 1 || result.PreTraces[0].Name != "memory_associate" {
+		t.Fatalf("pre-traces = %#v, want only memory_associate; guidance=%q", result.PreTraces, result.ReflexGuidance)
 	}
 }
 
