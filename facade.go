@@ -37,12 +37,14 @@ type (
 
 // --- S1 reflex: fast-tier classification + rules ---
 type (
-	ReflexContext = core.ReflexContext
-	ReflexResult  = core.ReflexResult
-	RuleContext   = core.RuleContext
-	ActiveRule    = core.ActiveRule
-	CandidateRule = core.CandidateRule
-	ToolAction    = core.ToolAction
+	ReflexContext           = core.ReflexContext
+	ReflexResult            = core.ReflexResult
+	RuleContext             = core.RuleContext
+	ActiveRule              = core.ActiveRule
+	CandidateRule           = core.CandidateRule
+	ToolAction              = core.ToolAction
+	ReflexPreActionRequest  = core.ReflexPreActionRequest
+	ReflexPreActionSelector = core.ReflexPreActionSelector
 )
 
 // --- S2 cortex: the agent turn + tools + agent tasks ---

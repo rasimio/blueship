@@ -240,16 +240,46 @@ func estimateToolSchemaTokens(tools []bs.ToolDefinition) int {
 	return bs.EstimateTextTokens(string(data))
 }
 
+const (
+	dialogBudgetModeTotalPrompt    = "total_prompt"
+	dialogBudgetModeDialogFallback = "dialog_budget_overhead_exceeded"
+	dialogBudgetModeUnbounded      = "unbounded"
+)
+
+type dialogBudgetDecision struct {
+	DialogBudget                int
+	PromptOverhead              int
+	Mode                        string
+	PromptOverheadExceedsBudget bool
+}
+
 func effectiveDialogBudget(totalPromptBudget int, systemPrompt, compactSummary, turnContext string, tools []bs.ToolDefinition) (dialogBudget int, promptOverhead int) {
+	decision := effectiveDialogBudgetDecision(totalPromptBudget, systemPrompt, compactSummary, turnContext, tools)
+	return decision.DialogBudget, decision.PromptOverhead
+}
+
+func effectiveDialogBudgetDecision(totalPromptBudget int, systemPrompt, compactSummary, turnContext string, tools []bs.ToolDefinition) dialogBudgetDecision {
 	if totalPromptBudget <= 0 {
-		return totalPromptBudget, 0
+		return dialogBudgetDecision{DialogBudget: totalPromptBudget, Mode: dialogBudgetModeUnbounded}
 	}
-	promptOverhead = estimateTextTokens(effectiveSystemPrompt(systemPrompt, compactSummary, turnContext)) + estimateToolSchemaTokens(tools)
-	dialogBudget = totalPromptBudget - promptOverhead
+	promptOverhead := estimateTextTokens(effectiveSystemPrompt(systemPrompt, compactSummary, turnContext)) + estimateToolSchemaTokens(tools)
+	if promptOverhead >= totalPromptBudget {
+		return dialogBudgetDecision{
+			DialogBudget:                totalPromptBudget,
+			PromptOverhead:              promptOverhead,
+			Mode:                        dialogBudgetModeDialogFallback,
+			PromptOverheadExceedsBudget: true,
+		}
+	}
+	dialogBudget := totalPromptBudget - promptOverhead
 	if dialogBudget < 1 {
 		dialogBudget = 1
 	}
-	return dialogBudget, promptOverhead
+	return dialogBudgetDecision{
+		DialogBudget:   dialogBudget,
+		PromptOverhead: promptOverhead,
+		Mode:           dialogBudgetModeTotalPrompt,
+	}
 }
 
 func maxToolTurnsForRole(role string) int {

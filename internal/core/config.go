@@ -62,6 +62,11 @@ type Config struct {
 	// default exactly.
 	ToolSelector ToolSelector `yaml:"-" json:"-"`
 
+	// ReflexPreActionSelector optionally adds deterministic pre-actions before
+	// Cortex. BlueShip executes and logs them through the normal reflex
+	// pre-action path; the host owns domain-specific tool choices.
+	ReflexPreActionSelector ReflexPreActionSelector `yaml:"-" json:"-"`
+
 	// ToolMeta carries per-tool cabinet metadata (display category + the
 	// `core` flag marking internal machinery users may not disable).
 	// Supplied by the host; nil disables tool-catalog publishing and

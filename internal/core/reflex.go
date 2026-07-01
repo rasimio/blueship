@@ -1,6 +1,9 @@
 package core
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+)
 
 // ReflexResult is the structured output of the reflex (System 1) planning phase.
 type ReflexResult struct {
@@ -39,6 +42,22 @@ type ToolAction struct {
 	Tool  string          `json:"tool"`
 	Input json.RawMessage `json:"input"`
 }
+
+// ReflexPreActionRequest is passed to the host's deterministic reflex
+// pre-action selector. BlueShip owns the execution/logging path; the host owns
+// domain-specific decisions such as which memory/search tools make sense.
+type ReflexPreActionRequest struct {
+	UserID       string
+	Message      string
+	PriorContext string
+	Context      *ReflexContext
+	Intent       string
+	Strategy     string
+}
+
+// ReflexPreActionSelector can add deterministic pre-actions before Cortex.
+// It is intentionally host-provided so BlueShip stays tool-name agnostic.
+type ReflexPreActionSelector func(ctx context.Context, req ReflexPreActionRequest) []ToolAction
 
 // PostAction is an action to execute after cortex generates a response.
 type PostAction struct {

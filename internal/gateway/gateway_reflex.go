@@ -26,6 +26,132 @@ type reflexPipelineResult struct {
 	Silent          bool
 }
 
+func appendDisambiguationGuidance(guidance *strings.Builder, options []bs.ClarificationOption) {
+	if guidance == nil || len(options) == 0 {
+		return
+	}
+	if guidance.Len() > 0 {
+		guidance.WriteString("\n\n")
+	}
+	guidance.WriteString("[DISAMBIGUATION REQUIRED]\n")
+	guidance.WriteString("The request is ambiguous. Ask the user what they mean:\n")
+	for i, opt := range options {
+		fmt.Fprintf(guidance, "%d. %s\n", i+1, opt.Label)
+	}
+	guidance.WriteString("\nDo NOT call tools. Ask a short question with options.\n")
+}
+
+func ambiguousDeletionOptions(message string) []bs.ClarificationOption {
+	text := strings.ToLower(strings.TrimSpace(message))
+	if text == "" || !strings.Contains(text, "последн") {
+		return nil
+	}
+	if !strings.Contains(text, "удали") && !strings.Contains(text, "удалить") &&
+		!strings.Contains(text, "сотри") && !strings.Contains(text, "стереть") &&
+		!strings.Contains(text, "закрой") && !strings.Contains(text, "закрыть") {
+		return nil
+	}
+	for _, concrete := range []string{
+		"задач", "замет", "таск", "note", "todo",
+		"памят", "memory", "сообщ", "message", "файл", "attachment",
+	} {
+		if strings.Contains(text, concrete) {
+			return nil
+		}
+	}
+	return []bs.ClarificationOption{
+		{Tool: "note_close", Label: "последнюю задачу или заметку"},
+		{Tool: "memory_update", Label: "последнюю сохраненную память"},
+	}
+}
+
+func memoryNoMatch(formattedTraces string) bool {
+	text := strings.ToLower(strings.TrimSpace(formattedTraces))
+	if text == "" {
+		return false
+	}
+	return strings.Contains(text, "[retrieval]\nno_match") || text == "no_match"
+}
+
+func appendMemoryGroundingGuidance(guidance *strings.Builder, formattedTraces string) {
+	if guidance == nil || !memoryNoMatch(formattedTraces) {
+		return
+	}
+	if guidance.Len() > 0 {
+		guidance.WriteString("\n\n")
+	}
+	guidance.WriteString("[memory grounding]\n")
+	guidance.WriteString("No user-specific memory matched this turn. Do not claim remembered or observed facts about the user from memory. If the user asks what you remember, or asks for a judgement that requires history, say there is not enough saved evidence and answer only from criteria or clarifying questions.\n")
+	guidance.WriteString("[/memory grounding]")
+}
+
+func appendResearchGuidance(guidance, researchBlock *strings.Builder) {
+	if guidance == nil || researchBlock == nil || researchBlock.Len() == 0 {
+		return
+	}
+	if guidance.Len() > 0 {
+		guidance.WriteString("\n\n")
+	}
+	guidance.WriteString(strings.TrimRight(researchBlock.String(), "\n"))
+	guidance.WriteString("\n[/research]")
+}
+
+func (g *Gateway) hostReflexPreActions(ctx context.Context, us *UserState, msgText, priorContext, intent string, rc *bs.ReflexContext) []bs.ToolAction {
+	if g == nil || g.deps == nil || g.deps.Config == nil || g.deps.Config.ReflexPreActionSelector == nil {
+		return nil
+	}
+	userID := ""
+	if us != nil {
+		userID = us.UserID.String()
+	}
+	strategy := ""
+	if rc != nil {
+		strategy = rc.Strategy
+	}
+	return g.deps.Config.ReflexPreActionSelector(ctx, bs.ReflexPreActionRequest{
+		UserID:       userID,
+		Message:      msgText,
+		PriorContext: priorContext,
+		Context:      rc,
+		Intent:       intent,
+		Strategy:     strategy,
+	})
+}
+
+func (g *Gateway) runReflexPreActions(ctx context.Context, us *UserState, timings *turnTimer, actions []bs.ToolAction, preTraces *[]agent.ToolTrace, researchBlock *strings.Builder) {
+	if len(actions) == 0 || us == nil || us.Registry == nil {
+		return
+	}
+	if len(actions) > maxPreActions {
+		actions = actions[:maxPreActions]
+	}
+	for _, pa := range actions {
+		paCtx, cancel := context.WithTimeout(ctx, preActionTimeout)
+		actionStarted := time.Now()
+		result, isError := us.Registry.Execute(paCtx, pa.Tool, pa.Input)
+		cancel()
+		timings.RecordSince("reflex.pre_action", actionStarted, fmt.Sprintf("tool=%s error=%t", pa.Tool, isError))
+		inputStr := string(pa.Input)
+		if len(inputStr) > 200 {
+			inputStr = inputStr[:200] + "..."
+		}
+		outputStr := result
+		if len(outputStr) > 500 {
+			outputStr = outputStr[:500] + "..."
+		}
+		*preTraces = append(*preTraces, agent.ToolTrace{Name: pa.Tool, Input: inputStr, Output: outputStr, Error: isError})
+		if isError {
+			g.logger.Warn("reflex pre-action failed", "tool", pa.Tool, "error", result)
+			continue
+		}
+		g.logger.Info("reflex pre-action done", "tool", pa.Tool, "result_len", len(result))
+		if researchBlock.Len() == 0 {
+			researchBlock.WriteString("[research]\n")
+		}
+		fmt.Fprintf(researchBlock, "[%s result]\n%s\n\n", pa.Tool, truncateStr(result, 2000))
+	}
+}
+
 // runReflexPipeline executes the System 1/2 pipeline:
 // 1. ReflexPreparer → structured context (traces + candidate rules)
 // 2. Reflex LLM (Gemini Flash) → plan (matched rules, pre/post actions, tools)
@@ -50,6 +176,17 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		}
 
 		var guidance strings.Builder
+		var preTraces []agent.ToolTrace
+		var researchBlock strings.Builder
+		disambiguationOptions := ambiguousDeletionOptions(msgText)
+		if len(disambiguationOptions) > 0 {
+			appendDisambiguationGuidance(&guidance, disambiguationOptions)
+			us.PendingDisambiguation = disambiguationOptions
+			g.logger.Info("reflex: deterministic disambiguation",
+				"options", len(disambiguationOptions),
+				"chat_id", us.ChatID,
+			)
+		}
 		hasRules := false
 		engineRuleCount := 0
 		var matchedRules []bs.MatchedRule
@@ -103,10 +240,17 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 			injectedCtx = rc.FormattedTraces
 			strategy = rc.Strategy
 			memoriesCount = rc.MemoriesCount
+			if len(disambiguationOptions) == 0 {
+				actions := g.hostReflexPreActions(ctx, us, msgText, priorContext, "", rc)
+				g.runReflexPreActions(ctx, us, timings, actions, &preTraces, &researchBlock)
+				appendResearchGuidance(&guidance, &researchBlock)
+			}
+			appendMemoryGroundingGuidance(&guidance, injectedCtx)
 		}
 		return reflexPipelineResult{
 			InjectedCtx:     injectedCtx,
 			ReflexGuidance:  guidance.String(),
+			PreTraces:       preTraces,
 			CortexTools:     dedupeStrings(cortexTools),
 			EngineRuleCount: engineRuleCount,
 			MemoriesCount:   memoriesCount,
@@ -230,39 +374,27 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	if lowConfidence {
 		formattedTraces = rc.FullContext
 	}
+	disambiguationOptions := ambiguousDeletionOptions(msgText)
+	if len(disambiguationOptions) > 0 {
+		reflexResult.Intent = "clarification_needed"
+		reflexResult.ClarificationOptions = disambiguationOptions
+		reflexResult.PreActions = nil
+		reflexResult.PostActions = nil
+		reflexResult.Tools = nil
+		g.logger.Info("reflex: deterministic disambiguation",
+			"options", len(disambiguationOptions),
+			"chat_id", us.ChatID,
+		)
+	}
 
 	// Execute pre-actions (web_search etc.) with timeout.
 	var researchBlock strings.Builder
 	var preTraces []agent.ToolTrace
 	preActionsToRun := reflexResult.PreActions
-	if len(preActionsToRun) > maxPreActions {
-		preActionsToRun = preActionsToRun[:maxPreActions]
+	if len(disambiguationOptions) == 0 {
+		preActionsToRun = append(preActionsToRun, g.hostReflexPreActions(ctx, us, msgText, priorContext, reflexResult.Intent, rc)...)
 	}
-	for _, pa := range preActionsToRun {
-		paCtx, cancel := context.WithTimeout(ctx, preActionTimeout)
-		actionStarted := time.Now()
-		result, isError := us.Registry.Execute(paCtx, pa.Tool, pa.Input)
-		cancel()
-		timings.RecordSince("reflex.pre_action", actionStarted, fmt.Sprintf("tool=%s error=%t", pa.Tool, isError))
-		inputStr := string(pa.Input)
-		if len(inputStr) > 200 {
-			inputStr = inputStr[:200] + "..."
-		}
-		outputStr := result
-		if len(outputStr) > 500 {
-			outputStr = outputStr[:500] + "..."
-		}
-		preTraces = append(preTraces, agent.ToolTrace{Name: pa.Tool, Input: inputStr, Output: outputStr, Error: isError})
-		if isError {
-			g.logger.Warn("reflex pre-action failed", "tool", pa.Tool, "error", result)
-			continue
-		}
-		g.logger.Info("reflex pre-action done", "tool", pa.Tool, "result_len", len(result))
-		if researchBlock.Len() == 0 {
-			researchBlock.WriteString("[research]\n")
-		}
-		fmt.Fprintf(&researchBlock, "[%s result]\n%s\n\n", pa.Tool, truncateStr(result, 2000))
-	}
+	g.runReflexPreActions(ctx, us, timings, preActionsToRun, &preTraces, &researchBlock)
 
 	// Expand matched rules into directive block (dedup by ID).
 	var guidance strings.Builder
@@ -276,12 +408,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 
 	// 0. Disambiguation: reflex detected multiple plausible tools.
 	if reflexResult.Intent == "clarification_needed" && len(reflexResult.ClarificationOptions) > 0 {
-		guidance.WriteString("[DISAMBIGUATION REQUIRED]\n")
-		guidance.WriteString("The request is ambiguous. Ask the user what they mean:\n")
-		for i, opt := range reflexResult.ClarificationOptions {
-			fmt.Fprintf(&guidance, "%d. %s\n", i+1, opt.Label)
-		}
-		guidance.WriteString("\nDo NOT call tools. Ask a short question with options.\n\n")
+		appendDisambiguationGuidance(&guidance, reflexResult.ClarificationOptions)
 		// Save options for resolution on the next turn.
 		us.PendingDisambiguation = reflexResult.ClarificationOptions
 		g.logger.Info("reflex: disambiguation",
@@ -407,10 +534,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	}
 
 	// Assemble: guidance (rules) + research + traces
-	if researchBlock.Len() > 0 {
-		guidance.WriteString("\n\n")
-		guidance.WriteString(researchBlock.String())
-	}
+	appendResearchGuidance(&guidance, &researchBlock)
 
 	// Intent-based guidance injection.
 	if reflexResult.Intent == "memory_operation" && rc.ActiveNotes != "" && guidance.Len() == 0 {
@@ -418,11 +542,6 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		guidance.WriteString(rc.ActiveNotes)
 		guidance.WriteString("[/active_notes]\n")
 		guidance.WriteString("If the user reports completion — call memory_update(id, status=done).\n")
-	}
-
-	// Close research block if any pre-actions produced results.
-	if researchBlock.Len() > 0 {
-		researchBlock.WriteString("[/research]")
 	}
 
 	// When temporal_recall returned data, skip AME traces — they pollute
@@ -433,6 +552,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 			break
 		}
 	}
+	appendMemoryGroundingGuidance(&guidance, formattedTraces)
 
 	return reflexPipelineResult{
 		InjectedCtx:     formattedTraces,

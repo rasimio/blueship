@@ -83,10 +83,12 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 	}
 
 	turnContext := buildTurnContext(cfg.ReflexGuidance, cfg.InjectedContext)
-	dialogBudget, promptOverhead := effectiveDialogBudget(tokenBudget, cfg.SystemPrompt, compactSummary, turnContext, tools)
+	dialogDecision := effectiveDialogBudgetDecision(tokenBudget, cfg.SystemPrompt, compactSummary, turnContext, tools)
+	dialogBudget := dialogDecision.DialogBudget
+	promptOverhead := dialogDecision.PromptOverhead
 	loadStarted := time.Now()
 	dialogMessages, loadErr := a.store.DialogMessagesForAPI(ctx, cfg.SessionID, dialogBudget)
-	emitTiming(cfg, "agent.load_dialog_messages", loadStarted, fmt.Sprintf("role=%s budget=%d effective_dialog_budget=%d prompt_overhead=%d", cfg.Role, tokenBudget, dialogBudget, promptOverhead))
+	emitTiming(cfg, "agent.load_dialog_messages", loadStarted, fmt.Sprintf("role=%s budget=%d effective_dialog_budget=%d prompt_overhead=%d mode=%s", cfg.Role, tokenBudget, dialogBudget, promptOverhead, dialogDecision.Mode))
 	if loadErr != nil {
 		return nil, fmt.Errorf("load dialog messages: %w", loadErr)
 	}
@@ -128,6 +130,8 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			"message_budget_source", budgetDecision.Source,
 			"dialog_effective_budget", dialogBudget,
 			"prompt_overhead_tokens_estimate", promptOverhead,
+			"dialog_budget_mode", dialogDecision.Mode,
+			"prompt_overhead_exceeds_budget", dialogDecision.PromptOverheadExceedsBudget,
 		}
 		callAttrs = append(callAttrs, anatomy.logAttrs()...)
 		a.logger.Info("calling LLM", callAttrs...)

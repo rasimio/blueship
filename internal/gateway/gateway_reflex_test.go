@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"strings"
@@ -71,5 +72,93 @@ func TestInteractionTierPreparesCortexContextWithoutReflexLLM(t *testing.T) {
 		if span.Name == "reflex_llm" {
 			t.Fatalf("interaction-tier context prep must not call the old reflex planner LLM")
 		}
+	}
+}
+
+func TestInteractionTierRunsHostReflexPreActions(t *testing.T) {
+	userID := uuid.New()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	g := &Gateway{
+		deps: &bs.Deps{
+			Config: &bs.Config{
+				Gateway: bs.GatewayConfig{InteractionTier: true},
+				ReflexPreActionSelector: func(ctx context.Context, req bs.ReflexPreActionRequest) []bs.ToolAction {
+					return []bs.ToolAction{{Tool: "memory_associate", Input: json.RawMessage(`{"message":"` + req.Message + `"}`)}}
+				},
+			},
+		},
+		logger: logger,
+	}
+
+	reg := bs.NewToolRegistry()
+	reg.Register("memory_associate", "associate", json.RawMessage(`{"type":"object"}`), func(ctx context.Context, input json.RawMessage) (any, error) {
+		return map[string]any{"results": []string{}}, nil
+	})
+	us := &UserState{
+		UserID:   userID,
+		ChatID:   "telegram:1",
+		Registry: reg,
+		Deps: &bs.Deps{
+			UserID: userID,
+			ReflexPreparer: func(ctx context.Context, userID, message, priorContext string) *bs.ReflexContext {
+				return &bs.ReflexContext{FormattedTraces: "[retrieval]\nno_match", Strategy: "neutral"}
+			},
+		},
+	}
+
+	result := g.runReflexPipeline(context.Background(), us, "Как ты думаешь, я хороший разработчик?", "prior", newTurnTimer())
+
+	if len(result.PreTraces) != 1 || result.PreTraces[0].Name != "memory_associate" {
+		t.Fatalf("host reflex pre-action not executed: %#v", result.PreTraces)
+	}
+	if !strings.Contains(result.ReflexGuidance, "[memory_associate result]") {
+		t.Fatalf("pre-action result missing from guidance:\n%s", result.ReflexGuidance)
+	}
+	if !strings.Contains(result.ReflexGuidance, "[memory grounding]") {
+		t.Fatalf("no-match grounding guidance missing:\n%s", result.ReflexGuidance)
+	}
+}
+
+func TestInteractionTierAmbiguousDeleteForcesDisambiguation(t *testing.T) {
+	userID := uuid.New()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	preActionCalled := false
+	g := &Gateway{
+		deps: &bs.Deps{
+			Config: &bs.Config{
+				Gateway: bs.GatewayConfig{InteractionTier: true},
+				ReflexPreActionSelector: func(ctx context.Context, req bs.ReflexPreActionRequest) []bs.ToolAction {
+					preActionCalled = true
+					return []bs.ToolAction{{Tool: "memory_associate", Input: json.RawMessage(`{"message":"x"}`)}}
+				},
+			},
+		},
+		logger: logger,
+	}
+	us := &UserState{
+		UserID:   userID,
+		ChatID:   "telegram:1",
+		Registry: bs.NewToolRegistry(),
+		Deps: &bs.Deps{
+			UserID: userID,
+			ReflexPreparer: func(ctx context.Context, userID, message, priorContext string) *bs.ReflexContext {
+				return &bs.ReflexContext{FormattedTraces: "[retrieval]\nno_match"}
+			},
+		},
+	}
+
+	result := g.runReflexPipeline(context.Background(), us, "Удали последнюю.", "prior", newTurnTimer())
+
+	if preActionCalled {
+		t.Fatalf("ambiguous delete should not run reflex pre-actions")
+	}
+	if !strings.Contains(result.ReflexGuidance, "[DISAMBIGUATION REQUIRED]") {
+		t.Fatalf("disambiguation guidance missing:\n%s", result.ReflexGuidance)
+	}
+	if len(us.PendingDisambiguation) == 0 {
+		t.Fatalf("pending disambiguation options not stored")
+	}
+	if len(result.PreTraces) != 0 {
+		t.Fatalf("unexpected pre-traces: %#v", result.PreTraces)
 	}
 }
