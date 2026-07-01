@@ -115,7 +115,8 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		}
 
 		// 4. Call LLM
-		a.logger.Info("calling LLM",
+		anatomy := newPromptAnatomy(a.registry, cfg.SystemPrompt, compactSummary, baseSystem, effectiveSystem, turnContext, turnTools, messages, dialogTokens, scratchpadTokens)
+		callAttrs := []any{
 			"model", cfg.Model,
 			"role", cfg.Role,
 			"tools", len(turnTools),
@@ -124,14 +125,9 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			"force_final", forceFinal,
 			"message_budget", tokenBudget,
 			"message_budget_source", budgetDecision.Source,
-			"base_system_tokens_estimate", estimateTextTokens(baseSystem),
-			"system_tokens_estimate", estimateTextTokens(effectiveSystem),
-			"tool_schema_tokens_estimate", estimateToolSchemaTokens(turnTools),
-			"dialog_message_tokens_estimate", dialogTokens,
-			"scratchpad_tokens_estimate", scratchpadTokens,
-			"message_tokens_estimate", estimateMessagesTokens(messages),
-			"turn_context_tokens_estimate", estimateTextTokens(turnContext),
-		)
+		}
+		callAttrs = append(callAttrs, anatomy.logAttrs()...)
+		a.logger.Info("calling LLM", callAttrs...)
 		llmStarted := time.Now()
 		resp, err := a.provider.Complete(ctx, bs.CompletionRequest{
 			Model:          cfg.Model,
@@ -150,12 +146,14 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		emitTiming(cfg, "llm.complete", llmStarted, llmTimingDetail(cfg, turn+1, resp.StopReason, resp.Usage.InputTokens, resp.Usage.OutputTokens))
 		a.recordLLMUsage(ctx, cfg, cfg.Model, turnTools, messages, baseSystem, effectiveSystem, tokenBudget, budgetDecision.Source, turnContext, dialogTokens, scratchpadTokens, resp.Usage, resp.StopReason, llmStarted)
 
-		a.logger.Info("LLM response",
+		responseAttrs := []any{
 			"stop_reason", resp.StopReason,
 			"input_tokens", resp.Usage.InputTokens,
 			"output_tokens", resp.Usage.OutputTokens,
-			"turn", turn+1,
-		)
+			"turn", turn + 1,
+		}
+		responseAttrs = append(responseAttrs, anatomy.responseAttrs(resp.Usage.InputTokens)...)
+		a.logger.Info("LLM response", responseAttrs...)
 
 		// 5. Store assistant response (skipped for an ephemeral run). Detached
 		// ctx so a long turn that just consumed the iteration budget can't lose
@@ -214,7 +212,17 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 
 				toolStarted := time.Now()
 				result, isError := a.registry.Execute(ctx, block.Name, block.Input)
+				latencyMs := int(time.Since(toolStarted) / time.Millisecond)
 				emitTiming(cfg, "tool.execute", toolStarted, toolTimingDetail(cfg, turn+1, block.Name, isError))
+				a.logger.Info("tool result",
+					"tool", block.Name,
+					"tool_use_id", block.ID,
+					"latency_ms", latencyMs,
+					"is_error", isError,
+					"input_bytes", len(block.Input),
+					"output_bytes", len(result),
+					"output_runes", len([]rune(result)),
+				)
 				resultBlock := bs.ContentBlock{
 					Type:      "tool_result",
 					ToolUseID: block.ID,

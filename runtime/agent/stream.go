@@ -92,24 +92,20 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			Temperature:    cfg.Temperature,
 		}
 
-		a.logger.Info("calling LLM (stream)",
+		anatomy := newPromptAnatomy(a.registry, cfg.SystemPrompt, compactSummary, baseSystem, effectiveSystem, turnContext, turnTools, messages, dialogTokens, scratchpadTokens)
+		callAttrs := []any{
 			"model", cfg.Model,
 			"role", cfg.Role,
 			"tools", len(turnTools),
 			"tool_selection_source", cfg.ToolSelectionSource,
 			"messages", len(messages),
-			"turn", turn+1,
+			"turn", turn + 1,
 			"force_final", forceFinal,
 			"message_budget", tokenBudget,
 			"message_budget_source", budgetDecision.Source,
-			"base_system_tokens_estimate", estimateTextTokens(baseSystem),
-			"system_tokens_estimate", estimateTextTokens(effectiveSystem),
-			"tool_schema_tokens_estimate", estimateToolSchemaTokens(turnTools),
-			"dialog_message_tokens_estimate", dialogTokens,
-			"scratchpad_tokens_estimate", scratchpadTokens,
-			"message_tokens_estimate", estimateMessagesTokens(messages),
-			"turn_context_tokens_estimate", estimateTextTokens(turnContext),
-		)
+		}
+		callAttrs = append(callAttrs, anatomy.logAttrs()...)
+		a.logger.Info("calling LLM (stream)", callAttrs...)
 
 		llmStarted := time.Now()
 		resp, err := streamProvider.StreamComplete(ctx, req, cb)
@@ -136,12 +132,14 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			}
 		}
 
-		a.logger.Info("LLM response",
+		responseAttrs := []any{
 			"stop_reason", resp.StopReason,
 			"input_tokens", resp.Usage.InputTokens,
 			"output_tokens", resp.Usage.OutputTokens,
-			"turn", turn+1,
-		)
+			"turn", turn + 1,
+		}
+		responseAttrs = append(responseAttrs, anatomy.responseAttrs(resp.Usage.InputTokens)...)
+		a.logger.Info("LLM response", responseAttrs...)
 
 		assistantMsg := bs.Message{
 			Role:    "assistant",
@@ -191,6 +189,15 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 				result, isError := a.registry.Execute(ctx, block.Name, block.Input)
 				latencyMs := int(time.Since(start) / time.Millisecond)
 				emitTiming(cfg, "tool.execute", start, toolTimingDetail(cfg, turn+1, block.Name, isError))
+				a.logger.Info("tool result",
+					"tool", block.Name,
+					"tool_use_id", block.ID,
+					"latency_ms", latencyMs,
+					"is_error", isError,
+					"input_bytes", len(block.Input),
+					"output_bytes", len(result),
+					"output_runes", len([]rune(result)),
+				)
 				if cb != nil && cb.OnToolResult != nil {
 					cb.OnToolResult(block.ID, result, isError, latencyMs)
 				}

@@ -679,6 +679,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		// work because RunStream carries the assistant + tool_result turns in
 		// memory for ephemeral runs (still nothing persisted to the DB).
 	}
+	g.logCortexTurnAnatomy(runCfg, forcedCortexTools)
 
 	// Voice transport: use streaming LLM with inline sentence-level TTS.
 	// Each sentence is TTS'd and sent as an audio chunk as soon as the LLM produces it.
