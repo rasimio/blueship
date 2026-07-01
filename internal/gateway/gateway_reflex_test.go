@@ -117,6 +117,29 @@ func TestInteractionTierRunsHostReflexPreActions(t *testing.T) {
 	if !strings.Contains(result.ReflexGuidance, "[memory grounding]") {
 		t.Fatalf("no-match grounding guidance missing:\n%s", result.ReflexGuidance)
 	}
+	if !strings.Contains(result.ReflexGuidance, "Do not add unsupported reassurance") {
+		t.Fatalf("unsupported reassurance guard missing:\n%s", result.ReflexGuidance)
+	}
+}
+
+func TestAppendResearchGuidanceRequiresSourceMention(t *testing.T) {
+	var guidance strings.Builder
+	var research strings.Builder
+	research.WriteString("[research]\n[browser_search result]\n{\"results\":[]}\n")
+
+	appendResearchGuidance(&guidance, &research)
+	got := guidance.String()
+	for _, want := range []string{
+		"[research usage]",
+		"Search results are navigation only",
+		"name the source/domain in the reply",
+		"mixed research + action requests",
+		"[/research]",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("guidance missing %q:\n%s", want, got)
+		}
+	}
 }
 
 func TestInteractionTierAmbiguousDeleteForcesDisambiguation(t *testing.T) {
