@@ -263,6 +263,46 @@ func TestRunReflexPreActionsFetchFirstSearchResultWhenRequested(t *testing.T) {
 	}
 }
 
+func TestRunReflexPreActionsRetriesShortFetchFirstResult(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	g := &Gateway{logger: logger}
+	reg := bs.NewToolRegistry()
+	reg.Register("browser_search", "search", json.RawMessage(`{"type":"object"}`), func(ctx context.Context, input json.RawMessage) (any, error) {
+		return map[string]any{"results": []map[string]any{
+			{"url": "https://www.anthropic.com/news/claude-opus-4-7", "domain": "anthropic.com", "tier": 2},
+		}}, nil
+	})
+	fetchCalls := 0
+	reg.Register("browser_fetch", "fetch", json.RawMessage(`{"type":"object"}`), func(ctx context.Context, input json.RawMessage) (any, error) {
+		fetchCalls++
+		if fetchCalls == 1 {
+			return map[string]any{"url": "https://www.anthropic.com/news/claude-opus-4-7", "text": "short"}, nil
+		}
+		return map[string]any{
+			"url":  "https://www.anthropic.com/news/claude-opus-4-7",
+			"text": strings.Repeat("Claude Opus 4.7 was released on April 16, 2026. ", 20),
+		}, nil
+	})
+	us := &UserState{Registry: reg}
+	var traces []agent.ToolTrace
+	var research strings.Builder
+
+	g.runReflexPreActions(context.Background(), us, newTurnTimer(), []bs.ToolAction{{
+		Tool:  "browser_search",
+		Input: json.RawMessage(`{"query":"Claude Opus 4.7 release date","fetch_first":true}`),
+	}}, &traces, &research)
+
+	if fetchCalls != 2 {
+		t.Fatalf("fetchCalls = %d, want retry", fetchCalls)
+	}
+	if !strings.Contains(research.String(), "April 16, 2026") {
+		t.Fatalf("research did not include retry result:\n%s", research.String())
+	}
+	if len(traces) != 2 || traces[1].Name != "browser_fetch" {
+		t.Fatalf("traces = %#v, want one final fetch trace after search", traces)
+	}
+}
+
 func TestInteractionTierAmbiguousDeleteForcesDisambiguation(t *testing.T) {
 	userID := uuid.New()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

@@ -27,6 +27,8 @@ type reflexPipelineResult struct {
 	Silent          bool
 }
 
+const browserFetchPreActionMinUsefulLen = 500
+
 func appendDisambiguationGuidance(guidance *strings.Builder, options []bs.ClarificationOption) {
 	if guidance == nil || len(options) == 0 {
 		return
@@ -82,7 +84,7 @@ func appendMemoryGroundingGuidance(guidance *strings.Builder, formattedTraces st
 		guidance.WriteString("\n\n")
 	}
 	guidance.WriteString("[memory grounding]\n")
-	guidance.WriteString("No user-specific memory matched this turn. Do not claim remembered or observed facts about the user from memory. If the user asks what you remember, or asks for a judgement that requires history, answer directly: \"I do not have enough saved evidence to judge that.\" Do not add unsupported reassurance, praise, inferred traits, or conditional compliments like \"if you keep learning, that says a lot.\" If useful, ask for concrete evidence to evaluate.\n")
+	guidance.WriteString("No user-specific memory matched this turn. Do not claim remembered or observed facts about the user from memory. If the user asks what you remember, or asks for a judgement that requires history, answer directly: \"I do not have enough saved evidence to judge that.\" Do not add unsupported reassurance, praise, inferred traits, or conditional compliments like \"if you keep learning, that says a lot.\" In Russian, avoid phrases like \"если ты продолжаешь учиться\", \"это уже о многом говорит\", and generic offers to help. If useful, ask for concrete evidence to evaluate.\n")
 	guidance.WriteString("[/memory grounding]")
 }
 
@@ -98,7 +100,7 @@ func appendResearchGuidance(guidance, researchBlock *strings.Builder) {
 	guidance.WriteString("- Search results are navigation only. Do not answer current factual claims from search titles alone.\n")
 	guidance.WriteString("- If you make a factual claim after browser_fetch or another fetched source, name the source/domain in the reply. For release dates and launches this source mention is mandatory.\n")
 	guidance.WriteString("- For release dates, product/model launches, prices, laws, and other current facts, prefer the official publisher/company/source. If only unofficial or low-trust pages support the claim, say it is not reliably confirmed; do not report a specific date as fact.\n")
-	guidance.WriteString("- For mixed research + action requests, answer in one concise combined reply with exactly this shape: factual result + source/domain/URL, then action confirmation. If the final reply omits the source/domain/URL, it is wrong. Do not add feature commentary, jokes, extra advice, or reminders.\n")
+	guidance.WriteString("- For mixed research + action requests, answer in one concise combined reply with exactly this shape: factual result + source/domain/URL, then action confirmation. If the final reply omits the source/domain/URL, it is wrong. Do not add feature commentary, jokes, extra advice, or reminders. End immediately after the action confirmation.\n")
 	guidance.WriteString("[/research usage]")
 	guidance.WriteString("\n[/research]")
 }
@@ -168,10 +170,7 @@ func (g *Gateway) runBrowserFetchPreAction(ctx context.Context, us *UserState, t
 	if selected.URL == "" {
 		return
 	}
-	input, err := json.Marshal(map[string]any{
-		"url":     selected.URL,
-		"wait_ms": 3000,
-	})
+	input, err := browserFetchInput(selected.URL, 3000)
 	if err != nil {
 		return
 	}
@@ -180,6 +179,20 @@ func (g *Gateway) runBrowserFetchPreAction(ctx context.Context, us *UserState, t
 	result, isError := us.Registry.Execute(fetchCtx, tool.ToolBrowserFetch, input)
 	cancel()
 	timings.RecordSince("reflex.pre_action", started, fmt.Sprintf("tool=%s error=%t", tool.ToolBrowserFetch, isError))
+	if !isError && len(result) < browserFetchPreActionMinUsefulLen {
+		retryInput, err := browserFetchInput(selected.URL, 6000)
+		if err == nil {
+			retryCtx, retryCancel := context.WithTimeout(ctx, preActionTimeout)
+			retryStarted := time.Now()
+			retryResult, retryError := us.Registry.Execute(retryCtx, tool.ToolBrowserFetch, retryInput)
+			retryCancel()
+			timings.RecordSince("reflex.pre_action_retry", retryStarted, fmt.Sprintf("tool=%s error=%t", tool.ToolBrowserFetch, retryError))
+			if !retryError && len(retryResult) > len(result) {
+				input = retryInput
+				result = retryResult
+			}
+		}
+	}
 	outputStr := result
 	if len(outputStr) > 500 {
 		outputStr = outputStr[:500] + "..."
@@ -201,6 +214,13 @@ func (g *Gateway) runBrowserFetchPreAction(ctx context.Context, us *UserState, t
 		researchBlock.WriteString("[research]\n")
 	}
 	fmt.Fprintf(researchBlock, "[%s result]\n%s\n\n", tool.ToolBrowserFetch, truncateStr(result, 4000))
+}
+
+func browserFetchInput(rawURL string, waitMS int) (json.RawMessage, error) {
+	return json.Marshal(map[string]any{
+		"url":     rawURL,
+		"wait_ms": waitMS,
+	})
 }
 
 func browserSearchWantsFetchFirst(input json.RawMessage) bool {
