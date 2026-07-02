@@ -206,6 +206,7 @@ func TestAppendResearchGuidanceRequiresSourceMention(t *testing.T) {
 		"name the source/domain in the reply",
 		"official publisher/company/source",
 		"mixed research + action requests",
+		"Do not add feature commentary",
 		"[/research]",
 	} {
 		if !strings.Contains(got, want) {
