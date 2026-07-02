@@ -84,7 +84,7 @@ func appendMemoryGroundingGuidance(guidance *strings.Builder, formattedTraces st
 		guidance.WriteString("\n\n")
 	}
 	guidance.WriteString("[memory grounding]\n")
-	guidance.WriteString("No user-specific memory matched this turn. Do not claim remembered or observed facts about the user from memory. If the user asks what you remember, or asks for a judgement that requires history, answer directly: \"I do not have enough saved evidence to judge that.\" Do not add unsupported reassurance, praise, inferred traits, or conditional compliments like \"if you keep learning, that says a lot.\" In Russian, avoid phrases like \"если ты продолжаешь учиться\", \"это уже о многом говорит\", and generic offers to help. If useful, ask for concrete evidence to evaluate.\n")
+	guidance.WriteString("No user-specific memory matched this turn. Do not claim remembered or observed facts about the user from memory. If the user asks what you remember, or asks for a judgement that requires history, answer directly: \"I do not have enough saved evidence to judge that.\" Keep it to one short sentence plus, at most, a request for concrete examples. Never evaluate hypothetically. Do not add unsupported reassurance, praise, inferred traits, or conditional compliments like \"if you keep learning, that says a lot.\" In Russian, avoid phrases like \"если ты продолжаешь учиться\", \"если ты продолжаешь развиваться\", \"это уже о многом говорит\", \"это хороший знак\", and generic offers to help. If useful, ask for concrete evidence to evaluate.\n")
 	guidance.WriteString("[/memory grounding]")
 }
 
