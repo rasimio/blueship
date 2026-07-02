@@ -101,6 +101,7 @@ func appendResearchGuidance(guidance, researchBlock *strings.Builder) {
 	guidance.WriteString("- If you make a factual claim after browser_fetch or another fetched source, name the source/domain in the reply. For release dates and launches this source mention is mandatory.\n")
 	guidance.WriteString("- For release dates, product/model launches, prices, laws, and other current facts, prefer the official publisher/company/source. If only unofficial or low-trust pages support the claim, say it is not reliably confirmed; do not report a specific date as fact.\n")
 	guidance.WriteString("- For mixed research + action requests, answer in one concise combined reply with exactly this shape: factual result + source/domain/URL, then action confirmation. If the final reply omits the source/domain/URL, it is wrong. Do not add feature commentary, jokes, extra advice, or reminders. End immediately after the action confirmation.\n")
+	guidance.WriteString("- Mixed research + action answer contract: two sentences only. Sentence 1 reports the fact and includes `Источник: <domain-or-URL>` using the fetched source. Sentence 2 confirms the action. No third sentence, no emoji.\n")
 	guidance.WriteString("[/research usage]")
 	guidance.WriteString("\n[/research]")
 }

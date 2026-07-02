@@ -208,6 +208,7 @@ func TestAppendResearchGuidanceRequiresSourceMention(t *testing.T) {
 		"official publisher/company/source",
 		"mixed research + action requests",
 		"If the final reply omits the source/domain/URL",
+		"Mixed research + action answer contract",
 		"Do not add feature commentary",
 		"[/research]",
 	} {
