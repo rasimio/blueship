@@ -208,7 +208,7 @@ func effectiveSystemPrompt(systemPrompt, compactSummary, turnContext string) str
 	return effective
 }
 
-func buildTurnContext(reflexGuidance, injectedContext string) string {
+func buildTurnContextForTools(reflexGuidance, injectedContext string, tools []bs.ToolDefinition) string {
 	var parts []string
 	if s := strings.TrimSpace(reflexGuidance); s != "" {
 		parts = append(parts, s)
@@ -216,7 +216,29 @@ func buildTurnContext(reflexGuidance, injectedContext string) string {
 	if s := strings.TrimSpace(injectedContext); s != "" {
 		parts = append(parts, s)
 	}
+	parts = append(parts, formatAvailableToolsContext(tools))
 	return strings.Join(parts, "\n\n")
+}
+
+func formatAvailableToolsContext(tools []bs.ToolDefinition) string {
+	var b strings.Builder
+	b.WriteString("[available_tools]\n")
+	if len(tools) == 0 {
+		b.WriteString("none. No native tool_use calls are available in this turn. Do not claim you can call tools; answer from visible context or say what is missing.\n")
+		b.WriteString("[/available_tools]")
+		return b.String()
+	}
+	b.WriteString("Only these native tool_use calls are available in this turn:\n")
+	for _, tool := range tools {
+		if tool.Name == "" {
+			continue
+		}
+		b.WriteString("- ")
+		b.WriteString(tool.Name)
+		b.WriteByte('\n')
+	}
+	b.WriteString("[/available_tools]")
+	return b.String()
 }
 
 func cloneMessages(messages []bs.Message) []bs.Message {

@@ -186,13 +186,107 @@ func TestRunTrackedLoadsDialogWithEffectivePromptBudget(t *testing.T) {
 		t.Fatalf("RunTracked failed: %v", err)
 	}
 
-	turnContext := buildTurnContext(cfg.ReflexGuidance, cfg.InjectedContext)
+	turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, nil)
 	wantBudget, wantOverhead := effectiveDialogBudget(cfg.MessageBudget, cfg.SystemPrompt, cfg.CompactSummary, turnContext, nil)
 	if store.lastDialogBudget != wantBudget {
 		t.Fatalf("DialogMessagesForAPI budget = %d, want %d (overhead %d)", store.lastDialogBudget, wantBudget, wantOverhead)
 	}
 	if store.lastDialogBudget >= cfg.MessageBudget {
 		t.Fatalf("dialog budget should be reduced below total prompt budget, got %d >= %d", store.lastDialogBudget, cfg.MessageBudget)
+	}
+}
+
+func TestRunTrackedTurnContextListsOnlyActualTools(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "user", Content: "hello"}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{{
+		Content:    []bs.ContentBlock{{Type: "text", Text: "done"}},
+		StopReason: "end_turn",
+		Usage:      bs.Usage{InputTokens: 10, OutputTokens: 2},
+	}}}
+	registry := bs.NewToolRegistry()
+	registry.Register("memory_search", "memory", json.RawMessage(`{"type":"object"}`), func(context.Context, json.RawMessage) (any, error) {
+		return map[string]string{"ok": "true"}, nil
+	})
+	registry.Register("browser_search", "browser", json.RawMessage(`{"type":"object"}`), func(context.Context, json.RawMessage) (any, error) {
+		return map[string]string{"ok": "true"}, nil
+	})
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, registry, nil, &bs.Config{}, logger)
+	if _, err := loop.RunTracked(context.Background(), RunConfig{
+		SessionID:      "s1",
+		SystemPrompt:   "base system",
+		Model:          "test-model",
+		MaxTokens:      64,
+		MaxTurns:       1,
+		MessageBudget:  6000,
+		SkipUserAppend: true,
+		ToolOverride:   []string{"browser_search"},
+	}, "ignored"); err != nil {
+		t.Fatalf("RunTracked failed: %v", err)
+	}
+
+	if len(provider.requests) != 1 {
+		t.Fatalf("want one provider call, got %d", len(provider.requests))
+	}
+	if len(provider.requests[0].Tools) != 1 || provider.requests[0].Tools[0].Name != "browser_search" {
+		t.Fatalf("provider tools = %#v, want only browser_search", provider.requests[0].Tools)
+	}
+	system := provider.requests[0].System
+	if !strings.Contains(system, "[available_tools]") || !strings.Contains(system, "- browser_search") {
+		t.Fatalf("system prompt missing actual tool shelf: %q", system)
+	}
+	if strings.Contains(system, "- memory_search") {
+		t.Fatalf("system prompt listed unavailable tool: %q", system)
+	}
+}
+
+func TestRunTrackedTurnContextSaysNoToolsWhenOverrideEmpty(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "user", Content: "hello"}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{{
+		Content:    []bs.ContentBlock{{Type: "text", Text: "done"}},
+		StopReason: "end_turn",
+		Usage:      bs.Usage{InputTokens: 10, OutputTokens: 2},
+	}}}
+	registry := bs.NewToolRegistry()
+	registry.Register("memory_search", "memory", json.RawMessage(`{"type":"object"}`), func(context.Context, json.RawMessage) (any, error) {
+		return map[string]string{"ok": "true"}, nil
+	})
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, registry, nil, &bs.Config{}, logger)
+	if _, err := loop.RunTracked(context.Background(), RunConfig{
+		SessionID:       "s1",
+		SystemPrompt:    "base system",
+		Model:           "test-model",
+		MaxTokens:       64,
+		MaxTurns:        1,
+		MessageBudget:   6000,
+		SkipUserAppend:  true,
+		InjectedContext: "A stale rule says to use memory_search.",
+		ToolOverride:    []string{},
+	}, "ignored"); err != nil {
+		t.Fatalf("RunTracked failed: %v", err)
+	}
+
+	if len(provider.requests) != 1 {
+		t.Fatalf("want one provider call, got %d", len(provider.requests))
+	}
+	if len(provider.requests[0].Tools) != 0 {
+		t.Fatalf("provider tools = %#v, want none", provider.requests[0].Tools)
+	}
+	system := provider.requests[0].System
+	toolShelf := strings.LastIndex(system, "[available_tools]")
+	staleHint := strings.Index(system, "memory_search")
+	if toolShelf < 0 || staleHint < 0 || toolShelf <= staleHint {
+		t.Fatalf("available tool shelf should follow stale context hints: %q", system)
+	}
+	if !strings.Contains(system, "none. No native tool_use calls are available") {
+		t.Fatalf("system prompt missing no-tools directive: %q", system)
 	}
 }
 

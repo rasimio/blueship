@@ -45,7 +45,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	budgetDecision := a.effectiveMessageBudget(cfg, cfg.SystemPrompt, tools)
 	tokenBudget := budgetDecision.Budget
 	compactSummary := cfg.CompactSummary
-	turnContext := buildTurnContext(cfg.ReflexGuidance, cfg.InjectedContext)
+	turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, tools)
 	dialogDecision := effectiveDialogBudgetDecision(tokenBudget, cfg.SystemPrompt, compactSummary, turnContext, tools)
 	dialogBudget := dialogDecision.DialogBudget
 	promptOverhead := dialogDecision.PromptOverhead
@@ -78,6 +78,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 				appendFinalAnswerDirective(&messages[len(messages)-1])
 			}
 		}
+		turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, turnTools)
 		scratchpadTokens := estimateMessagesTokens(convo) - dialogTokens
 		if scratchpadTokens < 0 {
 			scratchpadTokens = 0

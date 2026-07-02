@@ -82,7 +82,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		emitTiming(cfg, "agent.compaction", started, "role="+cfg.Role)
 	}
 
-	turnContext := buildTurnContext(cfg.ReflexGuidance, cfg.InjectedContext)
+	turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, tools)
 	dialogDecision := effectiveDialogBudgetDecision(tokenBudget, cfg.SystemPrompt, compactSummary, turnContext, tools)
 	dialogBudget := dialogDecision.DialogBudget
 	promptOverhead := dialogDecision.PromptOverhead
@@ -112,6 +112,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 				appendFinalAnswerDirective(&messages[len(messages)-1])
 			}
 		}
+		turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, turnTools)
 		scratchpadTokens := estimateMessagesTokens(convo) - dialogTokens
 		if scratchpadTokens < 0 {
 			scratchpadTokens = 0
