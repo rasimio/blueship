@@ -219,7 +219,8 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 				)
 
 				toolStarted := time.Now()
-				result, isError := a.registry.Execute(ctx, block.Name, block.Input)
+				toolTimeout := resolveToolExecutionTimeout(cfg.ToolTimeout, block.Name)
+				result, isError, timedOut := executeToolWithTimeout(ctx, a.registry, block.Name, block.Input, toolTimeout)
 				latencyMs := int(time.Since(toolStarted) / time.Millisecond)
 				emitTiming(cfg, "tool.execute", toolStarted, toolTimingDetail(cfg, turn+1, block.Name, isError))
 				a.logger.Info("tool result",
@@ -227,6 +228,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 					"tool_use_id", block.ID,
 					"latency_ms", latencyMs,
 					"is_error", isError,
+					"timed_out", timedOut,
 					"input_bytes", len(block.Input),
 					"output_bytes", len(result),
 					"output_runes", len([]rune(result)),

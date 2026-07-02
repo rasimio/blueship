@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings"
+	"time"
 
 	bs "github.com/rasimio/blueship/internal/core"
 )
@@ -100,6 +101,8 @@ type RunConfig struct {
 	// OnTiming receives per-component latency spans for observability. It must
 	// not affect loop behavior; callers may leave it nil.
 	OnTiming func(bs.TimingSpan)
+	// ToolTimeout caps a single tool execution. Zero uses per-tool defaults.
+	ToolTimeout time.Duration
 }
 
 // NewLoop creates a new agent loop.

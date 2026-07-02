@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	bs "github.com/rasimio/blueship/internal/core"
 )
@@ -156,6 +157,63 @@ func TestRunTrackedCompactsToolResultOnlyForPrompt(t *testing.T) {
 	}
 	if !strings.Contains(rawPersisted, longText) {
 		t.Fatalf("persisted tool result should keep raw output")
+	}
+}
+
+func TestRunTrackedTimesOutHungTool(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "user", Content: "search"}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{
+		{
+			Content: []bs.ContentBlock{{
+				Type:  "tool_use",
+				ID:    "call_1",
+				Name:  "browser_search",
+				Input: json.RawMessage(`{"query":"aeza alternatives"}`),
+			}},
+			StopReason: "tool_use",
+			Usage:      bs.Usage{InputTokens: 10, OutputTokens: 3},
+		},
+		{
+			Content:    []bs.ContentBlock{{Type: "text", Text: "fallback answer"}},
+			StopReason: "end_turn",
+			Usage:      bs.Usage{InputTokens: 20, OutputTokens: 2},
+		},
+	}}
+	registry := bs.NewToolRegistry()
+	registry.Register("browser_search", "search", json.RawMessage(`{"type":"object"}`), func(context.Context, json.RawMessage) (any, error) {
+		time.Sleep(200 * time.Millisecond)
+		return map[string]string{"result": "too late"}, nil
+	})
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, registry, nil, &bs.Config{}, logger)
+	started := time.Now()
+	result, err := loop.RunTracked(context.Background(), RunConfig{
+		SessionID:      "s1",
+		SystemPrompt:   "base system",
+		Model:          "test-model",
+		MaxTokens:      64,
+		MaxTurns:       3,
+		MessageBudget:  6000,
+		SkipUserAppend: true,
+		ToolTimeout:    20 * time.Millisecond,
+	}, "ignored")
+	if err != nil {
+		t.Fatalf("RunTracked failed: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 150*time.Millisecond {
+		t.Fatalf("tool timeout did not unblock loop quickly enough: %s", elapsed)
+	}
+	if result.Text != "fallback answer" {
+		t.Fatalf("want final text after timeout, got %q", result.Text)
+	}
+	if len(result.ToolTraces) != 1 || !result.ToolTraces[0].Error {
+		t.Fatalf("want one errored tool trace, got %#v", result.ToolTraces)
+	}
+	if !strings.Contains(result.ToolTraces[0].Output, "timed out") {
+		t.Fatalf("timeout trace missing timeout text: %#v", result.ToolTraces[0])
 	}
 }
 
