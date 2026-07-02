@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -95,9 +96,9 @@ func appendResearchGuidance(guidance, researchBlock *strings.Builder) {
 	guidance.WriteString(strings.TrimRight(researchBlock.String(), "\n"))
 	guidance.WriteString("\n\n[research usage]\n")
 	guidance.WriteString("- Search results are navigation only. Do not answer current factual claims from search titles alone.\n")
-	guidance.WriteString("- If you make a factual claim after browser_fetch or another fetched source, name the source/domain in the reply.\n")
+	guidance.WriteString("- If you make a factual claim after browser_fetch or another fetched source, name the source/domain in the reply. For release dates and launches this source mention is mandatory.\n")
 	guidance.WriteString("- For release dates, product/model launches, prices, laws, and other current facts, prefer the official publisher/company/source. If only unofficial or low-trust pages support the claim, say it is not reliably confirmed; do not report a specific date as fact.\n")
-	guidance.WriteString("- For mixed research + action requests, answer in one concise combined reply with this shape: factual result + source/domain/URL, then action confirmation. Do not add feature commentary, jokes, extra advice, or reminders.\n")
+	guidance.WriteString("- For mixed research + action requests, answer in one concise combined reply with exactly this shape: factual result + source/domain/URL, then action confirmation. If the final reply omits the source/domain/URL, it is wrong. Do not add feature commentary, jokes, extra advice, or reminders.\n")
 	guidance.WriteString("[/research usage]")
 	guidance.WriteString("\n[/research]")
 }
@@ -162,12 +163,13 @@ func (g *Gateway) runReflexPreActions(ctx context.Context, us *UserState, timing
 }
 
 func (g *Gateway) runBrowserFetchPreAction(ctx context.Context, us *UserState, timings *turnTimer, searchResult string, preTraces *[]agent.ToolTrace, researchBlock *strings.Builder) {
-	url := firstSearchResultURL(searchResult)
-	if url == "" {
+	candidates := searchResultURLCandidates(searchResult)
+	selected := bestSearchResultURL(candidates)
+	if selected.URL == "" {
 		return
 	}
 	input, err := json.Marshal(map[string]any{
-		"url":     url,
+		"url":     selected.URL,
 		"wait_ms": 3000,
 	})
 	if err != nil {
@@ -187,7 +189,14 @@ func (g *Gateway) runBrowserFetchPreAction(ctx context.Context, us *UserState, t
 		g.logger.Warn("reflex pre-action failed", "tool", tool.ToolBrowserFetch, "error", result)
 		return
 	}
-	g.logger.Info("reflex pre-action done", "tool", tool.ToolBrowserFetch, "result_len", len(result), "source_url", url)
+	g.logger.Info("reflex pre-action done",
+		"tool", tool.ToolBrowserFetch,
+		"result_len", len(result),
+		"source_url", selected.URL,
+		"source_domain", selected.Domain,
+		"source_tier", selected.Tier,
+		"search_candidates", searchCandidateSummary(candidates),
+	)
 	if researchBlock.Len() == 0 {
 		researchBlock.WriteString("[research]\n")
 	}
@@ -204,32 +213,80 @@ func browserSearchWantsFetchFirst(input json.RawMessage) bool {
 	return p.FetchFirst
 }
 
-func firstSearchResultURL(raw string) string {
+type searchResultCandidate struct {
+	URL    string
+	Domain string
+	Tier   int
+}
+
+func searchResultURLCandidates(raw string) []searchResultCandidate {
 	var payload struct {
 		Results []struct {
-			URL  string `json:"url"`
-			Tier int    `json:"tier"`
+			URL    string `json:"url"`
+			Domain string `json:"domain"`
+			Tier   int    `json:"tier"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return ""
+		return nil
 	}
-	bestURL := ""
-	bestTier := 99
+	candidates := make([]searchResultCandidate, 0, len(payload.Results))
 	for _, r := range payload.Results {
-		if strings.TrimSpace(r.URL) == "" {
+		c := searchResultCandidate{
+			URL:    strings.TrimSpace(r.URL),
+			Domain: strings.TrimSpace(r.Domain),
+			Tier:   r.Tier,
+		}
+		if c.URL == "" {
 			continue
 		}
-		tier := r.Tier
-		if tier <= 0 {
-			tier = 4
+		if c.Tier <= 0 {
+			c.Tier = 4
 		}
-		if bestURL == "" || tier < bestTier {
-			bestURL = r.URL
-			bestTier = tier
+		if c.Domain == "" {
+			c.Domain = domainFromURL(c.URL)
+		}
+		candidates = append(candidates, c)
+	}
+	return candidates
+}
+
+func bestSearchResultURL(candidates []searchResultCandidate) searchResultCandidate {
+	var best searchResultCandidate
+	bestTier := 99
+	for _, c := range candidates {
+		if c.URL == "" {
+			continue
+		}
+		if best.URL == "" || c.Tier < bestTier {
+			best = c
+			bestTier = c.Tier
 		}
 	}
-	return bestURL
+	return best
+}
+
+func domainFromURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	return strings.TrimPrefix(host, "www.")
+}
+
+func searchCandidateSummary(candidates []searchResultCandidate) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, min(len(candidates), 5))
+	for i, c := range candidates {
+		if i >= 5 {
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s(tier=%d)", c.Domain, c.Tier))
+	}
+	return strings.Join(parts, ",")
 }
 
 // runReflexPipeline executes the System 1/2 pipeline:

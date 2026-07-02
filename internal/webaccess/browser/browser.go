@@ -8,9 +8,10 @@
 // browser state between unrelated turns, no cookie carryover that could
 // poison the next search.
 //
-// Proxy: by default we route through the daemon's xray VPN so search
-// runs from the same exit IP as OpenAI/Gemini calls. Order of override:
-// explicit Proxy field → BROWSER_PROXY → HTTPS_PROXY → HTTP_PROXY.
+// Network: Chrome runs direct by default. A caller may pass an explicit
+// per-call Proxy override, but ambient HTTP_PROXY / HTTPS_PROXY env vars
+// are intentionally ignored so a host daemon cannot accidentally inherit
+// a stale system proxy.
 //
 // This package lives in blueship (the framework) rather than a single
 // host agent's repo because every BlueShip-based agent needs the same
@@ -73,8 +74,8 @@ func validateFetchURL(rawURL string) error {
 type FetchOptions struct {
 	URL    string
 	WaitMS int
-	// Proxy overrides env-derived proxy. Empty means "use env"; the
-	// sentinel "-" disables proxying entirely for this call.
+	// Proxy is an explicit per-call proxy. Empty means direct; the
+	// sentinel "-" also forces direct.
 	Proxy string
 }
 
@@ -171,22 +172,13 @@ func (e *SearchError) Error() string {
 const userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
 	"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 
-// resolveProxy applies the Proxy override → env fallback chain. The
+// resolveProxy applies only the explicit per-call Proxy override. The
 // sentinel "-" disables the proxy entirely.
 func resolveProxy(override string) string {
-	if override == "-" {
+	if override == "" || override == "-" {
 		return ""
 	}
-	if override != "" {
-		return override
-	}
-	for _, k := range []string{"BROWSER_PROXY", "HTTPS_PROXY", "HTTP_PROXY",
-		"https_proxy", "http_proxy"} {
-		if v := os.Getenv(k); v != "" {
-			return v
-		}
-	}
-	return ""
+	return override
 }
 
 // allocator builds a chromedp ExecAllocator with our standard flags

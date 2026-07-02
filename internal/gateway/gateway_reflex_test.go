@@ -204,8 +204,10 @@ func TestAppendResearchGuidanceRequiresSourceMention(t *testing.T) {
 		"[research usage]",
 		"Search results are navigation only",
 		"name the source/domain in the reply",
+		"source mention is mandatory",
 		"official publisher/company/source",
 		"mixed research + action requests",
+		"If the final reply omits the source/domain/URL",
 		"Do not add feature commentary",
 		"[/research]",
 	} {
