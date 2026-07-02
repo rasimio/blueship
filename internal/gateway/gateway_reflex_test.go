@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	bs "github.com/rasimio/blueship/internal/core"
+	"github.com/rasimio/blueship/runtime/agent"
 )
 
 type reflexProviderFunc func(context.Context, bs.CompletionRequest) (*bs.CompletionResponse, error)
@@ -210,6 +211,52 @@ func TestAppendResearchGuidanceRequiresSourceMention(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("guidance missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestRunReflexPreActionsFetchFirstSearchResultWhenRequested(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	g := &Gateway{logger: logger}
+	reg := bs.NewToolRegistry()
+	reg.Register("browser_search", "search", json.RawMessage(`{"type":"object"}`), func(ctx context.Context, input json.RawMessage) (any, error) {
+		return map[string]any{"results": []map[string]any{
+			{"url": "https://low.example/post", "tier": 5},
+			{"url": "https://www.anthropic.com/news/claude-opus-4-7", "tier": 2},
+		}}, nil
+	})
+	fetchedURL := ""
+	reg.Register("browser_fetch", "fetch", json.RawMessage(`{"type":"object"}`), func(ctx context.Context, input json.RawMessage) (any, error) {
+		var p struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(input, &p); err != nil {
+			t.Fatal(err)
+		}
+		fetchedURL = p.URL
+		return map[string]any{
+			"url":   p.URL,
+			"title": "Claude Opus 4.7",
+			"text":  "Claude Opus 4.7 was released on April 16, 2026.",
+		}, nil
+	})
+	us := &UserState{Registry: reg}
+	var traces []agent.ToolTrace
+	var research strings.Builder
+
+	g.runReflexPreActions(context.Background(), us, newTurnTimer(), []bs.ToolAction{{
+		Tool:  "browser_search",
+		Input: json.RawMessage(`{"query":"Claude Opus 4.7 release date","fetch_first":true}`),
+	}}, &traces, &research)
+
+	if fetchedURL != "https://www.anthropic.com/news/claude-opus-4-7" {
+		t.Fatalf("fetched URL = %q", fetchedURL)
+	}
+	if len(traces) != 2 || traces[0].Name != "browser_search" || traces[1].Name != "browser_fetch" {
+		t.Fatalf("traces = %#v, want search then fetch", traces)
+	}
+	got := research.String()
+	if !strings.Contains(got, "[browser_search result]") || !strings.Contains(got, "[browser_fetch result]") {
+		t.Fatalf("research block missing search/fetch results:\n%s", got)
 	}
 }
 

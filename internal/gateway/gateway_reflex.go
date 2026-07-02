@@ -155,7 +155,81 @@ func (g *Gateway) runReflexPreActions(ctx context.Context, us *UserState, timing
 			researchBlock.WriteString("[research]\n")
 		}
 		fmt.Fprintf(researchBlock, "[%s result]\n%s\n\n", pa.Tool, truncateStr(result, 2000))
+		if pa.Tool == tool.ToolBrowserSearch && browserSearchWantsFetchFirst(pa.Input) {
+			g.runBrowserFetchPreAction(ctx, us, timings, result, preTraces, researchBlock)
+		}
 	}
+}
+
+func (g *Gateway) runBrowserFetchPreAction(ctx context.Context, us *UserState, timings *turnTimer, searchResult string, preTraces *[]agent.ToolTrace, researchBlock *strings.Builder) {
+	url := firstSearchResultURL(searchResult)
+	if url == "" {
+		return
+	}
+	input, err := json.Marshal(map[string]any{
+		"url":     url,
+		"wait_ms": 3000,
+	})
+	if err != nil {
+		return
+	}
+	fetchCtx, cancel := context.WithTimeout(ctx, preActionTimeout)
+	started := time.Now()
+	result, isError := us.Registry.Execute(fetchCtx, tool.ToolBrowserFetch, input)
+	cancel()
+	timings.RecordSince("reflex.pre_action", started, fmt.Sprintf("tool=%s error=%t", tool.ToolBrowserFetch, isError))
+	outputStr := result
+	if len(outputStr) > 500 {
+		outputStr = outputStr[:500] + "..."
+	}
+	*preTraces = append(*preTraces, agent.ToolTrace{Name: tool.ToolBrowserFetch, Input: string(input), Output: outputStr, Error: isError})
+	if isError {
+		g.logger.Warn("reflex pre-action failed", "tool", tool.ToolBrowserFetch, "error", result)
+		return
+	}
+	g.logger.Info("reflex pre-action done", "tool", tool.ToolBrowserFetch, "result_len", len(result), "source_url", url)
+	if researchBlock.Len() == 0 {
+		researchBlock.WriteString("[research]\n")
+	}
+	fmt.Fprintf(researchBlock, "[%s result]\n%s\n\n", tool.ToolBrowserFetch, truncateStr(result, 4000))
+}
+
+func browserSearchWantsFetchFirst(input json.RawMessage) bool {
+	var p struct {
+		FetchFirst bool `json:"fetch_first"`
+	}
+	if err := json.Unmarshal(input, &p); err != nil {
+		return false
+	}
+	return p.FetchFirst
+}
+
+func firstSearchResultURL(raw string) string {
+	var payload struct {
+		Results []struct {
+			URL  string `json:"url"`
+			Tier int    `json:"tier"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return ""
+	}
+	bestURL := ""
+	bestTier := 99
+	for _, r := range payload.Results {
+		if strings.TrimSpace(r.URL) == "" {
+			continue
+		}
+		tier := r.Tier
+		if tier <= 0 {
+			tier = 4
+		}
+		if bestURL == "" || tier < bestTier {
+			bestURL = r.URL
+			bestTier = tier
+		}
+	}
+	return bestURL
 }
 
 // runReflexPipeline executes the System 1/2 pipeline:
