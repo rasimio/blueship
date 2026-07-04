@@ -18,6 +18,40 @@ import (
 // task's final reply before it reaches the user (see the [DONE] cleaning).
 var scratchpadRE = regexp.MustCompile(`(?is)<scratchpad>.*?</scratchpad>`)
 
+// backgroundStatusTailRE catches task-runner acknowledgements that are not the
+// user-facing payload. Background work is autonomous: the user should receive
+// the nudge/report itself, not a receipt that the agent "did the task".
+var backgroundStatusTailRE = regexp.MustCompile(`(?i)^\s*(готово[,.! ]*(напомнила|отметила|записала|сделала|проверила|обновила)?\.?|done[,.! ]*(reminded|noted|saved|updated|checked|sent)?\.?|reminded\.?|noted\.?)\s*$`)
+
+const backgroundAutonomyFrame = `## Background Autonomy
+
+You are not replying to a fresh user message. This is your own autonomous background process waking up to continue a standing intention.
+
+Treat the task/instructions as something you already chose or accepted earlier, not as an order you need to acknowledge. Do not greet, do not say "I'll check", and do not append completion receipts like "done", "noted", "готово", "напомнила", or "отметила".
+
+If the result should reach the user, write only the message or artefact that should reach them. If nothing should be sent, output exactly [no-op].`
+
+type backendPrefetchConfig struct {
+	Tools              []backendPrefetchTool `json:"tools"`
+	SkipLLMIfEmptyTool string                `json:"skip_llm_if_empty_tool"`
+	DisableLLMTools    bool                  `json:"disable_llm_tools"`
+	SkipLLMLocalHours  *backendPrefetchHours `json:"skip_llm_local_hours,omitempty"`
+}
+
+type backendPrefetchTool struct {
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+}
+
+type backendPrefetchHours struct {
+	From int `json:"from"`
+	To   int `json:"to"`
+}
+
+func (c backendPrefetchConfig) enabled() bool {
+	return len(c.Tools) > 0
+}
+
 type Background struct {
 	tz           *time.Location
 	pauseTools   map[string]bool // tool names that trigger pause when invoked
@@ -81,8 +115,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	notifyDefault := true
 	skipReflex := false
 	// inputMode controls how the instruction reaches the model:
-	//   prompt_key (default) — instruction in the system prompt + a [TASK:…]
-	//     user turn through the chat persona (legacy behaviour).
+	//   prompt_key (default) — instruction in the system prompt + an
+	//     autonomous background trigger turn. This is not framed as a fresh
+	//     user request; the model is continuing its own standing intention.
 	//   system — instruction in the system prompt + a NEUTRAL trigger turn
 	//     that forbids conversational preamble. The assistant executes its
 	//     own proactive tick and returns only the result/[no-op] — this is
@@ -93,14 +128,16 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	inputMode := "prompt_key"
 	var promptKeys []string
 	var skillSlugs []string
+	var backendPrefetch backendPrefetchConfig
 	if task.Config != nil {
 		var cfg struct {
-			Prompt           string   `json:"prompt"`
-			NotifyDefault    *bool    `json:"notify_default"`
-			SystemPromptKeys []string `json:"system_prompt_keys"`
-			SkipReflex       bool     `json:"skip_reflex"`
-			InputMode        string   `json:"input_mode"`
-			Skills           []string `json:"skills"`
+			Prompt           string                 `json:"prompt"`
+			NotifyDefault    *bool                  `json:"notify_default"`
+			SystemPromptKeys []string               `json:"system_prompt_keys"`
+			SkipReflex       bool                   `json:"skip_reflex"`
+			InputMode        string                 `json:"input_mode"`
+			Skills           []string               `json:"skills"`
+			BackendPrefetch  *backendPrefetchConfig `json:"backend_prefetch"`
 		}
 		if json.Unmarshal(task.Config, &cfg) == nil {
 			skillSlugs = cfg.Skills
@@ -116,6 +153,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			skipReflex = cfg.SkipReflex
 			if cfg.InputMode != "" {
 				inputMode = cfg.InputMode
+			}
+			if cfg.BackendPrefetch != nil {
+				backendPrefetch = *cfg.BackendPrefetch
 			}
 		}
 	}
@@ -242,9 +282,14 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// chat-authored task can carry its own instruction text without a file.
 	instr := resolvePromptOrBody(ctx, deps.Prompts, instructionKey)
 
+	// All background work gets the autonomy frame. Even user-authored scheduled
+	// tasks are being executed by the agent's own background process now, not
+	// answered as a live inbound chat turn.
+	parts = append(parts, backgroundAutonomyFrame)
+
 	// In `user` mode the instruction is the user's message (added as the user
-	// turn below), so the system prompt is persona-only. Every other mode puts
-	// the instruction in the system prompt.
+	// turn below), so the system prompt is persona + autonomy only. Every other
+	// mode puts the instruction in the system prompt.
 	if inputMode != "user" {
 		parts = append(parts, instr)
 	}
@@ -257,6 +302,30 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	now := time.Now().In(deps.Config.Gateway.TimezoneFor(ctx, b.tz))
 	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s",
 		now.Format("2006-01-02 15:04 MST (Monday)"), systemPrompt)
+
+	var backendPrefetchTraces []agent.ToolTrace
+	var backendPrefetchBlock string
+	if backendPrefetch.enabled() {
+		traces, block, skipReason, err := runBackendPrefetch(ctx, deps, backendPrefetch, now)
+		if err != nil {
+			return core.IterationResult{}, err
+		}
+		backendPrefetchTraces = traces
+		backendPrefetchBlock = block
+		if skipReason != "" {
+			if deps.Logger != nil {
+				deps.Logger.InfoContext(ctx, "background: backend prefetch skipped llm",
+					"task_id", task.ID,
+					"reason", skipReason,
+				)
+			}
+			toolCallsJSON, _ := json.Marshal(backendPrefetchTraces)
+			if len(toolCallsJSON) == 0 {
+				toolCallsJSON = json.RawMessage("[]")
+			}
+			return core.IterationResult{Done: true, ToolCallsJSON: toolCallsJSON}, nil
+		}
+	}
 
 	// 3. Resolve model: router format for LLM, display name for session.
 	//
@@ -347,23 +416,26 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		// check (not a user request) and bans any acknowledgement — only the
 		// finished message or [no-op] should come back. This is the fix for a
 		// heartbeat opening with "щас гляну".
-		msg = "[Proactive tick. Carry out the instructions in your system prompt now. " +
-			"This is your OWN background check, not a user request — do not acknowledge, " +
-			"greet, or narrate (no \"let me check\", no \"щас гляну\"). Reply with ONLY the " +
-			"finished message to send the user, or exactly [no-op] if there is nothing to send.]"
+		msg = "[Autonomous background tick. Carry out the standing intention in your system prompt now. " +
+			"This is your own background check, not a user request. Do not acknowledge, greet, narrate, " +
+			"or append a completion receipt. Reply with only the finished message to send the user, " +
+			"or exactly [no-op] if there is nothing to send.]"
 	case "user":
-		// The instruction text is delivered as if the user wrote it; the model
-		// replies conversationally in persona.
+		// The instruction text is user-authored, but this is still a background
+		// wakeup. Frame it as a standing instruction, not a fresh inbound chat
+		// message that needs acknowledgement.
 		if strings.TrimSpace(instr) != "" {
-			msg = instr
+			msg = fmt.Sprintf("%s\n\nUser-authored standing instruction:\n%s",
+				formatBackgroundCycleHeader(task.Title, desc), instr)
 		} else {
-			msg = "(scheduled check-in)"
+			msg = formatBackgroundCycleHeader(task.Title, desc)
 		}
 	default:
-		// prompt_key (legacy) — pause-resume + multi-phase framing.
+		// prompt_key — pause-resume + multi-phase framing, expressed as
+		// autonomous background work rather than a fresh user task.
 		if progress.PeerTaskID != "" && progress.Phase == "waiting" {
 			// Resumed from pause — tell LLM what woke it + last progress summary.
-			resumeMsg := fmt.Sprintf("[RESUME] You were paused waiting for peer task %s. Check its current status and decide next steps.",
+			resumeMsg := fmt.Sprintf("[Autonomous background resume]\nYou were paused waiting for peer task %s. Check its current status and decide next steps.",
 				progress.PeerTaskID)
 			if progress.Summary != "" {
 				resumeMsg += fmt.Sprintf("\n\nLast progress: %s", progress.Summary)
@@ -372,8 +444,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		} else if instructionKey != "background-task" {
 			// Tasks with a custom prompt (config.prompt) are self-contained —
 			// no multi-phase planning/execution/synthesis overlay.
-			msg = fmt.Sprintf("[TASK: %s]\n%s\nIteration: %d/%d",
-				task.Title, desc, task.Iteration+1, task.MaxIterations)
+			msg = fmt.Sprintf("%s\nIteration: %d/%d",
+				formatBackgroundCycleHeader(task.Title, desc),
+				task.Iteration+1, task.MaxIterations)
 		} else if planActive {
 			// S2: plan (iter 0) → per-step execution → synthesis. The phase is
 			// driven by the plan's state, not the raw iteration index.
@@ -395,8 +468,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 				phaseKey = "background-synthesis"
 			}
 			phasePrompt, _ := deps.Prompts.Get(ctx, phaseKey)
-			msg = fmt.Sprintf("[TASK: %s]\nMission: %s\nIteration: %d/%d\n\n%s%s",
-				task.Title, desc, task.Iteration+1, task.MaxIterations, phasePrompt, planBlock)
+			msg = fmt.Sprintf("%s\nIteration: %d/%d\n\n%s%s",
+				formatBackgroundCycleHeader(task.Title, desc),
+				task.Iteration+1, task.MaxIterations, phasePrompt, planBlock)
 		} else {
 			isFirst := task.Iteration == 0
 
@@ -408,9 +482,14 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			}
 			phasePrompt, _ := deps.Prompts.Get(ctx, phaseKey)
 
-			msg = fmt.Sprintf("[TASK: %s]\nMission: %s\nIteration: %d/%d\n\n%s",
-				task.Title, desc, task.Iteration+1, task.MaxIterations, phasePrompt)
+			msg = fmt.Sprintf("%s\nIteration: %d/%d\n\n%s",
+				formatBackgroundCycleHeader(task.Title, desc),
+				task.Iteration+1, task.MaxIterations, phasePrompt)
 		}
+	}
+
+	if backendPrefetchBlock != "" {
+		msg += "\n\n" + backendPrefetchBlock
 	}
 
 	// Budget warning.
@@ -521,6 +600,12 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	loop := agent.NewLoop(deps.LLM, deps.Store, deps.Registry, deps.RoleTools, deps.Config, deps.Logger)
 	loop.SetCompactor(agent.NewCompactor(deps.LLM, deps.Config, deps.Logger))
 
+	maxTurns := deps.Config.Gateway.MaxTurns
+	var toolOverride []string
+	if backendPrefetch.DisableLLMTools {
+		toolOverride = []string{}
+		maxTurns = 1
+	}
 	result, err := loop.RunTracked(ctx, agent.RunConfig{
 		SessionID:           sessID,
 		SystemPrompt:        systemPrompt,
@@ -529,13 +614,20 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		MaxTokens:           roleMaxTokens,
 		MessageBudget:       roleMessageBudget,
 		MessageBudgetSource: roleMessageBudgetSource,
-		MaxTurns:            deps.Config.Gateway.MaxTurns,
+		MaxTurns:            maxTurns,
 		Role:                modelRole,
+		ToolOverride:        toolOverride,
 		Effort:              roleEffort,
 		ThinkingMode:        roleThinkingMode,
 	}, msg)
 	if err != nil {
 		return core.IterationResult{}, fmt.Errorf("agent loop: %w", err)
+	}
+	if len(backendPrefetchTraces) > 0 {
+		combined := make([]agent.ToolTrace, 0, len(backendPrefetchTraces)+len(result.ToolTraces))
+		combined = append(combined, backendPrefetchTraces...)
+		combined = append(combined, result.ToolTraces...)
+		result.ToolTraces = combined
 	}
 
 	reply := result.Text
@@ -634,6 +726,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		// Strip any plan machinery (PLAN_JSON / PLAN_PATCH_JSON) that slipped
 		// into a user-facing reply.
 		clean = stripPlanMarkers(clean)
+		clean = stripBackgroundStatusTails(clean)
 		clean = strings.TrimSpace(clean)
 
 		// Archive session (one-shot, no reuse after task completion).
@@ -765,4 +858,152 @@ func resolvePromptOrBody(ctx context.Context, prompts core.PromptStore, keyOrBod
 		}
 	}
 	return keyOrBody
+}
+
+func formatBackgroundCycleHeader(title, desc string) string {
+	title = strings.TrimSpace(title)
+	desc = strings.TrimSpace(desc)
+	if title == "" {
+		title = "background work"
+	}
+	var b strings.Builder
+	b.WriteString("[Autonomous background cycle]\n")
+	b.WriteString("Standing intention: ")
+	b.WriteString(title)
+	if desc != "" {
+		b.WriteString("\nContext: ")
+		b.WriteString(desc)
+	}
+	b.WriteString("\n\nThis is your own background process continuing that intention. Do not acknowledge a task assignment; produce only the next useful action, notification payload, final artefact, or [no-op].")
+	return b.String()
+}
+
+func stripBackgroundStatusTails(s string) string {
+	lines := strings.Split(s, "\n")
+	last := len(lines) - 1
+	for last >= 0 && strings.TrimSpace(lines[last]) == "" {
+		last--
+	}
+	if last <= 0 {
+		return s
+	}
+	if !backgroundStatusTailRE.MatchString(lines[last]) {
+		return s
+	}
+	hasPayloadBefore := false
+	for i := 0; i < last; i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			hasPayloadBefore = true
+			break
+		}
+	}
+	if !hasPayloadBefore {
+		return s
+	}
+	return strings.TrimSpace(strings.Join(lines[:last], "\n"))
+}
+
+func runBackendPrefetch(ctx context.Context, deps core.AgentDeps, cfg backendPrefetchConfig, now time.Time) ([]agent.ToolTrace, string, string, error) {
+	traces := make([]agent.ToolTrace, 0, len(cfg.Tools))
+	outputs := make(map[string]string, len(cfg.Tools))
+	for _, tool := range cfg.Tools {
+		name := strings.TrimSpace(tool.Name)
+		if name == "" {
+			continue
+		}
+		input := tool.Input
+		if len(input) == 0 {
+			input = json.RawMessage("{}")
+		}
+		output, isError := deps.Registry.Execute(ctx, name, input)
+		trace := agent.ToolTrace{
+			Name:   name,
+			Input:  string(input),
+			Output: output,
+			Error:  isError,
+		}
+		traces = append(traces, trace)
+		outputs[name] = output
+		if isError {
+			return traces, "", "", fmt.Errorf("backend prefetch %s: %s", name, output)
+		}
+	}
+
+	if cfg.SkipLLMIfEmptyTool != "" && toolResultIsEmpty(outputs[cfg.SkipLLMIfEmptyTool]) {
+		return traces, "", "empty_tool:" + cfg.SkipLLMIfEmptyTool, nil
+	}
+	if cfg.SkipLLMLocalHours != nil && hourInRange(now.Hour(), cfg.SkipLLMLocalHours.From, cfg.SkipLLMLocalHours.To) {
+		return traces, "", fmt.Sprintf("local_hour:%02d", now.Hour()), nil
+	}
+	return traces, formatBackendPrefetchBlock(traces, cfg.DisableLLMTools), "", nil
+}
+
+func formatBackendPrefetchBlock(traces []agent.ToolTrace, toolsDisabled bool) string {
+	if len(traces) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("[backend_prefetched_tool_results]\n")
+	b.WriteString("The backend has already executed these tool calls. Treat the results as authoritative input.\n")
+	if toolsDisabled {
+		b.WriteString("Tools are unavailable for this LLM turn. Do not emit tool calls or tool-like text. Do not emit memory_update; the backend records delivery after a successful notification.\n")
+	}
+	for _, trace := range traces {
+		fmt.Fprintf(&b, "\n[%s input]\n%s\n[%s result]\n%s\n", trace.Name, trace.Input, trace.Name, trace.Output)
+	}
+	b.WriteString("[/backend_prefetched_tool_results]")
+	return b.String()
+}
+
+func hourInRange(hour, from, to int) bool {
+	if from < 0 {
+		from = 0
+	}
+	if from > 23 {
+		from = 23
+	}
+	if to < 0 {
+		to = 0
+	}
+	if to > 24 {
+		to = 24
+	}
+	if from == to {
+		return false
+	}
+	if from < to {
+		return hour >= from && hour < to
+	}
+	return hour >= from || hour < to
+}
+
+func toolResultIsEmpty(raw string) bool {
+	s := strings.TrimSpace(raw)
+	if s == "" || s == "null" || s == "[]" || s == "{}" {
+		return true
+	}
+	var v any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return false
+	}
+	return jsonValueIsEmpty(v)
+}
+
+func jsonValueIsEmpty(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return true
+	case []any:
+		return len(x) == 0
+	case map[string]any:
+		if len(x) == 0 {
+			return true
+		}
+		for _, key := range []string{"notes", "items", "results", "data"} {
+			if child, ok := x[key]; ok {
+				return jsonValueIsEmpty(child)
+			}
+		}
+	}
+	return false
 }
