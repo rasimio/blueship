@@ -11,6 +11,7 @@ import (
 // handlers, so a tool can identify the originating chat without taking
 // a snapshot of Deps. Set by the gateway before dispatching cortex.
 type chatIDCtxKey struct{}
+type userIDCtxKey struct{}
 
 // ContextWithChatID returns a copy of ctx that carries the given chat
 // id. Empty chat id is a no-op.
@@ -26,6 +27,30 @@ func ContextWithChatID(ctx context.Context, chatID string) context.Context {
 func ChatIDFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(chatIDCtxKey{}).(string)
 	return v
+}
+
+// WithUserID returns a copy of ctx that carries the resolved user id.
+// Passing uuid.Nil is a no-op.
+func WithUserID(ctx context.Context, id uuid.UUID) context.Context {
+	if id == uuid.Nil {
+		return ctx
+	}
+	return context.WithValue(ctx, userIDCtxKey{}, id)
+}
+
+// UserIDFromContext returns the user id stashed via WithUserID, or uuid.Nil.
+func UserIDFromContext(ctx context.Context) uuid.UUID {
+	v, _ := ctx.Value(userIDCtxKey{}).(uuid.UUID)
+	return v
+}
+
+// UserIDFromContextOK returns the user id and a found flag.
+func UserIDFromContextOK(ctx context.Context) (uuid.UUID, bool) {
+	v, ok := ctx.Value(userIDCtxKey{}).(uuid.UUID)
+	if !ok || v == uuid.Nil {
+		return uuid.Nil, false
+	}
+	return v, true
 }
 
 // soulIDCtxKey is a typed context key carrying the tenant identity of

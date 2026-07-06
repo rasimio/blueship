@@ -238,6 +238,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// goroutine whose ctx was captured at debouncer-creation time —
 	// before any per-turn tagging — so the soul is sourced from
 	// UserState (set in getOrInitUser), not from the inbound ctx.
+	ctx = bs.WithUserID(ctx, us.UserID)
 	ctx = bs.WithSoulID(ctx, us.SoulID)
 
 	timings := newTurnTimer()

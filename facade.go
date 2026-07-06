@@ -138,6 +138,9 @@ var (
 	WithSoulID          = core.WithSoulID
 	SoulIDFromContext   = core.SoulIDFromContext
 	SoulIDFromContextOK = core.SoulIDFromContextOK
+	WithUserID          = core.WithUserID
+	UserIDFromContext   = core.UserIDFromContext
+	UserIDFromContextOK = core.UserIDFromContextOK
 
 	OK   = core.OK
 	Fail = core.Fail

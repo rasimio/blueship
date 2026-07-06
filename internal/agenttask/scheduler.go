@@ -289,6 +289,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 	// carries its own soul_id (denormalised in Phase A); thread it
 	// through ctx so the handler, its tools, and the per-call DB ctxes
 	// below all resolve the right soul.
+	ctx = core.WithUserID(ctx, task.UserID)
 	ctx = core.WithSoulID(ctx, task.SoulID)
 
 	ctx, span := telemetry.StartTaskSpan(ctx, task.ID.String(), task.Handler, task.Strategy, dispatchTag, task.Iteration+1)
