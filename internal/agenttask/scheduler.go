@@ -500,6 +500,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 			s.notify(notifyCtx, task.UserID, result.Notify)
 			notifyCancel()
 			notified = true
+			result.Notified = true
 		}
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "paused"),
@@ -591,6 +592,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 			s.notify(notifyCtx, task.UserID, result.Notify)
 			notifyCancel()
 			notified = true
+			result.Notified = true
 		}
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "done"),
@@ -637,6 +639,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 			s.notify(notifyCtx, task.UserID, result.Notify)
 			notifyCancel()
 			notified = true
+			result.Notified = true
 		}
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "iteration_done"),

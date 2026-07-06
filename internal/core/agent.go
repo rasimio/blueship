@@ -109,6 +109,11 @@ type IterationResult struct {
 	Output   string          // final text (when Done=true)
 	Notify   string          // send to user immediately (milestone, blocker)
 
+	// Notified is set by the scheduler after it attempts to send Notify to
+	// the user. Hook receivers use this for post-delivery side effects such as
+	// debounce bookkeeping.
+	Notified bool
+
 	// IsFinal is set by the scheduler (NOT the handler) after the
 	// acceptance-criteria gate decides whether a Done-claim is the real
 	// terminal state. Recurring tasks: handler's Done is authoritative,
