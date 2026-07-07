@@ -120,6 +120,22 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		if err != nil {
 			return "", nil, fmt.Errorf("LLM API: %w", err)
 		}
+		if shouldRetryEmptyVisibleOutput(resp, req) {
+			a.recordLLMUsage(ctx, cfg, cfg.Model, turnTools, messages, baseSystem, effectiveSystem, tokenBudget, budgetDecision.Source, turnContext, dialogTokens, scratchpadTokens, resp.Usage, resp.StopReason+":empty_visible", llmStarted)
+			a.logger.Warn("LLM returned max_tokens with no visible output; retrying with reasoning disabled",
+				"model", cfg.Model,
+				"role", cfg.Role,
+				"turn", turn+1,
+				"input_tokens", resp.Usage.InputTokens,
+				"output_tokens", resp.Usage.OutputTokens,
+			)
+			retryReq := withoutReasoning(req)
+			llmStarted = time.Now()
+			resp, err = streamProvider.StreamComplete(ctx, retryReq, cb)
+			if err != nil {
+				return "", nil, fmt.Errorf("LLM API retry without reasoning: %w", err)
+			}
+		}
 		emitTiming(cfg, "llm.stream_complete", llmStarted, llmTimingDetail(cfg, turn+1, resp.StopReason, resp.Usage.InputTokens, resp.Usage.OutputTokens))
 		a.recordLLMUsage(ctx, cfg, cfg.Model, turnTools, messages, baseSystem, effectiveSystem, tokenBudget, budgetDecision.Source, turnContext, dialogTokens, scratchpadTokens, resp.Usage, resp.StopReason, llmStarted)
 
@@ -148,6 +164,19 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		}
 		responseAttrs = append(responseAttrs, anatomy.responseAttrs(resp.Usage.InputTokens)...)
 		a.logger.Info("LLM response", responseAttrs...)
+		if !hasVisibleOutput(resp.Content) && (resp.StopReason == "end_turn" || resp.StopReason == "max_tokens") {
+			text := a.emptyVisibleFallback()
+			a.logger.Warn("LLM returned terminal response with no visible output; using fallback",
+				"model", cfg.Model,
+				"role", cfg.Role,
+				"turn", turn+1,
+				"stop_reason", resp.StopReason,
+			)
+			resp.Content = []bs.ContentBlock{{Type: "text", Text: text}}
+			if cb != nil && cb.OnText != nil {
+				cb.OnText(text)
+			}
+		}
 
 		assistantMsg := bs.Message{
 			Role:    "assistant",

@@ -326,3 +326,38 @@ func appendFinalAnswerDirective(msg *bs.Message) {
 	directive := bs.ContentBlock{Type: "text", Text: "\n\n[tool_limit]\nNo more tools are available for this turn. Use the tool results already provided and answer the user's request now. Do not ask to run another search.\n[/tool_limit]"}
 	msg.Content = append(blocks, directive)
 }
+
+func hasVisibleOutput(content []bs.ContentBlock) bool {
+	for _, block := range content {
+		switch block.Type {
+		case "text":
+			if strings.TrimSpace(block.Text) != "" {
+				return true
+			}
+		case "tool_use":
+			return true
+		}
+	}
+	return false
+}
+
+func shouldRetryEmptyVisibleOutput(resp *bs.CompletionResponse, req bs.CompletionRequest) bool {
+	if resp == nil || resp.StopReason != "max_tokens" || hasVisibleOutput(resp.Content) {
+		return false
+	}
+	return req.Effort != "" || req.ThinkingMode != "" || req.ThinkingBudget > 0
+}
+
+func withoutReasoning(req bs.CompletionRequest) bs.CompletionRequest {
+	req.Effort = ""
+	req.ThinkingMode = "off"
+	req.ThinkingBudget = 0
+	return req
+}
+
+func (a *Loop) emptyVisibleFallback() string {
+	if a != nil && a.cfg != nil && strings.TrimSpace(a.cfg.UI.ModelRefused) != "" {
+		return a.cfg.UI.ModelRefused
+	}
+	return "(the model produced no visible answer — retry with a shorter request)"
+}

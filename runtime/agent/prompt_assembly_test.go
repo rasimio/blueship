@@ -160,6 +160,94 @@ func TestRunTrackedCompactsToolResultOnlyForPrompt(t *testing.T) {
 	}
 }
 
+func TestRunStreamRetriesEmptyVisibleMaxTokensWithoutReasoning(t *testing.T) {
+	store := &fakeMessageStore{}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{
+		{
+			Content:    nil,
+			StopReason: "max_tokens",
+			Usage:      bs.Usage{InputTokens: 100, OutputTokens: 6144},
+		},
+		{
+			Content:    []bs.ContentBlock{{Type: "text", Text: "works"}},
+			StopReason: "end_turn",
+			Usage:      bs.Usage{InputTokens: 100, OutputTokens: 2},
+		},
+	}}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, bs.NewToolRegistry(), nil, &bs.Config{}, logger)
+	text, _, err := loop.RunStream(context.Background(), RunConfig{
+		SessionID:      "s1",
+		SystemPrompt:   "base system",
+		Model:          "anthropic-oauth:claude-sonnet-5",
+		MaxTokens:      2048,
+		MaxTurns:       1,
+		MessageBudget:  6000,
+		SkipUserAppend: true,
+		Effort:         "xhigh",
+	}, "ignored", nil)
+	if err != nil {
+		t.Fatalf("RunStream failed: %v", err)
+	}
+	if text != "works" {
+		t.Fatalf("want retry text, got %q", text)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("want initial call + no-reasoning retry, got %d", len(provider.requests))
+	}
+	if provider.requests[0].Effort != "xhigh" {
+		t.Fatalf("initial request lost effort: %#v", provider.requests[0])
+	}
+	if provider.requests[1].Effort != "" || provider.requests[1].ThinkingMode != "off" || provider.requests[1].ThinkingBudget != 0 {
+		t.Fatalf("retry should disable reasoning, got effort=%q thinking_mode=%q thinking_budget=%d",
+			provider.requests[1].Effort, provider.requests[1].ThinkingMode, provider.requests[1].ThinkingBudget)
+	}
+	if len(store.appended) != 1 {
+		t.Fatalf("want only final assistant append, got %#v", store.appended)
+	}
+	if got := bs.ExtractText(bs.NormalizeContent(store.appended[0].Content)); got != "works" {
+		t.Fatalf("persisted assistant should be retry text, got %q", got)
+	}
+}
+
+func TestRunStreamFallbacksInsteadOfPersistingEmptyTerminalResponse(t *testing.T) {
+	store := &fakeMessageStore{}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{
+		{
+			Content:    nil,
+			StopReason: "end_turn",
+			Usage:      bs.Usage{InputTokens: 10, OutputTokens: 0},
+		},
+	}}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &bs.Config{}
+	cfg.UI.ModelRefused = "fallback visible text"
+	loop := NewLoop(provider, store, bs.NewToolRegistry(), nil, cfg, logger)
+	text, _, err := loop.RunStream(context.Background(), RunConfig{
+		SessionID:      "s1",
+		SystemPrompt:   "base system",
+		Model:          "test-model",
+		MaxTokens:      64,
+		MaxTurns:       1,
+		MessageBudget:  6000,
+		SkipUserAppend: true,
+	}, "ignored", nil)
+	if err != nil {
+		t.Fatalf("RunStream failed: %v", err)
+	}
+	if text != "fallback visible text" {
+		t.Fatalf("want fallback text, got %q", text)
+	}
+	if len(store.appended) != 1 {
+		t.Fatalf("want one assistant append, got %#v", store.appended)
+	}
+	if got := bs.ExtractText(bs.NormalizeContent(store.appended[0].Content)); got != "fallback visible text" {
+		t.Fatalf("persisted assistant should be fallback text, got %q", got)
+	}
+}
+
 func TestRunTrackedTimesOutHungTool(t *testing.T) {
 	store := &fakeMessageStore{
 		dialog: []bs.Message{{Role: "user", Content: "search"}},
@@ -360,6 +448,23 @@ func (p *scriptedProvider) Complete(_ context.Context, req bs.CompletionRequest)
 	}
 	resp := p.responses[0]
 	p.responses = p.responses[1:]
+	return resp, nil
+}
+
+func (p *scriptedProvider) StreamComplete(_ context.Context, req bs.CompletionRequest, cb *bs.StreamCallbacks) (*bs.CompletionResponse, error) {
+	p.requests = append(p.requests, req)
+	if len(p.responses) == 0 {
+		return &bs.CompletionResponse{StopReason: "end_turn"}, nil
+	}
+	resp := p.responses[0]
+	p.responses = p.responses[1:]
+	if cb != nil && cb.OnText != nil {
+		for _, block := range resp.Content {
+			if block.Type == "text" && block.Text != "" {
+				cb.OnText(block.Text)
+			}
+		}
+	}
 	return resp, nil
 }
 
