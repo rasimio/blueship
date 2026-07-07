@@ -358,6 +358,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	roleMaxTokens := deps.Config.Limits.MaxOutputTokens
 	roleMessageBudget := 0
 	roleMessageBudgetSource := ""
+	roleThinkingBudget := 0
 	var roleEffort, roleThinkingMode string
 	if deps.ModelStore != nil {
 		if m := deps.ModelStore.ForRouter(modelRole); m != "" {
@@ -379,6 +380,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			}
 			roleEffort = ref.Effort
 			roleThinkingMode = ref.ThinkingMode
+			roleThinkingBudget = core.ThinkingBudgetForModelRef(ref)
 		}
 	}
 
@@ -614,6 +616,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		MaxTokens:           roleMaxTokens,
 		MessageBudget:       roleMessageBudget,
 		MessageBudgetSource: roleMessageBudgetSource,
+		ThinkingBudget:      roleThinkingBudget,
 		MaxTurns:            maxTurns,
 		Role:                modelRole,
 		ToolOverride:        toolOverride,

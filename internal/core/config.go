@@ -170,6 +170,20 @@ func (r ModelRef) ForRouter() string {
 	return r.Name
 }
 
+// ThinkingBudgetForModelRef maps a DB-backed model role into RunConfig
+// semantics. In model_config, thinking_budget=0 means disabled for that role;
+// in RunConfig, 0 means inherit the global default, so role rows must become -1
+// when they intentionally opt out of thinking.
+func ThinkingBudgetForModelRef(r ModelRef) int {
+	if r.Name == "" {
+		return 0
+	}
+	if r.ThinkingBudget > 0 {
+		return r.ThinkingBudget
+	}
+	return -1
+}
+
 // ModelsConfig defines which models to use for each role.
 type ModelsConfig struct {
 	Primary ModelRef // agent loop (default: "claude-haiku-4-5-20251001")

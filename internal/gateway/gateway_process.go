@@ -599,6 +599,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	if cortexRef.MaxTokens > 0 {
 		cortexMaxTokens = cortexRef.MaxTokens
 	}
+	cortexThinkingBudget := bs.ThinkingBudgetForModelRef(cortexRef)
 	turnMessageBudget := g.messageBudgetForRole("cortex", cortexRef)
 
 	// Reply metadata: the first pendingMsg in the batch carries
@@ -641,6 +642,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		Temperature:         cortexTemp,
 		MessageBudget:       turnMessageBudget.Budget,
 		MessageBudgetSource: turnMessageBudget.Source,
+		ThinkingBudget:      cortexThinkingBudget,
 		ThinkingMode:        cortexRef.ThinkingMode,
 		Effort:              cortexRef.Effort,
 		AllowedTools:        g.allowedToolsForSoul(ctx, us.SoulID, turnRegistry),
