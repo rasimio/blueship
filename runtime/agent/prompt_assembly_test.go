@@ -211,6 +211,131 @@ func TestRunStreamRetriesEmptyVisibleMaxTokensWithoutReasoning(t *testing.T) {
 	}
 }
 
+func TestRunTrackedAutoContinuesVisibleMaxTokensAndPersistsMergedAnswer(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "user", Content: "write a long answer"}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{
+		{
+			Content:    []bs.ContentBlock{{Type: "text", Text: "part one"}},
+			StopReason: "max_tokens",
+			Usage:      bs.Usage{InputTokens: 100, OutputTokens: 10},
+		},
+		{
+			Content:    []bs.ContentBlock{{Type: "text", Text: "part two"}},
+			StopReason: "end_turn",
+			Usage:      bs.Usage{InputTokens: 110, OutputTokens: 5},
+		},
+	}}
+	registry := bs.NewToolRegistry()
+	registry.Register("lookup", "lookup", json.RawMessage(`{"type":"object"}`), func(context.Context, json.RawMessage) (any, error) {
+		return map[string]string{"ok": "true"}, nil
+	})
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, registry, nil, &bs.Config{}, logger)
+	result, err := loop.RunTracked(context.Background(), RunConfig{
+		SessionID:      "s1",
+		SystemPrompt:   "base system",
+		Model:          "test-model",
+		MaxTokens:      64,
+		MaxTurns:       1,
+		MessageBudget:  6000,
+		SkipUserAppend: true,
+	}, "ignored")
+	if err != nil {
+		t.Fatalf("RunTracked failed: %v", err)
+	}
+	if result.Text != "part one\n\npart two" {
+		t.Fatalf("want merged text, got %q", result.Text)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("want initial call + continuation, got %d", len(provider.requests))
+	}
+	if len(provider.requests[0].Tools) != 1 {
+		t.Fatalf("first request should allow tools, got %#v", provider.requests[0].Tools)
+	}
+	if len(provider.requests[1].Tools) != 0 {
+		t.Fatalf("continuation request should disable tools, got %#v", provider.requests[1].Tools)
+	}
+	if !strings.Contains(provider.requests[1].System, "none. No native tool_use calls are available") {
+		t.Fatalf("continuation system prompt should expose no-tools shelf: %q", provider.requests[1].System)
+	}
+	messages := provider.requests[1].Messages
+	if len(messages) != 3 {
+		t.Fatalf("continuation prompt should include dialog + partial + directive, got %#v", messages)
+	}
+	if got := bs.ExtractText(bs.NormalizeContent(messages[1].Content)); got != "part one" {
+		t.Fatalf("continuation prompt missing partial assistant text, got %q", got)
+	}
+	if got := bs.ExtractText(bs.NormalizeContent(messages[2].Content)); !strings.Contains(got, "[max_tokens_continuation]") {
+		t.Fatalf("continuation prompt missing directive, got %q", got)
+	}
+	if len(store.appended) != 1 {
+		t.Fatalf("want one merged assistant append, got %#v", store.appended)
+	}
+	if got := bs.ExtractText(bs.NormalizeContent(store.appended[0].Content)); got != "part one\n\npart two" {
+		t.Fatalf("persisted assistant should be merged text, got %q", got)
+	}
+	if len(store.appendedTokens) != 1 || store.appendedTokens[0] != 15 {
+		t.Fatalf("persisted token count should include both passes, got %#v", store.appendedTokens)
+	}
+}
+
+func TestRunStreamAutoContinuesVisibleMaxTokensAndPersistsMergedAnswer(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "user", Content: "write a long answer"}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{
+		{
+			Content:    []bs.ContentBlock{{Type: "text", Text: "alpha"}},
+			StopReason: "max_tokens",
+			Usage:      bs.Usage{InputTokens: 100, OutputTokens: 7},
+		},
+		{
+			Content:    []bs.ContentBlock{{Type: "text", Text: "beta"}},
+			StopReason: "end_turn",
+			Usage:      bs.Usage{InputTokens: 108, OutputTokens: 3},
+		},
+	}}
+	var streamed strings.Builder
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, bs.NewToolRegistry(), nil, &bs.Config{}, logger)
+	text, _, err := loop.RunStream(context.Background(), RunConfig{
+		SessionID:      "s1",
+		SystemPrompt:   "base system",
+		Model:          "test-model",
+		MaxTokens:      64,
+		MaxTurns:       1,
+		MessageBudget:  6000,
+		SkipUserAppend: true,
+	}, "ignored", &bs.StreamCallbacks{OnText: func(delta string) {
+		streamed.WriteString(delta)
+	}})
+	if err != nil {
+		t.Fatalf("RunStream failed: %v", err)
+	}
+	if text != "alpha\n\nbeta" {
+		t.Fatalf("want merged text, got %q", text)
+	}
+	if streamed.String() != "alphabeta" {
+		t.Fatalf("stream should emit both provider text blocks, got %q", streamed.String())
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("want initial call + continuation, got %d", len(provider.requests))
+	}
+	if len(store.appended) != 1 {
+		t.Fatalf("want one merged assistant append, got %#v", store.appended)
+	}
+	if got := bs.ExtractText(bs.NormalizeContent(store.appended[0].Content)); got != "alpha\n\nbeta" {
+		t.Fatalf("persisted assistant should be merged text, got %q", got)
+	}
+	if len(store.appendedTokens) != 1 || store.appendedTokens[0] != 10 {
+		t.Fatalf("persisted token count should include both passes, got %#v", store.appendedTokens)
+	}
+}
+
 func TestRunStreamFallbacksInsteadOfPersistingEmptyTerminalResponse(t *testing.T) {
 	store := &fakeMessageStore{}
 	provider := &scriptedProvider{responses: []*bs.CompletionResponse{
@@ -474,6 +599,7 @@ type fakeMessageStore struct {
 	lastDialogBudget int
 	rawLoads         int
 	appended         []bs.Message
+	appendedTokens   []int
 }
 
 func (s *fakeMessageStore) Append(_ context.Context, _ string, msg bs.Message) error {
@@ -481,8 +607,9 @@ func (s *fakeMessageStore) Append(_ context.Context, _ string, msg bs.Message) e
 	return nil
 }
 
-func (s *fakeMessageStore) AppendWithTokens(_ context.Context, _ string, msg bs.Message, _ int) error {
+func (s *fakeMessageStore) AppendWithTokens(_ context.Context, _ string, msg bs.Message, tokens int) error {
 	s.appended = append(s.appended, msg)
+	s.appendedTokens = append(s.appendedTokens, tokens)
 	return nil
 }
 

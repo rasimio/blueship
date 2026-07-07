@@ -100,10 +100,12 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 	var traces []ToolTrace
 	toolTurns := 0
 	forceFinal := false
+	maxTokenContinuations := 0
+	var pendingMaxTokenText strings.Builder
+	pendingMaxTokenOutputTokens := 0
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		baseSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, "")
-		effectiveSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, turnContext)
 		messages := cloneMessages(convo)
 		turnTools := tools
 		if forceFinal {
@@ -113,6 +115,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			}
 		}
 		turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, turnTools)
+		effectiveSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, turnContext)
 		scratchpadTokens := estimateMessagesTokens(convo) - dialogTokens
 		if scratchpadTokens < 0 {
 			scratchpadTokens = 0
@@ -179,6 +182,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		}
 		responseAttrs = append(responseAttrs, anatomy.responseAttrs(resp.Usage.InputTokens)...)
 		a.logger.Info("LLM response", responseAttrs...)
+		usedEmptyVisibleFallback := false
 		if !hasVisibleOutput(resp.Content) && (resp.StopReason == "end_turn" || resp.StopReason == "max_tokens") {
 			text := a.emptyVisibleFallback()
 			a.logger.Warn("LLM returned terminal response with no visible output; using fallback",
@@ -188,6 +192,34 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 				"stop_reason", resp.StopReason,
 			)
 			resp.Content = []bs.ContentBlock{{Type: "text", Text: text}}
+			usedEmptyVisibleFallback = true
+		}
+		currentTurnText := bs.ExtractText(resp.Content)
+		if !usedEmptyVisibleFallback && shouldAutoContinueMaxTokens(resp, maxTokenContinuations) {
+			appendTurnText(&pendingMaxTokenText, currentTurnText)
+			appendTurnText(&accumulated, currentTurnText)
+			pendingMaxTokenOutputTokens += resp.Usage.OutputTokens
+			convo = append(convo,
+				bs.Message{Role: "assistant", Content: resp.Content},
+				maxTokenContinuationMessage(),
+			)
+			maxTokenContinuations++
+			forceFinal = true
+			if turn+1 >= cfg.MaxTurns {
+				cfg.MaxTurns = turn + 2
+			}
+			a.logger.Warn("LLM returned max_tokens with visible output; continuing answer",
+				"model", cfg.Model,
+				"role", cfg.Role,
+				"turn", turn+1,
+				"next_turn", turn+2,
+			)
+			continue
+		}
+		appendTokens := resp.Usage.OutputTokens
+		if pendingText := pendingMaxTokenText.String(); pendingText != "" {
+			resp.Content = []bs.ContentBlock{{Type: "text", Text: mergeContinuationText(pendingText, currentTurnText)}}
+			appendTokens += pendingMaxTokenOutputTokens
 		}
 
 		// 5. Store assistant response (skipped for an ephemeral run). Detached
@@ -200,7 +232,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		if !cfg.Ephemeral {
 			appendStarted := time.Now()
 			pctx, pcancel := persistCtx(ctx)
-			err = a.store.AppendWithTokens(pctx, cfg.SessionID, assistantMsg, resp.Usage.OutputTokens)
+			err = a.store.AppendWithTokens(pctx, cfg.SessionID, assistantMsg, appendTokens)
 			pcancel()
 			emitTiming(cfg, "agent.append_assistant", appendStarted, fmt.Sprintf("role=%s turn=%d", cfg.Role, turn+1))
 			if err != nil {
@@ -212,7 +244,9 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		// Collect this turn's text, de-duped (see appendTurnText — guards the
 		// heartbeat "reminder prose + memory_update, then same reminder again"
 		// double-message).
-		appendTurnText(&accumulated, bs.ExtractText(resp.Content))
+		appendTurnText(&accumulated, currentTurnText)
+		pendingMaxTokenText.Reset()
+		pendingMaxTokenOutputTokens = 0
 
 		// 6. Check stop reason
 		switch resp.StopReason {

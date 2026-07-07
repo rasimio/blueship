@@ -61,6 +61,9 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	var traces []ToolTrace
 	toolTurns := 0
 	forceFinal := false
+	maxTokenContinuations := 0
+	var pendingMaxTokenText strings.Builder
+	pendingMaxTokenOutputTokens := 0
 	// Prompt assembly keeps persisted visible dialogue and current-run tool
 	// scratch separate. The DB remains the audit/UI store, but tool turns feed
 	// the next LLM call through this in-memory transcript instead of consuming
@@ -69,7 +72,6 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		baseSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, "")
-		effectiveSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, turnContext)
 		messages := cloneMessages(convo)
 		turnTools := tools
 		if forceFinal {
@@ -79,6 +81,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			}
 		}
 		turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, turnTools)
+		effectiveSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, turnContext)
 		scratchpadTokens := estimateMessagesTokens(convo) - dialogTokens
 		if scratchpadTokens < 0 {
 			scratchpadTokens = 0
@@ -164,6 +167,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		}
 		responseAttrs = append(responseAttrs, anatomy.responseAttrs(resp.Usage.InputTokens)...)
 		a.logger.Info("LLM response", responseAttrs...)
+		usedEmptyVisibleFallback := false
 		if !hasVisibleOutput(resp.Content) && (resp.StopReason == "end_turn" || resp.StopReason == "max_tokens") {
 			text := a.emptyVisibleFallback()
 			a.logger.Warn("LLM returned terminal response with no visible output; using fallback",
@@ -173,9 +177,37 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 				"stop_reason", resp.StopReason,
 			)
 			resp.Content = []bs.ContentBlock{{Type: "text", Text: text}}
+			usedEmptyVisibleFallback = true
 			if cb != nil && cb.OnText != nil {
 				cb.OnText(text)
 			}
+		}
+		currentTurnText := bs.ExtractText(resp.Content)
+		if !usedEmptyVisibleFallback && shouldAutoContinueMaxTokens(resp, maxTokenContinuations) {
+			appendTurnText(&pendingMaxTokenText, currentTurnText)
+			appendTurnText(&accumulated, currentTurnText)
+			pendingMaxTokenOutputTokens += resp.Usage.OutputTokens
+			convo = append(convo,
+				bs.Message{Role: "assistant", Content: resp.Content},
+				maxTokenContinuationMessage(),
+			)
+			maxTokenContinuations++
+			forceFinal = true
+			if turn+1 >= cfg.MaxTurns {
+				cfg.MaxTurns = turn + 2
+			}
+			a.logger.Warn("LLM returned max_tokens with visible output; continuing answer",
+				"model", cfg.Model,
+				"role", cfg.Role,
+				"turn", turn+1,
+				"next_turn", turn+2,
+			)
+			continue
+		}
+		appendTokens := resp.Usage.OutputTokens
+		if pendingText := pendingMaxTokenText.String(); pendingText != "" {
+			resp.Content = []bs.ContentBlock{{Type: "text", Text: mergeContinuationText(pendingText, currentTurnText)}}
+			appendTokens += pendingMaxTokenOutputTokens
 		}
 
 		assistantMsg := bs.Message{
@@ -185,7 +217,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		if !cfg.Ephemeral {
 			appendStarted := time.Now()
 			pctx, pcancel := persistCtx(ctx)
-			err = a.store.AppendWithTokens(pctx, cfg.SessionID, assistantMsg, resp.Usage.OutputTokens)
+			err = a.store.AppendWithTokens(pctx, cfg.SessionID, assistantMsg, appendTokens)
 			pcancel()
 			emitTiming(cfg, "agent.append_assistant", appendStarted, fmt.Sprintf("role=%s turn=%d", cfg.Role, turn+1))
 			if err != nil {
@@ -195,7 +227,9 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		convo = append(convo, assistantMsg)
 
 		// Collect this turn's text, de-duped (see appendTurnText).
-		appendTurnText(&accumulated, bs.ExtractText(resp.Content))
+		appendTurnText(&accumulated, currentTurnText)
+		pendingMaxTokenText.Reset()
+		pendingMaxTokenOutputTokens = 0
 
 		switch resp.StopReason {
 		case "end_turn", "max_tokens":

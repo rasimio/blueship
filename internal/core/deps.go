@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -11,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -210,6 +211,7 @@ type dbPool struct {
 	dbs     map[string]*sqlx.DB
 	dsn     string            // base DSN (single database)
 	schemas map[string]string // module → schema name (empty = public)
+	logger  *slog.Logger
 }
 
 func (p *dbPool) get(module string) (*sqlx.DB, error) {
@@ -232,7 +234,7 @@ func (p *dbPool) get(module string) (*sqlx.DB, error) {
 		dsn = withSearchPath(dsn, schema)
 	}
 
-	db, err := sqlx.Connect("postgres", dsn)
+	db, err := p.connect(module, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", module, err)
 	}
@@ -247,6 +249,63 @@ func (p *dbPool) get(module string) (*sqlx.DB, error) {
 	db.SetConnMaxLifetime(30 * time.Minute)
 	p.dbs[module] = db
 	return db, nil
+}
+
+const (
+	dbConnectRetryTimeout = 90 * time.Second
+	dbConnectRetryDelay   = time.Second
+)
+
+func (p *dbPool) connect(module, dsn string) (*sqlx.DB, error) {
+	started := time.Now()
+	attempt := 0
+	for {
+		attempt++
+		db, err := sqlx.Connect("postgres", dsn)
+		if err == nil {
+			if attempt > 1 && p.logger != nil {
+				p.logger.Info("db connect recovered",
+					"module", module,
+					"attempts", attempt,
+					"elapsed", time.Since(started).String(),
+				)
+			}
+			return db, nil
+		}
+		if !isRetryableDBConnectError(err) || time.Since(started) >= dbConnectRetryTimeout {
+			return nil, err
+		}
+		if attempt == 1 && p.logger != nil {
+			p.logger.Warn("db connect failed; retrying",
+				"module", module,
+				"timeout", dbConnectRetryTimeout.String(),
+				"error", err,
+			)
+		}
+		time.Sleep(dbConnectRetryDelay)
+	}
+}
+
+func isRetryableDBConnectError(err error) bool {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		switch string(pqErr.Code) {
+		case "57P03", // cannot_connect_now: database system is starting up
+			"57P01", // admin_shutdown
+			"08000", // connection_exception
+			"08001", // sqlclient_unable_to_establish_sqlconnection
+			"08006", // connection_failure
+			"53300": // too_many_connections
+			return true
+		default:
+			return false
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "server closed the connection unexpectedly") ||
+		strings.Contains(msg, "database system is starting up")
 }
 
 // withSearchPath appends search_path=<schema>,public to a PostgreSQL DSN.
@@ -300,6 +359,7 @@ func InitDeps(cfg *Config, logger *slog.Logger) (*Deps, error) {
 			dbs:     make(map[string]*sqlx.DB),
 			dsn:     cfg.DB,
 			schemas: schemas,
+			logger:  logger,
 		},
 	}, nil
 }

@@ -327,6 +327,21 @@ func appendFinalAnswerDirective(msg *bs.Message) {
 	msg.Content = append(blocks, directive)
 }
 
+const (
+	maxTokenContinuationPasses = 1
+	maxTokenOverlapRunes       = 800
+)
+
+func maxTokenContinuationMessage() bs.Message {
+	return bs.Message{
+		Role: "user",
+		Content: []bs.ContentBlock{{
+			Type: "text",
+			Text: "[max_tokens_continuation]\nYour previous answer was cut off by the output token limit. Continue exactly from the last visible text. Do not restart, summarize, apologize, or repeat earlier content. Output only the continuation.\n[/max_tokens_continuation]",
+		}},
+	}
+}
+
 func hasVisibleOutput(content []bs.ContentBlock) bool {
 	for _, block := range content {
 		switch block.Type {
@@ -339,6 +354,54 @@ func hasVisibleOutput(content []bs.ContentBlock) bool {
 		}
 	}
 	return false
+}
+
+func hasToolUseOutput(content []bs.ContentBlock) bool {
+	for _, block := range content {
+		if block.Type == "tool_use" {
+			return true
+		}
+	}
+	return false
+}
+
+func shouldAutoContinueMaxTokens(resp *bs.CompletionResponse, continuationPasses int) bool {
+	return resp != nil &&
+		resp.StopReason == "max_tokens" &&
+		continuationPasses < maxTokenContinuationPasses &&
+		strings.TrimSpace(bs.ExtractText(resp.Content)) != "" &&
+		!hasToolUseOutput(resp.Content)
+}
+
+func mergeContinuationText(prefix, continuation string) string {
+	prefix = strings.TrimRight(prefix, " \t\r\n")
+	continuation = strings.TrimLeft(continuation, " \t\r\n")
+	if prefix == "" {
+		return continuation
+	}
+	if continuation == "" {
+		return prefix
+	}
+
+	prefixRunes := []rune(prefix)
+	continuationRunes := []rune(continuation)
+	maxOverlap := len(prefixRunes)
+	if len(continuationRunes) < maxOverlap {
+		maxOverlap = len(continuationRunes)
+	}
+	if maxOverlap > maxTokenOverlapRunes {
+		maxOverlap = maxTokenOverlapRunes
+	}
+	for n := maxOverlap; n >= 20; n-- {
+		if strings.HasSuffix(prefix, string(continuationRunes[:n])) {
+			continuation = string(continuationRunes[n:])
+			break
+		}
+	}
+	if strings.TrimSpace(continuation) == "" {
+		return prefix
+	}
+	return prefix + "\n\n" + strings.TrimLeft(continuation, " \t\r\n")
 }
 
 func shouldRetryEmptyVisibleOutput(resp *bs.CompletionResponse, req bs.CompletionRequest) bool {
