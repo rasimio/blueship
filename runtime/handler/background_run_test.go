@@ -59,6 +59,10 @@ func (s *recordingMessageStore) DialogMessagesForAPI(context.Context, string, in
 	return append([]core.Message(nil), s.appended...), nil
 }
 
+func (s *recordingMessageStore) RecentToolObservations(context.Context, string, time.Time, int) ([]core.ToolObservation, error) {
+	return nil, nil
+}
+
 func (s *recordingMessageStore) AllMessagesForAPI(context.Context, string) ([]core.Message, error) {
 	return nil, nil
 }

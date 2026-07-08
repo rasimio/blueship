@@ -1,6 +1,9 @@
 package core
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // MessageStore abstracts message persistence for the agent loop.
 // Implementations: session.Store (PostgreSQL/BlueShip), or any custom store.
@@ -18,6 +21,10 @@ type MessageStore interface {
 	// budget. Tool transcripts and other internal blocks are excluded so the
 	// dialogue window is independent from tool scratch/history.
 	DialogMessagesForAPI(ctx context.Context, sessionID string, maxTokens int) ([]Message, error)
+
+	// RecentToolObservations loads compactable recent tool results for prompt
+	// context. These are provenance hints, not visible dialogue history.
+	RecentToolObservations(ctx context.Context, sessionID string, since time.Time, limit int) ([]ToolObservation, error)
 
 	// AllMessagesForAPI loads all messages for a session (used for compaction).
 	AllMessagesForAPI(ctx context.Context, sessionID string) ([]Message, error)
@@ -51,6 +58,16 @@ type MessageStore interface {
 	// RecordLLMUsage persists one provider call for budget monitoring.
 	// Implementations should resolve user/soul/source from sessionID.
 	RecordLLMUsage(ctx context.Context, usage LLMUsageRecord) error
+}
+
+// ToolObservation is a previous tool result that can be summarized into the
+// turn context without reintroducing raw tool transcripts as dialogue history.
+type ToolObservation struct {
+	Name      string
+	Input     string
+	Output    string
+	IsError   bool
+	CreatedAt time.Time
 }
 
 // LLMUsageRecorder is the narrow write side of MessageStore used by host

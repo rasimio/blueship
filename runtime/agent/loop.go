@@ -211,13 +211,18 @@ func effectiveSystemPrompt(systemPrompt, compactSummary, turnContext string) str
 	return effective
 }
 
-func buildTurnContextForTools(reflexGuidance, injectedContext string, tools []bs.ToolDefinition) string {
+func buildTurnContextForTools(reflexGuidance, injectedContext string, tools []bs.ToolDefinition, extraContext ...string) string {
 	var parts []string
 	if s := strings.TrimSpace(reflexGuidance); s != "" {
 		parts = append(parts, s)
 	}
 	if s := strings.TrimSpace(injectedContext); s != "" {
 		parts = append(parts, s)
+	}
+	for _, value := range extraContext {
+		if s := strings.TrimSpace(value); s != "" {
+			parts = append(parts, s)
+		}
 	}
 	parts = append(parts, formatAvailableToolsContext(tools))
 	return strings.Join(parts, "\n\n")

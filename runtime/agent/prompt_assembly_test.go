@@ -160,6 +160,53 @@ func TestRunTrackedCompactsToolResultOnlyForPrompt(t *testing.T) {
 	}
 }
 
+func TestRunTrackedInjectsRecentToolObservationsInTurnContext(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "user", Content: "is this a notes conflict?"}},
+		observations: []bs.ToolObservation{{
+			Name:      "calendar_week",
+			Input:     `{"date_from":"2026-07-09","date_to":"2026-07-09"}`,
+			Output:    `[{"title":"Обучение ИИ","calendar":"Rasim"},{"title":"Школа ИИ","calendar":"gadjiew.rasim@gmail.com"}]`,
+			CreatedAt: time.Date(2026, 7, 8, 14, 32, 0, 0, time.UTC),
+		}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{{
+		Content:    []bs.ContentBlock{{Type: "text", Text: "calendar conflict"}},
+		StopReason: "end_turn",
+		Usage:      bs.Usage{InputTokens: 30, OutputTokens: 2},
+	}}}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, bs.NewToolRegistry(), nil, &bs.Config{}, logger)
+	if _, err := loop.RunTracked(context.Background(), RunConfig{
+		SessionID:      "s1",
+		SystemPrompt:   "base system",
+		Model:          "test-model",
+		MaxTokens:      64,
+		MaxTurns:       1,
+		MessageBudget:  6000,
+		SkipUserAppend: true,
+	}, "ignored"); err != nil {
+		t.Fatalf("RunTracked failed: %v", err)
+	}
+
+	if store.observationLoads != 1 {
+		t.Fatalf("recent tool observations should be loaded once, got %d", store.observationLoads)
+	}
+	if len(provider.requests) != 1 {
+		t.Fatalf("want one provider call, got %d", len(provider.requests))
+	}
+	system := provider.requests[0].System
+	for _, want := range []string{"[recent tool observations]", "calendar_week", "2026-07-08T14:32:00Z", "Обучение ИИ", "Школа ИИ"} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("system prompt missing %q:\n%s", want, system)
+		}
+	}
+	if len(provider.requests[0].Messages) != 1 || provider.requests[0].Messages[0].Content != "is this a notes conflict?" {
+		t.Fatalf("tool observation should not enter visible dialogue: %#v", provider.requests[0].Messages)
+	}
+}
+
 func TestRunStreamRetriesEmptyVisibleMaxTokensWithoutReasoning(t *testing.T) {
 	store := &fakeMessageStore{}
 	provider := &scriptedProvider{responses: []*bs.CompletionResponse{
@@ -595,7 +642,9 @@ func (p *scriptedProvider) StreamComplete(_ context.Context, req bs.CompletionRe
 
 type fakeMessageStore struct {
 	dialog           []bs.Message
+	observations     []bs.ToolObservation
 	dialogLoads      int
+	observationLoads int
 	lastDialogBudget int
 	rawLoads         int
 	appended         []bs.Message
@@ -622,6 +671,11 @@ func (s *fakeMessageStore) DialogMessagesForAPI(_ context.Context, _ string, max
 	s.dialogLoads++
 	s.lastDialogBudget = maxTokens
 	return cloneMessages(s.dialog), nil
+}
+
+func (s *fakeMessageStore) RecentToolObservations(context.Context, string, time.Time, int) ([]bs.ToolObservation, error) {
+	s.observationLoads++
+	return append([]bs.ToolObservation(nil), s.observations...), nil
 }
 
 func (s *fakeMessageStore) AllMessagesForAPI(context.Context, string) ([]bs.Message, error) {

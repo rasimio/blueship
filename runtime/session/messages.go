@@ -191,6 +191,120 @@ func (s *Store) DialogMessagesForAPI(ctx context.Context, sessionID string, maxT
 	return dialogMessagesForAPIFromRows(msgs, maxTokens), nil
 }
 
+// RecentToolObservations returns recent tool results as provenance records for
+// prompt context. It reads the persisted transcript but keeps raw tool blocks
+// out of visible dialogue history.
+func (s *Store) RecentToolObservations(ctx context.Context, sessionID string, since time.Time, limit int) ([]bs.ToolObservation, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 3
+	}
+	rowLimit := limit * 12
+	if rowLimit < 50 {
+		rowLimit = 50
+	}
+	if rowLimit > 200 {
+		rowLimit = 200
+	}
+
+	var sinceArg any
+	if !since.IsZero() {
+		sinceArg = since
+	}
+	var msgs []Message
+	err := s.db.SelectContext(ctx, &msgs,
+		`SELECT id, session_id, role, content, tool_use_id, token_estimate, created_at
+		 FROM chat_messages
+		 WHERE session_id = $1
+		   AND ($2::timestamptz IS NULL OR created_at >= $2::timestamptz)
+		   AND role IN ('user', 'assistant')
+		 ORDER BY created_at DESC
+		 LIMIT $3`,
+		sessionID, sinceArg, rowLimit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("recent tool observations: %w", err)
+	}
+
+	type partialObservation struct {
+		obs       bs.ToolObservation
+		toolUseID string
+	}
+	toolInputs := make(map[string]string)
+	toolNames := make(map[string]string)
+	partials := make([]partialObservation, 0, limit)
+
+	for _, msg := range msgs {
+		blocks := bs.NormalizeContent(msg.ToAPIMessage().Content)
+		switch msg.Role {
+		case "assistant":
+			for _, block := range blocks {
+				if block.Type != "tool_use" || block.ID == "" {
+					continue
+				}
+				if block.Name != "" {
+					toolNames[block.ID] = block.Name
+				}
+				if len(block.Input) > 0 {
+					toolInputs[block.ID] = strings.TrimSpace(string(block.Input))
+				}
+			}
+		case "user":
+			for _, block := range blocks {
+				if block.Type != "tool_result" || block.ToolUseID == "" {
+					continue
+				}
+				output := toolContentString(block.Content)
+				if output == "" && !block.IsError {
+					continue
+				}
+				partials = append(partials, partialObservation{
+					toolUseID: block.ToolUseID,
+					obs: bs.ToolObservation{
+						Name:      block.Name,
+						Output:    output,
+						IsError:   block.IsError,
+						CreatedAt: msg.CreatedAt,
+					},
+				})
+			}
+		}
+	}
+
+	out := make([]bs.ToolObservation, 0, limit)
+	for _, partial := range partials {
+		if partial.obs.Name == "" {
+			partial.obs.Name = toolNames[partial.toolUseID]
+		}
+		partial.obs.Input = toolInputs[partial.toolUseID]
+		if partial.obs.Name == "" {
+			partial.obs.Name = "unknown_tool"
+		}
+		out = append(out, partial.obs)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func toolContentString(content any) string {
+	switch v := content.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(v)
+	default:
+		data, err := json.Marshal(v)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(data))
+	}
+}
+
 func messagesForAPIFromRows(msgs []Message, maxTokens int) []bs.Message {
 	if len(msgs) == 0 {
 		return nil
