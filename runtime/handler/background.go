@@ -105,6 +105,10 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// this task — useful when chat-mode prompts (preamble/agents) are wrong
 	// for autonomous reflection (inner-thought has no user speech, no
 	// message_send confirmation, no intent detection from user input).
+	// include_persona (only meaningful together with system_prompt_keys)
+	// opts the soul persona back into that otherwise fully-replaced stack:
+	// the resolved persona text is placed before the prompt-key contents,
+	// while platform preamble/agents stay excluded.
 	// instructionKey is appended last in either case.
 	// notify_default controls whether the final reply is auto-pushed to the
 	// user as Notify on the last iteration. Heartbeat-style tasks want true
@@ -114,6 +118,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	instructionKey := "background-task"
 	notifyDefault := true
 	skipReflex := false
+	includePersona := false
 	// inputMode controls how the instruction reaches the model:
 	//   prompt_key (default) — instruction in the system prompt + an
 	//     autonomous background trigger turn. This is not framed as a fresh
@@ -134,6 +139,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			Prompt           string                 `json:"prompt"`
 			NotifyDefault    *bool                  `json:"notify_default"`
 			SystemPromptKeys []string               `json:"system_prompt_keys"`
+			IncludePersona   bool                   `json:"include_persona"`
 			SkipReflex       bool                   `json:"skip_reflex"`
 			InputMode        string                 `json:"input_mode"`
 			Skills           []string               `json:"skills"`
@@ -150,6 +156,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			if len(cfg.SystemPromptKeys) > 0 {
 				promptKeys = append(promptKeys, cfg.SystemPromptKeys...)
 			}
+			includePersona = cfg.IncludePersona
 			skipReflex = cfg.SkipReflex
 			if cfg.InputMode != "" {
 				inputMode = cfg.InputMode
@@ -251,6 +258,23 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		}
 		parts = append(parts, preamble, persona, agents)
 	} else {
+		// An explicit system_prompt_keys override replaces the whole persona
+		// stack — right for research roles, voiceless for personality-driven
+		// recurring tasks. include_persona opts the soul persona back in: the
+		// resolved persona text leads, followed by the task's own prompt keys;
+		// platform preamble/agents stay excluded. Resolution failure or an
+		// absent hook degrades silently to the plain prompt-key stack.
+		if includePersona && len(promptKeys) > 0 && !defaultPersonaStack &&
+			task.SoulID != uuid.Nil && gw.ResolveSoulPersona != nil {
+			if persona, perr := gw.ResolveSoulPersona(ctx, task.SoulID); perr != nil {
+				if deps.Logger != nil {
+					deps.Logger.WarnContext(ctx, "background: include_persona: soul persona unavailable",
+						"task_id", task.ID, "soul_id", task.SoulID, "error", perr)
+				}
+			} else if strings.TrimSpace(persona) != "" {
+				parts = append(parts, persona)
+			}
+		}
 		for _, key := range promptKeys {
 			p, err := deps.Prompts.Get(ctx, key)
 			if err != nil {
@@ -518,6 +542,20 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		msg += b.String()
 	}
 
+	// Acceptance-gate feedback. When the previous iteration's Done-claim was
+	// rejected, the scheduler merges the reviewer's reason into the task's
+	// progress under "acceptance_feedback" (see agenttask.injectFeedback).
+	// Surface it so the retry addresses the reviewer's objection instead of
+	// resubmitting blind. Staleness is structurally impossible: bgProgress
+	// does not carry the key, so the handler's own progress writes drop it —
+	// the block renders only on the iteration right after a rejection — and
+	// a passing acceptance terminates the task, so feedback never survives
+	// a success.
+	if fb := acceptanceFeedbackFromProgress(task.Progress); fb != "" {
+		msg += fmt.Sprintf("\n\n[acceptance feedback]\nThe previous iteration was rejected by the acceptance gate. Address this before finishing:\n%s\n[/acceptance feedback]",
+			truncate(fb, 600))
+	}
+
 	// Fetch-rhythm enforcement. Background-task.md tells the model to
 	// browser_fetch after every 2-3 browser_search; on 2026-05-11 task
 	// 24b8ac16 the model ignored that for 6 iterations straight (1
@@ -600,7 +638,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 	// 7. Run agent loop with tool tracing and compaction.
 	loop := agent.NewLoop(deps.LLM, deps.Store, deps.Registry, deps.RoleTools, deps.Config, deps.Logger)
-	loop.SetCompactor(agent.NewCompactor(deps.LLM, deps.Config, deps.Logger))
+	loop.SetCompactor(newTaskCompactor(ctx, deps))
 
 	maxTurns := deps.Config.Gateway.MaxTurns
 	var toolOverride []string
@@ -817,6 +855,40 @@ type bgProgress struct {
 	// scheduler's terminal-status callback can route
 	// back to the originating agent.
 	Plan *RolePlan `json:"plan,omitempty"` // S2 role-assigned step plan (nil until the planner builds it)
+}
+
+// acceptanceFeedbackFromProgress extracts the reject reason the acceptance
+// gate merged into the task's progress blob. Deliberately parsed apart from
+// bgProgress: keeping the key out of bgProgress means the handler's own
+// progress writes never round-trip it, so it self-clears after one iteration.
+func acceptanceFeedbackFromProgress(progress json.RawMessage) string {
+	if len(progress) == 0 {
+		return ""
+	}
+	var p struct {
+		AcceptanceFeedback string `json:"acceptance_feedback"`
+	}
+	if err := json.Unmarshal(progress, &p); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(p.AcceptanceFeedback)
+}
+
+// newTaskCompactor builds the background-loop compactor and equips it with
+// the "compact" prompt file as its summarization instruction. A missing or
+// empty prompt degrades to an instruction-less summary (the prior behavior)
+// rather than failing the iteration.
+func newTaskCompactor(ctx context.Context, deps core.AgentDeps) *agent.Compactor {
+	c := agent.NewCompactor(deps.LLM, deps.Config, deps.Logger)
+	if c == nil {
+		return nil
+	}
+	if deps.Prompts != nil {
+		if p, err := deps.Prompts.Get(ctx, "compact"); err == nil && strings.TrimSpace(p) != "" {
+			c.SetSystemPrompt(p)
+		}
+	}
+	return c
 }
 
 // isGarbageOutput detects raw tool output that shouldn't be sent to users
