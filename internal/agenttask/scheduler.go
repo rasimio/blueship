@@ -54,7 +54,12 @@ type Scheduler struct {
 
 	mu     sync.Mutex
 	busy   map[string]bool // task ID → currently executing
-	taskWg sync.WaitGroup  // tracks in-flight executeTask goroutines
+	// dailyAtWarned dedups the malformed-daily_at config warning per task:
+	// the scheduler re-parses task config on every 60s tick, so without the
+	// dedup a persistent typo would WARN forever. Lazily allocated under mu.
+	// Warn-only state — losing it on restart just repeats one log line.
+	dailyAtWarned map[string]bool
+	taskWg        sync.WaitGroup // tracks in-flight executeTask goroutines
 	// sem bounds how many tasks execute concurrently across the whole
 	// scheduler — the back-to-back runner (runTask) holds a slot for a
 	// one-off task's entire plan, so without a cap a burst of pending
@@ -193,6 +198,13 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 		// Check cron schedule for recurring tasks.
 		if task.Schedule != nil && !s.shouldRunNow(task) {
+			continue
+		}
+
+		// Once-a-day local-hour gate for tasks carrying config
+		// {"daily_at": {"hour": H}}. See dailyGateOpen for semantics and
+		// placement rationale.
+		if !s.dailyGateOpen(ctx, task, time.Now()) {
 			continue
 		}
 
@@ -715,6 +727,108 @@ func (s *Scheduler) shouldRunNow(task core.AgentTask) bool {
 		return true
 	}
 	return time.Since(*task.LastRunAt) >= d
+}
+
+// dailyGateOpen enforces the optional once-a-day time-of-day gate a task
+// may carry in its config:
+//
+//	{"daily_at": {"hour": 9}}
+//
+// A task with the key dispatches at most once per local day, and only
+// while the owner's local hour equals hour (the whole 60-minute window)
+// — e.g. a recurring "30m" digest that should fire once every morning.
+// Ticks outside the window, or inside it once the task already dispatched
+// that local day, are skipped exactly like a schedule/cadence miss:
+// before SetRunning, so no handler run, no iteration burned, and
+// last_run_at untouched — a skip never marks the day as done.
+//
+// The gate lives here, at the scheduler's dispatch decision next to the
+// schedule/cadence guards, rather than inside the handler, because
+// (a) only a pre-dispatch skip is free — by handler time SetRunning has
+// already stamped last_run_at and the run counts as the day's dispatch;
+// (b) the owner's timezone IS resolvable at this point: task rows carry
+// soul_id, so the same soul-pinned Gateway.ResolveTimezone hook the
+// background handler uses for [current_datetime] applies; and (c) the
+// once-per-day guard derives from task.last_run_at — persisted by
+// SetRunning on every dispatch and preserved by ResetForNextRun — so it
+// survives daemon restarts with no in-memory state.
+//
+// Tasks without daily_at are unaffected: the gate is always open and the
+// existing schedule/cadence checks alone decide the tick.
+func (s *Scheduler) dailyGateOpen(ctx context.Context, task core.AgentTask, now time.Time) bool {
+	hour, ok := s.dailyAtHour(task)
+	if !ok {
+		return true
+	}
+	// Owner-local wall clock: per-soul tz via the gateway hook, falling
+	// back to the configured process timezone (server tz) when the hook
+	// is absent or the soul has none set — the same ladder as the
+	// current_time tool and the background handler's [current_datetime].
+	loc := time.UTC
+	if s.deps != nil && s.deps.Config != nil {
+		if l, err := time.LoadLocation(s.deps.Config.Timezone); err == nil {
+			loc = l
+		}
+		loc = s.deps.Config.Gateway.TimezoneFor(core.WithSoulID(ctx, task.SoulID), loc)
+	}
+	local := now.In(loc)
+	if local.Hour() != hour {
+		return false
+	}
+	if task.LastRunAt == nil {
+		return true
+	}
+	// Already dispatched today (owner-local date) → closed until tomorrow.
+	ly, lm, ld := task.LastRunAt.In(loc).Date()
+	ny, nm, nd := local.Date()
+	return ly != ny || lm != nm || ld != nd
+}
+
+// dailyAtHour extracts the daily_at gate from task config. ok=false when
+// the key is absent, the config is unparseable, or the hour is malformed
+// (missing / outside 0-23). Malformed is treated as absent so a typo
+// can't strand the task, and is WARN-logged once per task rather than on
+// every tick.
+func (s *Scheduler) dailyAtHour(task core.AgentTask) (hour int, ok bool) {
+	if len(task.Config) == 0 {
+		return 0, false
+	}
+	var cfg struct {
+		DailyAt *struct {
+			Hour *int `json:"hour"`
+		} `json:"daily_at"`
+	}
+	if json.Unmarshal(task.Config, &cfg) != nil || cfg.DailyAt == nil {
+		return 0, false
+	}
+	h := cfg.DailyAt.Hour
+	if h == nil || *h < 0 || *h > 23 {
+		s.warnBadDailyAt(task, h)
+		return 0, false
+	}
+	return *h, true
+}
+
+// warnBadDailyAt logs a malformed daily_at hour a single time per task
+// per process (see the dailyAtWarned field comment).
+func (s *Scheduler) warnBadDailyAt(task core.AgentTask, hour *int) {
+	id := task.ID.String()
+	s.mu.Lock()
+	if s.dailyAtWarned == nil {
+		s.dailyAtWarned = make(map[string]bool)
+	}
+	seen := s.dailyAtWarned[id]
+	s.dailyAtWarned[id] = true
+	s.mu.Unlock()
+	if seen {
+		return
+	}
+	var hv any = "absent"
+	if hour != nil {
+		hv = *hour
+	}
+	s.logger.Warn("agent-tasks: invalid daily_at hour (want 0-23), gate ignored",
+		"task_id", task.ID, "hour", hv)
 }
 
 func (s *Scheduler) isBusy(handler string) bool {
