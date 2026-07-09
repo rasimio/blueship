@@ -322,6 +322,24 @@ func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID) (st
 		return "", fmt.Errorf("system prompt for soul %s: no ResolveSoulPersona hook configured", soulID)
 	}
 	persona, err := resolve(ctx, soulID)
+	if err != nil && errors.Is(err, context.DeadlineExceeded) {
+		// The turn's context-prep (AME retrieval, rule search — optional,
+		// degradable work) can consume the entire turn deadline before this
+		// MANDATORY, cheap lookup (single-row select by soul_id). Aborting
+		// the whole turn because optional prep ran slow is the wrong
+		// failure mode — observed live 2026-07-09: a huge notebook message
+		// stalled the AME embed until the deadline and every subsequent
+		// turn of that soul died here. Retry once on a short detached
+		// deadline, preserving ctx values (soul, tenancy).
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if rescued, rerr := resolve(rctx, soulID); rerr == nil {
+			persona, err = rescued, nil
+			// platformPrompts below reads the DB only on a cold cache;
+			// give it the same rescue budget instead of the dead ctx.
+			ctx = rctx
+		}
+	}
 	if err != nil {
 		return "", fmt.Errorf("system prompt for soul %s: persona lookup failed: %w", soulID, err)
 	}
