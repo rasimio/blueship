@@ -95,14 +95,25 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 // authenticate resolves the connection's auth verdict. Priority:
-//  1. If cfg.ResolveDevice is wired, the Bearer header (or `?token=`) is a
+//  1. An explicitly configured shared cfg.Token matches — legacy/harness
+//     auth. Checked FIRST: device resolution used to shadow it entirely,
+//     making a configured shared token unreachable (the eval harness
+//     401'd on every connection). Hosts that must not expose a shared
+//     secret simply leave cfg.Token empty — the host config loader also
+//     clears unexpanded ${VAR} placeholders so a missing env var can
+//     never become a guessable literal secret.
+//  2. If cfg.ResolveDevice is wired, the Bearer header (or `?token=`) is a
 //     per-user device token; resolve it to (userID, soulID) or 401.
-//  2. Else fall back to the legacy shared cfg.Token (single-tenant dev).
-//  3. Empty cfg.Token AND nil ResolveDevice = open server (legacy path).
+//  3. Else fall back to the legacy shared cfg.Token (single-tenant dev).
+//  4. Empty cfg.Token AND nil ResolveDevice = open server (legacy path).
 func (s *Server) authenticate(r *http.Request) (connAuth, error) {
 	token := bearerToken(r)
 	if token == "" {
 		token = r.URL.Query().Get("token")
+	}
+
+	if s.cfg.Token != "" && token == s.cfg.Token {
+		return connAuth{legacy: true, chatID: "voice:owner"}, nil
 	}
 
 	if s.cfg.ResolveDevice != nil {
