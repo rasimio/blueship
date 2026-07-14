@@ -31,6 +31,7 @@ type RunConfig struct {
 	CompactSummary string // existing compaction summary from previous runs
 	Model          string
 	MaxTokens      int
+	ContextWindow  int
 	MaxTurns       int
 	// ReplyToMessageID, when non-empty, is stamped on the user
 	// message row at append time so the cabinet's history endpoint
@@ -77,10 +78,8 @@ type RunConfig struct {
 	// because the caller already persisted it. Used so the background tier
 	// can continue a turn the interaction tier already opened.
 	SkipUserAppend bool
-	// MessageBudget, when > 0, overrides the calculated message-window token
-	// budget. The fast interaction tier uses this to limit reflex's input to
-	// the last ~15-20 turns — Sonnet on 30 K of session history was the
-	// dominant per-turn latency, and routing decisions don't need long memory.
+	// MessageBudget, when > 0, overrides the default message-window token
+	// budget.
 	MessageBudget int
 	// MessageBudgetSource explains where MessageBudget came from. It is stored
 	// in llm_usage so prompt-budget regressions can be diagnosed from data.

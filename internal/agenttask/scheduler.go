@@ -48,12 +48,12 @@ type Scheduler struct {
 	registryBuilder func(userDeps *core.Deps) *core.ToolRegistry
 	msgStore        core.MessageStore
 	deps            *core.Deps
-	notify          func(ctx context.Context, userID uuid.UUID, text string)
+	notify          func(ctx context.Context, userID uuid.UUID, text string) error
 	onStatusChange  func(ctx context.Context, task core.AgentTask)
 	logger          *slog.Logger
 
-	mu     sync.Mutex
-	busy   map[string]bool // task ID → currently executing
+	mu   sync.Mutex
+	busy map[string]bool // task ID → currently executing
 	// dailyAtWarned dedups the malformed-daily_at config warning per task:
 	// the scheduler re-parses task config on every 60s tick, so without the
 	// dedup a persistent typo would WARN forever. Lazily allocated under mu.
@@ -96,7 +96,7 @@ func NewScheduler(
 	registry *core.ToolRegistry,
 	msgStore core.MessageStore,
 	deps *core.Deps,
-	notify func(ctx context.Context, userID uuid.UUID, text string),
+	notify func(ctx context.Context, userID uuid.UUID, text string) error,
 	logger *slog.Logger,
 ) *Scheduler {
 	return &Scheduler{
@@ -501,19 +501,26 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 	// "AWM final report" to Telegram on iter 15 right before the gate
 	// failed it for missing citations — exactly this bug.
 	shouldNotify := result.Notify != "" && s.notify != nil && !strings.Contains(result.Notify, "[no-op]")
-	notified := false
+	deliverNotify := func() bool {
+		if !shouldNotify {
+			return false
+		}
+		notifyCtx, notifyCancel := newDBCtx()
+		defer notifyCancel()
+		if err := s.notify(notifyCtx, task.UserID, result.Notify); err != nil {
+			s.logger.WarnContext(ctx, "agent-tasks: notify failed",
+				"task_id", task.ID, "error", err)
+			return false
+		}
+		result.Notified = true
+		return true
+	}
 
 	if result.Pause {
 		iterationOutcome = "pause"
 		// Pause carries explicit milestone notifications (handler sets
 		// Notify only when there's something user-actionable). Push.
-		if shouldNotify {
-			notifyCtx, notifyCancel := newDBCtx()
-			s.notify(notifyCtx, task.UserID, result.Notify)
-			notifyCancel()
-			notified = true
-			result.Notified = true
-		}
+		notified := deliverNotify()
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "paused"),
 			attribute.Bool("agent_task.notified", notified),
@@ -599,13 +606,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		// rejected drafts.
 		iterationOutcome = "done"
 		result.IsFinal = true
-		if shouldNotify {
-			notifyCtx, notifyCancel := newDBCtx()
-			s.notify(notifyCtx, task.UserID, result.Notify)
-			notifyCancel()
-			notified = true
-			result.Notified = true
-		}
+		notified := deliverNotify()
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "done"),
 			attribute.Int("agent_task.output_size_bytes", len(result.Output)),
@@ -646,13 +647,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		// Mid-task iteration. Push only when the handler explicitly
 		// flagged something user-relevant via Notify (milestone, blocker)
 		// — random in-progress output is noise, not a message.
-		if shouldNotify {
-			notifyCtx, notifyCancel := newDBCtx()
-			s.notify(notifyCtx, task.UserID, result.Notify)
-			notifyCancel()
-			notified = true
-			result.Notified = true
-		}
+		notified := deliverNotify()
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "iteration_done"),
 			attribute.Bool("agent_task.notified", notified),

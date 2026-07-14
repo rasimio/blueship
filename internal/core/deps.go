@@ -37,9 +37,10 @@ type Deps struct {
 	RoleTools RoleToolQuerier
 
 	// Stores provide access to ship DB data without modules querying ship DB directly.
-	Prompts  PromptStore    // file-backed prompt store rooted at Config.Prompts
-	Users    UserStore      // user_profiles table (nil = not available)
-	Sessions SessionQuerier // chat_messages/chat_sessions (nil = not available)
+	Prompts       PromptStore      // file-backed prompt store rooted at Config.Prompts
+	Users         UserStore        // user_profiles table (nil = not available)
+	Sessions      SessionQuerier   // chat_messages/chat_sessions (nil = not available)
+	UsageRecorder LLMUsageRecorder // llm_usage writer for direct host-side LLM calls
 
 	// ContextInjector is called before the first LLM turn to inject per-request context
 	// (e.g. memory traces). Returns empty string to skip injection.
@@ -176,6 +177,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		Prompts:                     d.Prompts,
 		Users:                       d.Users,
 		Sessions:                    d.Sessions,
+		UsageRecorder:               d.UsageRecorder,
 		ContextInjector:             d.ContextInjector,
 		ReflexPreparer:              d.ReflexPreparer,
 		RuleEngine:                  d.RuleEngine,

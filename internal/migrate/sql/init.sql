@@ -72,6 +72,8 @@ CREATE TABLE IF NOT EXISTS model_config (
     model_name      TEXT NOT NULL,
     thinking_budget INT DEFAULT 0,
     max_tokens      INT DEFAULT 8192,
+    context_window  INT DEFAULT 0,
+    message_budget  INT DEFAULT 0,
     temperature     FLOAT DEFAULT 0.7,
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );

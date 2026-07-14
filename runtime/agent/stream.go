@@ -91,6 +91,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		req := bs.CompletionRequest{
 			Model:          cfg.Model,
 			MaxTokens:      cfg.MaxTokens,
+			ContextWindow:  cfg.ContextWindow,
 			System:         effectiveSystem,
 			Messages:       messages,
 			Tools:          turnTools,

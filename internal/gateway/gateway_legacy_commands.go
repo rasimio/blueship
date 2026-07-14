@@ -189,6 +189,11 @@ func (g *Gateway) handleSessionCommand(ctx context.Context, chatID int64) {
 	}
 
 	maxContext := g.deps.Config.Limits.MaxContext
+	if g.deps.ModelStore != nil {
+		if ref := g.deps.ModelStore.Get("cortex"); ref.ContextWindow > 0 {
+			maxContext = ref.ContextWindow
+		}
+	}
 	contextTokens := sess.TokenCount
 	pct := 0
 	if maxContext > 0 {

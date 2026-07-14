@@ -157,6 +157,14 @@ func buildRequest(req bs.CompletionRequest) responsesRequest {
 			input = append(input, items...)
 		}
 	}
+	if len(input) == 0 {
+		input = append(input, inputMessage{
+			Role: "user",
+			Content: []any{
+				inputTextContent{Type: "input_text", Text: ""},
+			},
+		})
+	}
 
 	// Append extracted context to instructions so the model treats it
 	// as authoritative system-level information, not user text.

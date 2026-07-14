@@ -291,6 +291,9 @@ func (p *CompletionProvider) buildRequest(req bs.CompletionRequest, stream bool)
 	if req.MaxTokens > 0 {
 		options["num_predict"] = req.MaxTokens
 	}
+	if req.ContextWindow > 0 {
+		options["num_ctx"] = req.ContextWindow
+	}
 	if req.Temperature > 0 {
 		options["temperature"] = req.Temperature
 	}

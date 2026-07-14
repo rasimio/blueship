@@ -625,7 +625,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// tools; any context it needs it must pull through the tools itself.
 	var injectedCtx string
 	if !skipReflex {
-		reflex := runReflexPipeline(ctx, deps, b.tz, msg)
+		reflex := runReflexPipeline(ctx, deps, b.tz, sessID, msg)
 		injectedCtx = reflex.InjectedCtx
 		if reflex.Guidance != "" {
 			if injectedCtx != "" {

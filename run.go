@@ -2,6 +2,7 @@ package blueship
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -80,7 +81,9 @@ func (s *Ship) Run(ctx context.Context) error {
 	// back to their own defaults.
 	deps.Prompts = core.NewFilePromptStore(s.cfg.Prompts)
 	deps.Users = core.NewUserStore(shipDB)
-	deps.Sessions = session.NewStore(shipDB)
+	sessionStore := session.NewStore(shipDB)
+	deps.Sessions = sessionStore
+	deps.UsageRecorder = sessionStore
 
 	// 3. Ensure/resolve owner user
 	var uid uuid.UUID
@@ -204,13 +207,12 @@ func (s *Ship) Run(ctx context.Context) error {
 		msgStore := session.NewStore(shipDB) // MessageStore for agent loops
 
 		// Notification callback: append to chat session (so cortex sees it) + send to Telegram.
-		var notifyFn func(ctx context.Context, userID uuid.UUID, text string)
+		var notifyFn func(ctx context.Context, userID uuid.UUID, text string) error
 		if deps.Users != nil {
-			notifyFn = func(ctx context.Context, userID uuid.UUID, text string) {
+			notifyFn = func(ctx context.Context, userID uuid.UUID, text string) error {
 				profile, err := deps.Users.GetByID(ctx, userID.String())
 				if err != nil {
-					s.logger.Warn("agent-tasks: user lookup for notify failed", "error", err)
-					return
+					return fmt.Errorf("user lookup for notify: %w", err)
 				}
 
 				// Resolve [attached: UUID] markers into real file sends (a
@@ -219,20 +221,30 @@ func (s *Ship) Run(ctx context.Context) error {
 				// text. soul_id rides on ctx (set in executeTask); without it,
 				// or the host hooks, we fall back to plain text.
 				cleaned := text
+				var notifyErrs []error
+				sentAttachment := false
 				if ids, c, ok := core.ParseAttachmentMarkers(text); ok {
 					cleaned = c
 					soulID, hasSoul := core.SoulIDFromContextOK(ctx)
 					if hasSoul && deps.AttachmentSink != nil && deps.SendToUserAttachment != nil {
 						for _, id := range ids {
 							rec, data, aerr := deps.AttachmentSink.Get(ctx, userID, soulID, id)
-							if aerr != nil || rec == nil {
-								s.logger.Warn("agent-tasks: attachment resolve failed", "id", id, "error", aerr)
+							if aerr != nil {
+								notifyErrs = append(notifyErrs, fmt.Errorf("attachment %s resolve: %w", id, aerr))
+								continue
+							}
+							if rec == nil {
+								notifyErrs = append(notifyErrs, fmt.Errorf("attachment %s resolve: not found", id))
 								continue
 							}
 							if serr := deps.SendToUserAttachment(ctx, userID, *rec, data); serr != nil {
-								s.logger.Warn("agent-tasks: attachment send failed", "id", id, "error", serr)
+								notifyErrs = append(notifyErrs, fmt.Errorf("attachment %s send: %w", id, serr))
+								continue
 							}
+							sentAttachment = true
 						}
+					} else if len(ids) > 0 {
+						notifyErrs = append(notifyErrs, fmt.Errorf("attachment sender unavailable"))
 					}
 				}
 
@@ -251,7 +263,10 @@ func (s *Ship) Run(ctx context.Context) error {
 				// A marker-only message (no prose) has nothing left to send as
 				// text once the file is dispatched.
 				if strings.TrimSpace(cleaned) == "" {
-					return
+					if sentAttachment {
+						return nil
+					}
+					return errors.Join(notifyErrs...)
 				}
 
 				// Send to Telegram. Prefer the per-user multi-bot sender wired
@@ -260,7 +275,7 @@ func (s *Ship) Run(ctx context.Context) error {
 				// users who never opened the host owner's private bot).
 				if deps.SendToUser != nil {
 					if err := deps.SendToUser(ctx, userID, cleaned); err != nil {
-						s.logger.Warn("agent-tasks: notify failed", "error", err)
+						notifyErrs = append(notifyErrs, err)
 					}
 				} else if deps.Sender != nil {
 					chatID := profile.ChatID
@@ -268,9 +283,12 @@ func (s *Ship) Run(ctx context.Context) error {
 						chatID = chatID[idx+1:]
 					}
 					if err := deps.Sender.SendLong(ctx, chatID, cleaned); err != nil {
-						s.logger.Warn("agent-tasks: notify failed", "error", err)
+						notifyErrs = append(notifyErrs, err)
 					}
+				} else {
+					notifyErrs = append(notifyErrs, fmt.Errorf("no sender configured"))
 				}
+				return errors.Join(notifyErrs...)
 			}
 		}
 

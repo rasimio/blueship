@@ -30,7 +30,7 @@ func (s *AgentTaskStore) PendingTasks(ctx context.Context) ([]AgentTask, error) 
 		WHERE status = 'pending'
 		  AND (max_iterations = 0 OR iteration < max_iterations)
 		  AND (deadline IS NULL OR deadline > NOW())
-		ORDER BY created_at`)
+		ORDER BY last_run_at NULLS FIRST, created_at`)
 	return tasks, err
 }
 
@@ -100,6 +100,7 @@ func (s *AgentTaskStore) Complete(ctx context.Context, id uuid.UUID, result stri
 //     error_message. Auto-completing as 'done' was the old behaviour and
 //     was wrong: it claimed success for tasks that, by definition, never
 //     met their acceptance criteria.
+//
 // ExhaustedTask identifies a task CompleteExhausted just force-failed, so the
 // scheduler can alert the owner ONCE per truly-dead task (rather than firing an
 // alert on every retryable per-iteration failure).
@@ -126,12 +127,20 @@ func (s *AgentTaskStore) CompleteExhausted(ctx context.Context) []ExhaustedTask 
 		    completed_at = NOW(),
 		    error_message = COALESCE(error_message,
 		        'max_iterations reached without satisfying acceptance criteria'),
-		    result = COALESCE(t.result, (
+		    result = COALESCE(
+		      CASE
+		        WHEN btrim(COALESCE(t.result, '')) <> ''
+		         AND t.result <> 'Cancelled by user'
+		        THEN t.result
+		      END,
+		      (
 		        SELECT i.output FROM agent_task_iterations i
 		         WHERE i.task_id = t.id AND COALESCE(i.output, '') <> ''
 		         ORDER BY i.iteration DESC
 		         LIMIT 1
-		    ))
+		      ),
+		      'max_iterations reached without satisfying acceptance criteria'
+		    )
 		WHERE t.status = 'pending'
 		  AND t.schedule IS NULL
 		  AND t.max_iterations > 0

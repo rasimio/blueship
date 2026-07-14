@@ -153,6 +153,7 @@ type ModelRef struct {
 	Provider       string
 	Name           string
 	MaxTokens      int
+	ContextWindow  int
 	MessageBudget  int
 	ThinkingBudget int
 	Temperature    float64
@@ -190,16 +191,18 @@ type ModelsConfig struct {
 	Compact ModelRef // compaction summarizer (default: "claude-haiku-4-5-20251001")
 }
 
-// LimitsConfig defines token budget limits.
+// LimitsConfig defines runtime defaults and non-model session policies.
 type LimitsConfig struct {
-	MaxContext        int // Opus input budget (default: 180000)
-	ChatMessageBudget int // recent session history budget for chat turns (default: 6000)
-	CompactThreshold  int // trigger compaction above this (default: 40000)
-	CompactKeep       int // keep recent messages intact (default: 30000)
-	MaxOutputTokens   int // agent loop max output (default: 8192)
-	CompactOutput     int // haiku compaction output (default: 2048)
-	ThinkingBudget    int // extended thinking budget (default: 0 = disabled)
-	MinMessageBudget  int // minimum token budget for messages (default: 10000)
+	MaxContext           int // fallback max context for usage/status when role config is absent (default: 180000)
+	ChatMessageBudget    int // fallback recent-message budget when model_config.message_budget is unset (default: 6000)
+	SoftSummaryThreshold int // create non-destructive summaries above this stored-token count (default: 80000)
+	SoftSummaryMinNew    int // minimum new stored tokens before another soft summary (default: 30000)
+	CompactThreshold     int // trigger compaction above this (default: 40000)
+	CompactKeep          int // keep recent messages intact (default: 30000)
+	MaxOutputTokens      int // agent loop max output (default: 8192)
+	CompactOutput        int // haiku compaction output (default: 2048)
+	ThinkingBudget       int // extended thinking budget (default: 0 = disabled)
+	MinMessageBudget     int // minimum token budget for messages (default: 10000)
 }
 
 // TimeoutsConfig defines timeouts for external calls.

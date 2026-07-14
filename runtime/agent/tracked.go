@@ -144,6 +144,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		req := bs.CompletionRequest{
 			Model:          cfg.Model,
 			MaxTokens:      cfg.MaxTokens,
+			ContextWindow:  cfg.ContextWindow,
 			System:         effectiveSystem,
 			Messages:       messages,
 			Tools:          turnTools,

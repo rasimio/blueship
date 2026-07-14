@@ -24,7 +24,7 @@ type reflexResult struct {
 
 // runReflexPipeline executes the System 1/2 pipeline for agent tasks.
 // Same architecture as gateway.runReflexPipeline but independent of Gateway.
-func runReflexPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Location, msg string) reflexResult {
+func runReflexPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Location, sessionID, msg string) reflexResult {
 	if deps.ReflexPreparer == nil {
 		// No reflex — fall back to ContextInjector + RuleEngine only.
 		return runFallbackPipeline(ctx, deps, tz, msg)
@@ -69,11 +69,13 @@ func runReflexPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Locati
 	// Resolve reflex model.
 	reflexModel := ""
 	var reflexEffort, reflexThinkingMode string
+	reflexContextWindow := 0
 	if deps.ModelStore != nil {
 		reflexModel = deps.ModelStore.ForRouter("reflex")
 		ref := deps.ModelStore.Get("reflex")
 		reflexEffort = ref.Effort
 		reflexThinkingMode = ref.ThinkingMode
+		reflexContextWindow = ref.ContextWindow
 	}
 	if reflexModel == "" {
 		deps.Logger.Warn("reflex model not configured, using fallback")
@@ -85,14 +87,17 @@ func runReflexPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Locati
 
 	// Call reflex LLM.
 	deps.Logger.Info("agent-tasks: calling reflex", "model", reflexModel)
-	resp, err := deps.LLM.Complete(ctx, core.CompletionRequest{
-		Model:        reflexModel,
-		MaxTokens:    512,
-		Effort:       reflexEffort,
-		ThinkingMode: reflexThinkingMode,
-		System:       reflexSystem,
-		Messages:     []core.Message{{Role: "user", Content: reflexPrompt}},
-	})
+	req := core.CompletionRequest{
+		Model:         reflexModel,
+		MaxTokens:     512,
+		ContextWindow: reflexContextWindow,
+		Effort:        reflexEffort,
+		ThinkingMode:  reflexThinkingMode,
+		System:        reflexSystem,
+		Messages:      []core.Message{{Role: "user", Content: reflexPrompt}},
+	}
+	started := time.Now()
+	resp, err := deps.LLM.Complete(ctx, req)
 	if err != nil {
 		deps.Logger.Warn("agent-tasks: reflex failed, using fallback", "error", err)
 		return reflexResult{
@@ -100,6 +105,7 @@ func runReflexPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Locati
 			Guidance:    buildRuleEngineGuidance(ctx, deps, tz, msg),
 		}
 	}
+	recordDirectLLMUsage(ctx, deps.Logger, deps, sessionID, "reflex", req, resp, started)
 
 	reflexOutput, err := parseReflexResult(core.ExtractText(resp.Content))
 	if err != nil {

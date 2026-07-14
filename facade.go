@@ -105,6 +105,8 @@ type (
 	Response              = core.Response
 	UserProfile           = core.UserProfile
 	UserStore             = core.UserStore
+	LLMUsageRecord        = core.LLMUsageRecord
+	LLMUsageRecorder      = core.LLMUsageRecorder
 	PromptStore           = core.PromptStore
 	ModelConfigStore      = core.ModelConfigStore
 	ModelConfigQuerier    = core.ModelConfigQuerier

@@ -102,3 +102,23 @@ func TestBuildUserInputImageThenToolResult(t *testing.T) {
 		t.Fatalf("item 1 not the function_call_output: %#v", items[1])
 	}
 }
+
+func TestBuildRequestUsesEmptyUserInputWhenNoMessages(t *testing.T) {
+	req := bs.CompletionRequest{Model: "gpt-5.5", System: "instructions only"}
+
+	payload := buildRequest(req)
+	if len(payload.Input) != 1 {
+		t.Fatalf("want one fallback input item, got %d", len(payload.Input))
+	}
+	msg, ok := payload.Input[0].(inputMessage)
+	if !ok {
+		t.Fatalf("fallback item is %T, want inputMessage", payload.Input[0])
+	}
+	if msg.Role != "user" || len(msg.Content) != 1 {
+		t.Fatalf("unexpected fallback message: %#v", msg)
+	}
+	txt, ok := msg.Content[0].(inputTextContent)
+	if !ok || txt.Type != "input_text" || txt.Text != "" {
+		t.Fatalf("unexpected fallback content: %#v", msg.Content[0])
+	}
+}

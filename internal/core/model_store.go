@@ -39,7 +39,7 @@ func NewModelConfigStore(db *sqlx.DB) *ModelConfigStore {
 func (s *ModelConfigStore) Load(ctx context.Context) error {
 	rows, err := s.db.QueryxContext(ctx, `
 		SELECT role, provider, model_name, max_tokens, thinking_budget,
-		       COALESCE(message_budget, 0),
+		       COALESCE(context_window, 0), COALESCE(message_budget, 0),
 		       COALESCE(temperature, 0), COALESCE(thinking_mode, ''), COALESCE(effort, '')
 		FROM model_config`)
 	if err != nil {
@@ -50,15 +50,16 @@ func (s *ModelConfigStore) Load(ctx context.Context) error {
 	m := make(map[string]ModelRef)
 	for rows.Next() {
 		var role, provider, modelName, thinkingMode, effort string
-		var maxTokens, thinkingBudget, messageBudget int
+		var maxTokens, thinkingBudget, contextWindow, messageBudget int
 		var temperature float64
-		if err := rows.Scan(&role, &provider, &modelName, &maxTokens, &thinkingBudget, &messageBudget, &temperature, &thinkingMode, &effort); err != nil {
+		if err := rows.Scan(&role, &provider, &modelName, &maxTokens, &thinkingBudget, &contextWindow, &messageBudget, &temperature, &thinkingMode, &effort); err != nil {
 			return err
 		}
 		m[role] = ModelRef{
 			Provider:       provider,
 			Name:           modelName,
 			MaxTokens:      maxTokens,
+			ContextWindow:  contextWindow,
 			MessageBudget:  messageBudget,
 			ThinkingBudget: thinkingBudget,
 			Temperature:    temperature,

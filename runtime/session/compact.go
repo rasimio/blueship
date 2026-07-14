@@ -15,6 +15,17 @@ func (s *Store) CompactSession(ctx context.Context, sessionID string, summary st
 	}
 	defer tx.Rollback()
 
+	var source string
+	if err := tx.QueryRowxContext(ctx,
+		`SELECT source FROM chat_sessions WHERE id = $1 FOR UPDATE`,
+		sessionID,
+	).Scan(&source); err != nil {
+		return fmt.Errorf("load session source: %w", err)
+	}
+	if source == "chat" {
+		return tx.Commit()
+	}
+
 	// 1. Delete all messages except the most recent keepCount
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM chat_messages

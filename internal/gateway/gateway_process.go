@@ -661,6 +661,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		CompactSummary:      derefString(sess.CompactSummary),
 		Model:               g.cortexModel(),
 		MaxTokens:           cortexMaxTokens,
+		ContextWindow:       cortexRef.ContextWindow,
 		MaxTurns:            g.deps.Config.Gateway.MaxTurns,
 		InjectedContext:     injectedCtx,
 		ReflexGuidance:      reflexGuidance,
@@ -907,6 +908,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			if !ephemeral {
 				g.scanAndSaveLinks(ctx, us, sessionUUID, assistantMsgID, "assistant", reply)
 				g.emitTurnCompleted(us, sess)
+				g.maybeScheduleSoftSummary(us, sess.ID)
 			}
 		}
 		return
@@ -966,6 +968,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			}
 			if !ephemeral {
 				g.emitTurnCompleted(us, sess)
+				g.maybeScheduleSoftSummary(us, sess.ID)
 			}
 		}
 		// LEGACY: sendDebugDump — per-turn debug.md attachment for the
@@ -1126,6 +1129,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 
 	if !ephemeral {
 		g.emitTurnCompleted(us, sess)
+		g.maybeScheduleSoftSummary(us, sess.ID)
 	}
 
 	// LEGACY: sendDebugDump — see the dispatch-side comment in handleUpdate.
