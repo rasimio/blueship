@@ -15,6 +15,32 @@ import (
 	"github.com/rasimio/blueship/tool"
 )
 
+const telegramPreviewMaxRunes = 3500
+
+func telegramPreviewText(text, toolStatus string) string {
+	text = strings.TrimSpace(text)
+	suffix := ""
+	if toolStatus != "" {
+		suffix = "`" + toolStatus + "`"
+		if text == "" {
+			return suffix
+		}
+		suffix = "\n\n" + suffix
+	}
+	runes := []rune(text + suffix)
+	if len(runes) <= telegramPreviewMaxRunes {
+		return string(runes)
+	}
+	if suffix != "" {
+		suffixRunes := []rune(suffix)
+		bodyLimit := telegramPreviewMaxRunes - len(suffixRunes) - 1
+		if bodyLimit > 0 {
+			return string([]rune(text)[:bodyLimit]) + "…" + suffix
+		}
+	}
+	return string(runes[:telegramPreviewMaxRunes-1]) + "…"
+}
+
 func (g *Gateway) ProcessInbound(ctx context.Context, chatID string, messages []bs.InboundMessage, sink bs.ResponseSink) error {
 	us, err := g.getOrInitUser(ctx, chatID)
 	if err != nil {
@@ -961,6 +987,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		streamBuf   strings.Builder
 		lastEdit    time.Time
 		toolStatus  string // current tool being executed
+		previewErr  bool   // log the first transport failure, not every delta
 		mu          sync.Mutex
 	)
 
@@ -972,10 +999,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		if streamMsgID == 0 {
 			return
 		}
-		text := strings.TrimSpace(streamBuf.String())
-		if toolStatus != "" {
-			text += "\n\n`" + toolStatus + "`"
-		}
+		text := telegramPreviewText(streamBuf.String(), toolStatus)
 		if text == "" {
 			return
 		}
@@ -983,7 +1007,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			return
 		}
 		if tgSink.client != nil {
-			tgSink.client.EditMessageText(ctx, tgSink.chatID, streamMsgID, text, nil)
+			if err := tgSink.client.EditMessageText(ctx, tgSink.chatID, streamMsgID, text, nil); err != nil && !previewErr {
+				previewErr = true
+				g.logger.Warn("telegram preview edit failed",
+					"chat_id", us.ChatID, "message_id", streamMsgID, "error", err)
+			}
 		}
 		lastEdit = time.Now()
 	}
@@ -993,10 +1021,14 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		if streamMsgID != 0 || tgSink.client == nil {
 			return
 		}
+		text = telegramPreviewText(text, "")
 		res, err := tgSink.client.SendMessage(ctx, fmt.Sprintf("%d", tgSink.chatID), text)
 		if err == nil && res != nil && res.Result.MessageID != 0 {
 			streamMsgID = res.Result.MessageID
 			lastEdit = time.Now()
+		} else if err != nil && !previewErr {
+			previewErr = true
+			g.logger.Warn("telegram preview create failed", "chat_id", us.ChatID, "error", err)
 		}
 	}
 
@@ -1065,12 +1097,18 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	toolStatus = ""
 	mu.Unlock()
 
-	if streamMsgID != 0 && tgSink.client != nil {
-		// Final edit with complete text
-		tgSink.client.EditMessageText(ctx, tgSink.chatID, streamMsgID, reply, nil)
+	deliveryCtx, cancelDelivery := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	var deliveryErr error
+	if tgSink.client != nil {
+		deliveryErr = tgSink.client.FinalizeResponse(deliveryCtx, tgSink.chatID, streamMsgID, reply)
 	} else {
-		// No edits happened (no tools called, fast response) — just send
-		sink.SendText(ctx, reply)
+		deliveryErr = sink.SendText(deliveryCtx, reply)
+	}
+	cancelDelivery()
+	if deliveryErr != nil {
+		g.logger.Error("telegram final delivery failed",
+			"chat_id", us.ChatID, "preview_message_id", streamMsgID,
+			"reply_runes", len([]rune(reply)), "error", deliveryErr)
 	}
 
 	// Auto-detect self-reflections in cortex response and save them even

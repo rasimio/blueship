@@ -333,7 +333,7 @@ func (g *Gateway) SendToUser(ctx context.Context, userID uuid.UUID, text string)
 	if err != nil {
 		return err
 	}
-	return bi.client.SendLong(ctx, tgChatID, text)
+	return bi.client.SendRichLong(ctx, tgChatID, text)
 }
 
 // SendToUserAttachment ships a CDN-resolved file out the user's paired bot —

@@ -84,55 +84,48 @@ type SendMessageResult struct {
 	} `json:"result"`
 }
 
+// ResponseParameters carries structured recovery hints returned by the
+// Telegram Bot API on failed requests.
+type ResponseParameters struct {
+	RetryAfter int `json:"retry_after,omitempty"`
+}
+
+// APIError is a Telegram-level failure. The Bot API often returns a useful
+// JSON error body even when the HTTP request itself completed successfully,
+// so callers must inspect ok/error_code rather than relying on HTTP alone.
+type APIError struct {
+	Method      string
+	StatusCode  int
+	ErrorCode   int
+	Description string
+	Parameters  ResponseParameters
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("telegram %s failed (http=%d code=%d): %s",
+		e.Method, e.StatusCode, e.ErrorCode, e.Description)
+}
+
 // SendMessage sends a text message to a chat.
 func (c *Client) SendMessage(ctx context.Context, chatID string, text string) (*SendMessageResult, error) {
 	if !c.IsConfigured() {
 		return nil, fmt.Errorf("telegram bot not configured")
 	}
 
-	htmlText := markdownToHTML(text)
-
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", c.token)
-
-	resp, err := c.httpClient.PostForm(apiURL, url.Values{
-		"chat_id":    {chatID},
-		"text":       {htmlText},
-		"parse_mode": {"HTML"},
-	})
-	if err != nil {
-		return nil, err
+	payload := map[string]any{
+		"chat_id":    chatID,
+		"text":       markdownToHTML(text),
+		"parse_mode": "HTML",
 	}
-	defer resp.Body.Close()
-
-	var result SendMessageResult
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+	result, err := c.postJSON(ctx, "sendMessage", payload)
+	if err != nil && isEntityParseError(err) {
+		// A malformed/incomplete Markdown fragment must never make the
+		// transport lose the message. Retry as literal plain text.
+		payload["text"] = text
+		delete(payload, "parse_mode")
+		return c.postJSON(ctx, "sendMessage", payload)
 	}
-
-	if !result.OK {
-		if strings.Contains(result.Description, "can't parse entities") {
-			resp2, err := c.httpClient.PostForm(apiURL, url.Values{
-				"chat_id": {chatID},
-				"text":    {text},
-			})
-			if err != nil {
-				return nil, err
-			}
-			defer resp2.Body.Close()
-
-			var result2 SendMessageResult
-			if err := json.NewDecoder(resp2.Body).Decode(&result2); err != nil {
-				return nil, err
-			}
-			if !result2.OK {
-				return nil, fmt.Errorf("telegram API error: %s", result2.Description)
-			}
-			return &result2, nil
-		}
-		return nil, fmt.Errorf("telegram API error: %s", result.Description)
-	}
-
-	return &result, nil
+	return result, err
 }
 
 // InlineKeyboardButton represents one button in an inline keyboard.
@@ -184,6 +177,11 @@ func (c *Client) EditMessageText(ctx context.Context, chatID int64, messageID in
 		payload["reply_markup"] = map[string]any{"inline_keyboard": []any{}}
 	}
 	_, err := c.postJSON(ctx, "editMessageText", payload)
+	if err != nil && isEntityParseError(err) {
+		payload["text"] = text
+		delete(payload, "parse_mode")
+		_, err = c.postJSON(ctx, "editMessageText", payload)
+	}
 	return err
 }
 
@@ -223,9 +221,12 @@ func (c *Client) AnswerCallbackQuery(ctx context.Context, callbackID string) err
 }
 
 func (c *Client) postJSON(ctx context.Context, method string, payload map[string]any) (*SendMessageResult, error) {
-	body, _ := json.Marshal(payload)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("telegram %s marshal request: %w", method, err)
+	}
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/%s", c.token, method)
-	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -235,9 +236,49 @@ func (c *Client) postJSON(ctx context.Context, method string, payload map[string
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var result SendMessageResult
-	json.NewDecoder(resp.Body).Decode(&result)
-	return &result, nil
+
+	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if readErr != nil {
+		return nil, fmt.Errorf("telegram %s read response: %w", method, readErr)
+	}
+	var envelope struct {
+		OK          bool               `json:"ok"`
+		Description string             `json:"description,omitempty"`
+		ErrorCode   int                `json:"error_code,omitempty"`
+		Parameters  ResponseParameters `json:"parameters,omitempty"`
+		Result      json.RawMessage    `json:"result,omitempty"`
+	}
+	decodeErr := json.Unmarshal(responseBody, &envelope)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices ||
+		(decodeErr == nil && !envelope.OK) {
+		description := envelope.Description
+		if description == "" {
+			description = strings.TrimSpace(string(responseBody))
+		}
+		if len(description) > 500 {
+			description = description[:500] + "..."
+		}
+		return nil, &APIError{
+			Method: method, StatusCode: resp.StatusCode, ErrorCode: envelope.ErrorCode,
+			Description: description, Parameters: envelope.Parameters,
+		}
+	}
+	if decodeErr != nil {
+		return nil, fmt.Errorf("telegram %s decode response: %w", method, decodeErr)
+	}
+
+	result := &SendMessageResult{OK: envelope.OK, Description: envelope.Description}
+	trimmedResult := bytes.TrimSpace(envelope.Result)
+	if len(trimmedResult) > 0 && trimmedResult[0] == '{' {
+		if err := json.Unmarshal(trimmedResult, &result.Result); err != nil {
+			return nil, fmt.Errorf("telegram %s decode message result: %w", method, err)
+		}
+	}
+	return result, nil
+}
+
+func isEntityParseError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "can't parse entities")
 }
 
 // SetReaction sets an emoji reaction on a message.
@@ -454,7 +495,7 @@ const maxTelegramMessageLength = 4096
 
 // SendLong sends a long text message, splitting into chunks if needed.
 func (c *Client) SendLong(ctx context.Context, chatID int64, text string) error {
-	if len(text) <= maxTelegramMessageLength {
+	if len([]rune(text)) <= maxTelegramMessageLength {
 		_, err := c.SendMessage(ctx, fmt.Sprintf("%d", chatID), text)
 		return err
 	}
@@ -469,22 +510,34 @@ func (c *Client) SendLong(ctx context.Context, chatID int64, text string) error 
 }
 
 func splitMessage(text string, maxLen int) []string {
+	if maxLen <= 0 {
+		return nil
+	}
+	runes := []rune(text)
 	var chunks []string
-	for len(text) > 0 {
-		if len(text) <= maxLen {
-			chunks = append(chunks, text)
+	for len(runes) > 0 {
+		if len(runes) <= maxLen {
+			chunks = append(chunks, string(runes))
 			break
 		}
 
 		cutAt := maxLen
-		if idx := strings.LastIndex(text[:maxLen], "\n\n"); idx > maxLen/4 {
-			cutAt = idx + 2
-		} else if idx := strings.LastIndex(text[:maxLen], "\n"); idx > maxLen/4 {
-			cutAt = idx + 1
+		singleNewline := 0
+		for i := maxLen; i > maxLen/4; i-- {
+			if i >= 2 && runes[i-1] == '\n' && runes[i-2] == '\n' {
+				cutAt = i
+				break
+			}
+			if runes[i-1] == '\n' && singleNewline == 0 {
+				singleNewline = i
+			}
+		}
+		if cutAt == maxLen && singleNewline != 0 {
+			cutAt = singleNewline
 		}
 
-		chunks = append(chunks, strings.TrimRight(text[:cutAt], "\n"))
-		text = text[cutAt:]
+		chunks = append(chunks, string(runes[:cutAt]))
+		runes = runes[cutAt:]
 	}
 	return chunks
 }

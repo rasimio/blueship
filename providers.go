@@ -152,6 +152,11 @@ type telegramSenderAdapter struct {
 }
 
 func (a *telegramSenderAdapter) SendMessage(ctx context.Context, chatID string, text string) (int, error) {
+	if id, parseErr := strconv.ParseInt(chatID, 10, 64); parseErr == nil {
+		if result, richErr := a.client.SendRichMessage(ctx, id, text); richErr == nil {
+			return result.Result.MessageID, nil
+		}
+	}
 	result, err := a.client.SendMessage(ctx, chatID, text)
 	if err != nil {
 		return 0, err
@@ -165,7 +170,7 @@ func (a *telegramSenderAdapter) SendLong(ctx context.Context, chatID string, tex
 		_, err = a.client.SendMessage(ctx, chatID, text)
 		return err
 	}
-	return a.client.SendLong(ctx, id, text)
+	return a.client.SendRichLong(ctx, id, text)
 }
 
 func (a *telegramSenderAdapter) SendVoice(ctx context.Context, chatID string, audio []byte) error {

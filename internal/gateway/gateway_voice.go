@@ -177,7 +177,7 @@ func (s *telegramSink) SendText(ctx context.Context, text string) error {
 	if s.client == nil {
 		return fmt.Errorf("telegramSink.SendText: no telegram client (chat %d)", s.chatID)
 	}
-	return s.client.SendLong(ctx, s.chatID, text)
+	return s.client.SendRichLong(ctx, s.chatID, text)
 }
 
 func (s *telegramSink) SendVoice(ctx context.Context, audio []byte) error {
