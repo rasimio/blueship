@@ -29,15 +29,75 @@ type InputRichMessage struct {
 var (
 	richDollarMathBlock  = regexp.MustCompile(`(?ms)^[ \t]*\$\$[ \t]*\n?(.*?)\n?[ \t]*\$\$[ \t]*$`)
 	richBracketMathBlock = regexp.MustCompile(`(?ms)^[ \t]*\\\[[ \t]*\n?(.*?)\n?[ \t]*\\\][ \t]*$`)
+	richFencedBlock      = regexp.MustCompile("(?ms)(^|\\n)[ \\t]*```[ \\t]*\\r?\\n(.*?)\\r?\\n[ \\t]*```[ \\t]*(\\r?\\n|$)")
+	richTableDividerCell = regexp.MustCompile(`^:?-{3,}:?$`)
 )
 
 func prepareRichMarkdown(text string) string {
+	text = richFencedBlock.ReplaceAllStringFunc(text, normalizeFencedPipeTable)
+
 	// Rich Markdown specifies $...$ for inline formulas and the
 	// tg-math-block tag for display formulas. Models commonly emit the
 	// equivalent $$...$$ or \[...\] forms, so normalise those two block
 	// spellings at the transport boundary.
 	text = richDollarMathBlock.ReplaceAllString(text, "<tg-math-block>$1</tg-math-block>")
 	return richBracketMathBlock.ReplaceAllString(text, "<tg-math-block>$1</tg-math-block>")
+}
+
+func normalizeFencedPipeTable(block string) string {
+	leadingNewline := strings.HasPrefix(block, "\n")
+	trailingNewline := strings.HasSuffix(block, "\n")
+
+	trimmed := strings.TrimSuffix(strings.TrimPrefix(block, "\n"), "\n")
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) < 5 { // opening fence + header + divider + data + closing fence
+		return block
+	}
+	body := lines[1 : len(lines)-1]
+	rows := make([][]string, 0, len(body))
+	for _, line := range body {
+		row := splitPipeTableRow(line)
+		if len(row) < 2 || (len(rows) > 0 && len(row) != len(rows[0])) {
+			return block
+		}
+		rows = append(rows, row)
+	}
+	for _, cell := range rows[1] {
+		if !richTableDividerCell.MatchString(cell) {
+			return block
+		}
+	}
+
+	var normalized strings.Builder
+	if leadingNewline {
+		normalized.WriteByte('\n')
+	}
+	for i, row := range rows {
+		if i > 0 {
+			normalized.WriteByte('\n')
+		}
+		normalized.WriteString("| ")
+		normalized.WriteString(strings.Join(row, " | "))
+		normalized.WriteString(" |")
+	}
+	if trailingNewline {
+		normalized.WriteByte('\n')
+	}
+	return normalized.String()
+}
+
+func splitPipeTableRow(line string) []string {
+	line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+	line = strings.TrimPrefix(line, "|")
+	line = strings.TrimSuffix(line, "|")
+	if !strings.Contains(line, "|") {
+		return nil
+	}
+	parts := strings.Split(line, "|")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
 }
 
 // SendRichMessage sends a persistent Telegram Rich Message.

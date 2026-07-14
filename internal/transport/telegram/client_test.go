@@ -115,6 +115,26 @@ func TestPrepareRichMarkdownNormalizesDisplayMath(t *testing.T) {
 	}
 }
 
+func TestPrepareRichMarkdownNormalizesFencedPipeTable(t *testing.T) {
+	input := "Вот срез:\n\n```\nДата | Подходы | Объём\n-----|---------|------\n13.07.26 | 8/8/7 | 44.5\n```\n\nИтог"
+	want := "Вот срез:\n\n| Дата | Подходы | Объём |\n| ----- | --------- | ------ |\n| 13.07.26 | 8/8/7 | 44.5 |\n\nИтог"
+	if got := prepareRichMarkdown(input); got != want {
+		t.Fatalf("fenced table normalization:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestPrepareRichMarkdownPreservesCodeFences(t *testing.T) {
+	tests := []string{
+		"```go\na := left | right\n```",
+		"```\na | b\nresult := a | b\n```",
+	}
+	for _, input := range tests {
+		if got := prepareRichMarkdown(input); got != input {
+			t.Fatalf("code block was modified:\n got: %q\nwant: %q", got, input)
+		}
+	}
+}
+
 func TestFinalizeResponseFallsBackToLegacyEdit(t *testing.T) {
 	var payloads []map[string]any
 	c := testClient(func(req *http.Request) (*http.Response, error) {
