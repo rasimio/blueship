@@ -553,11 +553,14 @@ func TestRunTrackedTurnContextListsOnlyActualTools(t *testing.T) {
 		t.Fatalf("provider tools = %#v, want only browser_search", provider.requests[0].Tools)
 	}
 	system := provider.requests[0].System
-	if !strings.Contains(system, "[available_tools]") || !strings.Contains(system, "- browser_search") {
-		t.Fatalf("system prompt missing actual tool shelf: %q", system)
+	// The block now defers to the tool definitions instead of re-listing
+	// names (the list was pure duplication of the schema surface); it must
+	// still exist to scope tool availability to this turn.
+	if !strings.Contains(system, "[available_tools]") || !strings.Contains(system, "in your tool definitions") {
+		t.Fatalf("system prompt missing available_tools contract: %q", system)
 	}
-	if strings.Contains(system, "- memory_search") {
-		t.Fatalf("system prompt listed unavailable tool: %q", system)
+	if strings.Contains(system, "- memory_search") || strings.Contains(system, "- browser_search") {
+		t.Fatalf("system prompt re-listed tool names: %q", system)
 	}
 }
 

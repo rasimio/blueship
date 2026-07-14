@@ -235,15 +235,10 @@ func formatAvailableToolsContext(tools []bs.ToolDefinition) string {
 		b.WriteString("[/available_tools]")
 		return b.String()
 	}
-	b.WriteString("Only these native tool_use calls are available in this turn:\n")
-	for _, tool := range tools {
-		if tool.Name == "" {
-			continue
-		}
-		b.WriteString("- ")
-		b.WriteString(tool.Name)
-		b.WriteByte('\n')
-	}
+	// Non-empty case: the tool definitions already carry every name and
+	// schema — re-listing the names here was pure duplication. One line
+	// keeps the block's contract (scope = this turn only) without the list.
+	b.WriteString("Only the native tool_use calls in your tool definitions are available in this turn.\n")
 	b.WriteString("[/available_tools]")
 	return b.String()
 }

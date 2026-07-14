@@ -27,6 +27,10 @@ import (
 
 // Gateway receives transport updates and routes them through the AgentLoop.
 type Gateway struct {
+	// personaCache: 60s-TTL per-soul persona prompts (see cachedPersona).
+	personaMu    sync.Mutex
+	personaCache map[uuid.UUID]personaCacheEntry
+
 	deps     *bs.Deps
 	modules  ModuleRegistry
 	store    *session.Store
@@ -321,7 +325,7 @@ func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID) (st
 	if resolve == nil {
 		return "", fmt.Errorf("system prompt for soul %s: no ResolveSoulPersona hook configured", soulID)
 	}
-	persona, err := resolve(ctx, soulID)
+	persona, err := g.cachedPersona(ctx, soulID, resolve)
 	if err != nil && errors.Is(err, context.DeadlineExceeded) {
 		// The turn's context-prep (AME retrieval, rule search — optional,
 		// degradable work) can consume the entire turn deadline before this
@@ -333,7 +337,7 @@ func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID) (st
 		// deadline, preserving ctx values (soul, tenancy).
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		if rescued, rerr := resolve(rctx, soulID); rerr == nil {
+		if rescued, rerr := g.cachedPersona(rctx, soulID, resolve); rerr == nil {
 			persona, err = rescued, nil
 			// platformPrompts below reads the DB only on a cold cache;
 			// give it the same rescue budget instead of the dead ctx.
@@ -351,6 +355,35 @@ func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID) (st
 		return "", err
 	}
 	return strings.Join([]string{preamble, persona, agents}, "\n\n"), nil
+}
+
+// cachedPersona wraps the ResolveSoulPersona hook with a short TTL cache:
+// personas change rarely (cabinet edits) but were fetched from Postgres on
+// EVERY turn. 60s staleness is imperceptible for persona edits and removes
+// a per-turn DB round-trip from the hot path.
+func (g *Gateway) cachedPersona(ctx context.Context, soulID uuid.UUID, resolve func(context.Context, uuid.UUID) (string, error)) (string, error) {
+	g.personaMu.Lock()
+	if e, ok := g.personaCache[soulID]; ok && time.Since(e.at) < time.Minute {
+		g.personaMu.Unlock()
+		return e.prompt, nil
+	}
+	g.personaMu.Unlock()
+	prompt, err := resolve(ctx, soulID)
+	if err != nil {
+		return "", err
+	}
+	g.personaMu.Lock()
+	if g.personaCache == nil {
+		g.personaCache = make(map[uuid.UUID]personaCacheEntry)
+	}
+	g.personaCache[soulID] = personaCacheEntry{prompt: prompt, at: time.Now()}
+	g.personaMu.Unlock()
+	return prompt, nil
+}
+
+type personaCacheEntry struct {
+	prompt string
+	at     time.Time
 }
 
 // platformPrompts returns the platform preamble and agents layers, loaded
