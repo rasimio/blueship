@@ -781,6 +781,20 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		if !notifyDefault && !hadNotifyMarker {
 			notify = ""
 		}
+		// Courier tasks deliver their payload themselves: a successful
+		// message_send in this iteration's tool log means the user already
+		// has the essence — re-sending the full report on top is noise
+		// (live feedback 2026-07-16: weather arrived, followed by an
+		// unwanted six-section TL;DR dump).
+		if notify != "" && iterationSentMessage(result.ToolTraces) {
+			notify = ""
+		}
+		// Long reports live in the artefact/result, not in chat: the
+		// notify becomes the essence — the TL;DR section when present,
+		// otherwise the head — capped, with a pointer to the full text.
+		if notify != "" {
+			notify = notifyDigest(notify)
+		}
 		return core.IterationResult{
 			Done:          true,
 			Output:        clean,
@@ -1082,3 +1096,47 @@ func jsonValueIsEmpty(v any) bool {
 	}
 	return false
 }
+
+
+// iterationSentMessage reports whether this iteration's tool trace holds
+// a successful message_send — the payload already reached the user.
+func iterationSentMessage(traces []agent.ToolTrace) bool {
+	for _, t := range traces {
+		if t.Name == "message_send" && !t.Error {
+			return true
+		}
+	}
+	return false
+}
+
+// notifyDigest reduces a completed task's notify to chat-sized essence.
+// Reports keep their full text in agent_tasks.result and the artefact
+// page; Telegram gets the TL;DR section when the report has one,
+// otherwise the head, capped and pointed at the artefacts.
+func notifyDigest(text string) string {
+	const maxRunes = 600
+	body := text
+	if m := tldrRE.FindStringSubmatchIndex(text); m != nil {
+		section := text[m[1]:]
+		if nl := nextHeadingRE.FindStringIndex(section); nl != nil {
+			section = section[:nl[0]]
+		}
+		if s := strings.TrimSpace(section); s != "" {
+			body = s
+		}
+	}
+	r := []rune(strings.TrimSpace(body))
+	truncated := len(r) > maxRunes || len(body) < len(strings.TrimSpace(text))
+	if len(r) > maxRunes {
+		body = string(r[:maxRunes]) + "…"
+	}
+	if truncated {
+		body += "\n\nПолный отчёт — в артефактах."
+	}
+	return body
+}
+
+var (
+	tldrRE        = regexp.MustCompile(`(?mi)^#*\s*(?:\d+\.\s*)?TL;?DR:?\s*$|TL;?DR\s*[:—-]`)
+	nextHeadingRE = regexp.MustCompile(`(?m)^\s*(?:#{1,3}\s+|\d+\.\s+[А-ЯA-Z])`)
+)
