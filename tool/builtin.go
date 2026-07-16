@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	bs "github.com/rasimio/blueship/internal/core"
@@ -98,10 +99,10 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 		r.Register(ToolMessageSend,
 			"Send a message to a chat or channel through the agent's configured transport (Telegram, etc.). Use 'to' for a chat id and set is_channel=true for public channel handles.",
 			json.RawMessage(`{"type":"object","properties":{
-				"to":{"type":"string","description":"Recipient chat ID or channel name"},
+				"to":{"type":"string","description":"Recipient chat ID or channel name. Omit (or pass \"owner\") to message the agent's owner — background/scheduled contexts rarely know raw chat ids."},
 				"text":{"type":"string"},
 				"is_channel":{"type":"boolean","default":false}
-			},"required":["to","text"]}`),
+			},"required":["text"]}`),
 			func(ctx context.Context, input json.RawMessage) (any, error) {
 				var p struct {
 					To        string `json:"to"`
@@ -112,6 +113,23 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 					return nil, err
 				}
 				target := p.To
+				// Owner fallback: scheduled tasks («напиши мне погоду в
+				// 21:14») know no raw chat id — six live message_send
+				// attempts guessed ids and got «chat not found». An empty
+				// or symbolic recipient resolves to the configured owner;
+				// the transport prefix («telegram:») is the gateway's
+				// address scheme, not the provider chat id.
+				lower := strings.ToLower(strings.TrimSpace(target))
+				if lower == "" || lower == "owner" || lower == "user" || lower == "владелец" {
+					target = d.Config.Owner.ChatID
+					if i := strings.IndexByte(target, ':'); i >= 0 {
+						target = target[i+1:]
+					}
+					if target == "" {
+						return nil, fmt.Errorf("message_send: no recipient and no configured owner chat")
+					}
+					p.IsChannel = false
+				}
 				if p.IsChannel && len(target) > 0 && target[0] != '@' && target[0] != '-' {
 					target = "@" + target
 				}
