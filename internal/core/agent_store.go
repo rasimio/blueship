@@ -151,6 +151,19 @@ func (s *AgentTaskStore) CompleteExhausted(ctx context.Context) []ExhaustedTask 
 	return failed
 }
 
+// UpdateShaping persists the skill router's decision: the stamped config
+// (skills + routed marker) and a possibly-tightened iteration cap. Runs
+// once per task, before the first iteration.
+func (s *AgentTaskStore) UpdateShaping(ctx context.Context, id uuid.UUID, config []byte, maxIterations int, acceptance *string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE agent_tasks
+		   SET config = $2,
+		       max_iterations = $3,
+		       acceptance_criteria = COALESCE($4, acceptance_criteria)
+		 WHERE id = $1`, id, config, maxIterations, acceptance)
+	return err
+}
+
 // SetPending resets a task back to pending (for retry after transient errors).
 func (s *AgentTaskStore) SetPending(ctx context.Context, id uuid.UUID) error {
 	_, err := s.db.ExecContext(ctx, `

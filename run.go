@@ -215,6 +215,15 @@ func (s *Ship) Run(ctx context.Context) error {
 					return fmt.Errorf("user lookup for notify: %w", err)
 				}
 
+				// Voice handoff: a router-shaped delivery task returns its
+				// payload behind the [voice_handoff] marker; the soul's own
+				// persona voices it so the chat reads as one continuous
+				// companion, not a worker's telegram. Any failure falls back
+				// to sending the raw payload — delivery beats style.
+				if payload, ok := strings.CutPrefix(text, "[voice_handoff]\n"); ok {
+					text = voiceHandoffText(ctx, deps, s.cfg, payload)
+				}
+
 				// Resolve [attached: UUID] markers into real file sends (a
 				// research task's PDF report), then continue with the cleaned
 				// text. The agent-task path used to send the raw marker as
@@ -415,4 +424,45 @@ func (s *Ship) Run(ctx context.Context) error {
 	}
 	s.logger.Info("blueship stopped")
 	return nil
+}
+
+
+// voiceHandoffText renders a delivery-task payload in the soul's chat
+// persona: one short LLM pass with the persona as system prompt. The
+// worker that produced the payload ran persona-free by design; this is
+// where the companion's voice re-enters. Falls back to the raw payload
+// on any error — delivery beats style.
+func voiceHandoffText(ctx context.Context, deps *core.Deps, cfg Config, payload string) string {
+	if deps == nil || deps.LLM == nil {
+		return payload
+	}
+	persona := ""
+	if cfg.Gateway.ResolveSoulPersona != nil {
+		if soulID, ok := core.SoulIDFromContextOK(ctx); ok {
+			if p, err := cfg.Gateway.ResolveSoulPersona(ctx, soulID); err == nil {
+				persona = p
+			}
+		}
+	}
+	model := cfg.Models.Primary.ForRouter()
+	if model == "" {
+		return payload
+	}
+	system := persona + "\n\nФоновая задача, которую ты сама ставила, вернулась с результатом. Передай его пользователю своими словами: 1-3 предложения, суть + источник, твой обычный тон. Без служебных рамок, без «задача завершена», без отчётности — просто скажи как подруга, которая узнала и рассказывает."
+	llmCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	resp, err := deps.LLM.Complete(llmCtx, core.CompletionRequest{
+		Model:     model,
+		System:    system,
+		MaxTokens: 400,
+		Messages:  []core.Message{{Role: "user", Content: core.NormalizeContent("[результат задачи]\n" + payload)}},
+	})
+	if err != nil {
+		return payload
+	}
+	voiced := strings.TrimSpace(core.ExtractText(resp.Content))
+	if voiced == "" {
+		return payload
+	}
+	return voiced
 }

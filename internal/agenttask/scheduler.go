@@ -240,6 +240,9 @@ func (s *Scheduler) Run(ctx context.Context) error {
 // iteration inside executeTaskOnce, so a crash mid-loop just resumes next tick.
 func (s *Scheduler) runTask(ctx context.Context, task core.AgentTask, handler core.AgentHandler, dispatchTag string) {
 	defer s.taskWg.Done()
+	// Third agent between creation and execution: shape the task once
+	// (skill from the catalog, iteration cap) before the first iteration.
+	task = s.routeTaskSkill(ctx, task)
 	// Bounded global concurrency for the heavy back-to-back ONE-OFF loops: take
 	// a slot or leave the task pending for a later tick (no blocking — keeps the
 	// scheduler loop responsive).

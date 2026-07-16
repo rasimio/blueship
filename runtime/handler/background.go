@@ -133,11 +133,13 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	inputMode := "prompt_key"
 	var promptKeys []string
 	var skillSlugs []string
+	var voiceHandoff bool
 	var backendPrefetch backendPrefetchConfig
 	if task.Config != nil {
 		var cfg struct {
 			Prompt           string                 `json:"prompt"`
 			NotifyDefault    *bool                  `json:"notify_default"`
+			VoiceHandoff     bool                   `json:"voice_handoff"`
 			SystemPromptKeys []string               `json:"system_prompt_keys"`
 			IncludePersona   bool                   `json:"include_persona"`
 			SkipReflex       bool                   `json:"skip_reflex"`
@@ -147,6 +149,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		}
 		if json.Unmarshal(task.Config, &cfg) == nil {
 			skillSlugs = cfg.Skills
+			voiceHandoff = cfg.VoiceHandoff
 			if cfg.Prompt != "" {
 				instructionKey = cfg.Prompt
 			}
@@ -789,10 +792,15 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		if notify != "" && iterationSentMessage(result.ToolTraces) {
 			notify = ""
 		}
-		// Long reports live in the artefact/result, not in chat: the
-		// notify becomes the essence — the TL;DR section when present,
-		// otherwise the head — capped, with a pointer to the full text.
-		if notify != "" {
+		// Voice handoff (router-stamped delivery skills): the payload goes
+		// to the persona layer verbatim — notifyFn voices it in the chat
+		// persona instead of dumping worker text.
+		if notify != "" && voiceHandoff {
+			notify = "[voice_handoff]\n" + notify
+		} else if notify != "" {
+			// Long reports live in the artefact/result, not in chat: the
+			// notify becomes the essence — the TL;DR section when present,
+			// otherwise the head — capped, with a pointer to the full text.
 			notify = notifyDigest(notify)
 		}
 		return core.IterationResult{
