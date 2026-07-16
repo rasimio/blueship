@@ -780,7 +780,7 @@ func (g *Gateway) runInteraction(
 		if g.deps.Config.Gateway.InteractionTier {
 			g.logger.Warn("interaction tier enabled but not fully wired — running cortex directly")
 		}
-		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
+		reply, traces, err = g.runCortexIntegrity(ctx, loop, cortexCfg, content, cortexCb)
 		return reply, traces, false, err
 	}
 
@@ -804,7 +804,7 @@ func (g *Gateway) runInteraction(
 		}
 		cortexCfg.SkipUserAppend = !bs.EphemeralFromContext(ctx)
 		g.logger.Info("interaction: heavy content, bypassing reflex tier", "session_id", cortexCfg.SessionID)
-		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
+		reply, traces, err = g.runCortexIntegrity(ctx, loop, cortexCfg, content, cortexCb)
 		return reply, traces, true, err
 	}
 
@@ -825,7 +825,7 @@ func (g *Gateway) runInteraction(
 		}
 		cortexCfg.SkipUserAppend = !bs.EphemeralFromContext(ctx)
 		g.logger.Info("interaction: skip reflex on text, cortex direct", "session_id", cortexCfg.SessionID)
-		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
+		reply, traces, err = g.runCortexIntegrity(ctx, loop, cortexCfg, content, cortexCb)
 		return reply, traces, false, err
 	}
 
@@ -934,7 +934,7 @@ func (g *Gateway) runInteraction(
 			cortexCfg.ReflexGuidance = note
 		}
 	}
-	reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
+	reply, traces, err = g.runCortexIntegrity(ctx, loop, cortexCfg, content, cortexCb)
 	return reply, traces, true, err
 }
 
