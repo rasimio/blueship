@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/lib/pq"
 
@@ -74,7 +76,8 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 				"config":{"type":"object","description":"Strategy-specific config (plan_template, model overrides, etc.)"},
 				"max_iterations":{"type":"integer","default":20,"description":"Safety cap on iteration count (1-100). For research with grounding gates, give ≥12 — the auditor needs at least one recovery iteration after rejecting a specific claim, otherwise S-tier work with one fabricated number gets stuck at max-iter as 'failed'."},
 				"cadence":{"type":"string","description":"Min interval between ticks (Go duration: '1h', '30m', '15s'). Rate-limits monitors; omit for fast-iterating tasks."},
-				"deadline":{"type":"string","description":"Optional ISO datetime — task fails if not done by this time"}
+				"deadline":{"type":"string","description":"Optional ISO datetime — task fails if not done by this time"},
+				"start_at":{"type":"string","description":"Optional ISO datetime with timezone — the task will not tick before this moment. THE way to express a delayed one-shot («сделай в 21:14», «напиши через 15 минут» → start_at = now+15m): set start_at, omit cadence, max_iterations small."}
 			},
 			"required":["title","description","acceptance_criteria"]
 		}`),
@@ -92,12 +95,30 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 				MaxIterations      int             `json:"max_iterations"`
 				Cadence            string          `json:"cadence"`
 				Deadline           string          `json:"deadline"`
+				StartAt            string          `json:"start_at"`
 			}
 			if err := json.Unmarshal(input, &p); err != nil {
 				return nil, err
 			}
 			if p.MaxIterations <= 0 {
 				p.MaxIterations = 20
+			}
+			// start_at rides in task config where the scheduler's
+			// not-before gate reads it (internal/agenttask).
+			if v := strings.TrimSpace(p.StartAt); v != "" {
+				if _, err := time.Parse(time.RFC3339, v); err != nil {
+					return nil, fmt.Errorf("start_at: not an ISO datetime with timezone: %q", v)
+				}
+				cfg := map[string]json.RawMessage{}
+				if len(p.Config) > 0 {
+					if err := json.Unmarshal(p.Config, &cfg); err != nil {
+						return nil, fmt.Errorf("config: %w", err)
+					}
+				}
+				sa, _ := json.Marshal(v)
+				cfg["start_at"] = sa
+				merged, _ := json.Marshal(cfg)
+				p.Config = merged
 			}
 			if p.MaxIterations < 1 {
 				p.MaxIterations = 1

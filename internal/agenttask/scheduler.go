@@ -201,6 +201,14 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			continue
 		}
 
+		// Not-before gate for tasks carrying config {"start_at": "ISO"}:
+		// a delayed one-shot («сделай в 21:14») sleeps until its moment
+		// without burning iterations. Same pre-dispatch placement as the
+		// daily gate — a skip is free.
+		if !s.startAtGateOpen(task, time.Now()) {
+			continue
+		}
+
 		// Once-a-day local-hour gate for tasks carrying config
 		// {"daily_at": {"hour": H}}. See dailyGateOpen for semantics and
 		// placement rationale.
@@ -722,6 +730,45 @@ func (s *Scheduler) shouldRunNow(task core.AgentTask) bool {
 		return true
 	}
 	return time.Since(*task.LastRunAt) >= d
+}
+
+// startAtGateOpen enforces the optional not-before gate a task may carry
+// in its config:
+//
+//	{"start_at": "2026-07-15T21:14:00+02:00"}
+//
+// Ticks before the moment are skipped exactly like a schedule/cadence
+// miss: pre-dispatch, no iteration burned, last_run_at untouched. The
+// ISO value carries its own timezone, so no owner-tz resolution is
+// needed. Malformed values are treated as absent (a typo must not
+// strand the task) and WARN-logged once per task.
+func (s *Scheduler) startAtGateOpen(task core.AgentTask, now time.Time) bool {
+	if len(task.Config) == 0 {
+		return true
+	}
+	var cfg struct {
+		StartAt string `json:"start_at"`
+	}
+	if json.Unmarshal(task.Config, &cfg) != nil || strings.TrimSpace(cfg.StartAt) == "" {
+		return true
+	}
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(cfg.StartAt))
+	if err != nil {
+		id := task.ID.String() + ":start_at"
+		s.mu.Lock()
+		if s.dailyAtWarned == nil {
+			s.dailyAtWarned = make(map[string]bool)
+		}
+		seen := s.dailyAtWarned[id]
+		s.dailyAtWarned[id] = true
+		s.mu.Unlock()
+		if !seen {
+			s.logger.Warn("agent-tasks: malformed start_at, gate ignored",
+				"task_id", task.ID.String(), "start_at", cfg.StartAt)
+		}
+		return true
+	}
+	return !now.Before(at)
 }
 
 // dailyGateOpen enforces the optional once-a-day time-of-day gate a task
