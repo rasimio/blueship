@@ -41,6 +41,13 @@ type ClarificationOption struct {
 type ToolAction struct {
 	Tool  string          `json:"tool"`
 	Input json.RawMessage `json:"input"`
+	// Mutation marks a pre-action that performs a state-changing action
+	// (creates, schedules, sends) rather than gathering information. The
+	// host selector declares this; the gateway renders mutation results
+	// under [actions performed] with a verbatim-values contract instead
+	// of the [research] block, so the model confirms a completed action
+	// instead of treating the result as background reading.
+	Mutation bool `json:"mutation,omitempty"`
 }
 
 // ReflexPreActionRequest is passed to the host's deterministic reflex

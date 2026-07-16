@@ -106,6 +106,27 @@ func appendResearchGuidance(guidance, researchBlock *strings.Builder) {
 	guidance.WriteString("\n[/research]")
 }
 
+// appendActionsGuidance injects results of mutation pre-actions — state
+// changes already executed before the model's turn — with the contract
+// that makes the model confirm them instead of re-announcing: values come
+// verbatim from the result, and the action must never be promised as
+// future work.
+func appendActionsGuidance(guidance, actionsBlock *strings.Builder) {
+	if guidance == nil || actionsBlock == nil || actionsBlock.Len() == 0 {
+		return
+	}
+	if guidance.Len() > 0 {
+		guidance.WriteString("\n\n")
+	}
+	guidance.WriteString(strings.TrimRight(actionsBlock.String(), "\n"))
+	guidance.WriteString("\n\n[performed actions usage]\n")
+	guidance.WriteString("- The tool results above were ALREADY executed for this turn. They are completed actions, not proposals, plans, or suggestions.\n")
+	guidance.WriteString("- Confirm the action to the user using ONLY the values in the result payload: ids, dates, times, amounts are taken verbatim from there. If you mention a time, use the result's time converted to the user's timezone — never a time you computed, remembered, or copied from earlier messages.\n")
+	guidance.WriteString("- Never say you are about to do, will do, or are setting up this action — it is already done. If the result shows an error, say plainly that the action failed; do not pretend it succeeded.\n")
+	guidance.WriteString("[/performed actions usage]")
+	guidance.WriteString("\n[/actions performed]")
+}
+
 func (g *Gateway) hostReflexPreActions(ctx context.Context, us *UserState, msgText, priorContext, intent string, rc *bs.ReflexContext) []bs.ToolAction {
 	if g == nil || g.deps == nil || g.deps.Config == nil || g.deps.Config.ReflexPreActionSelector == nil {
 		return nil
@@ -128,7 +149,7 @@ func (g *Gateway) hostReflexPreActions(ctx context.Context, us *UserState, msgTe
 	})
 }
 
-func (g *Gateway) runReflexPreActions(ctx context.Context, us *UserState, timings *turnTimer, actions []bs.ToolAction, preTraces *[]agent.ToolTrace, researchBlock *strings.Builder) {
+func (g *Gateway) runReflexPreActions(ctx context.Context, us *UserState, timings *turnTimer, actions []bs.ToolAction, preTraces *[]agent.ToolTrace, researchBlock, actionsBlock *strings.Builder) {
 	if len(actions) == 0 || us == nil || us.Registry == nil {
 		return
 	}
@@ -154,7 +175,17 @@ func (g *Gateway) runReflexPreActions(ctx context.Context, us *UserState, timing
 			g.logger.Warn("reflex pre-action failed", "tool", pa.Tool, "error", result)
 			continue
 		}
-		g.logger.Info("reflex pre-action done", "tool", pa.Tool, "result_len", len(result))
+		g.logger.Info("reflex pre-action done", "tool", pa.Tool, "result_len", len(result), "mutation", pa.Mutation)
+		// A mutation pre-action is a completed state change, not research
+		// material: it renders under [actions performed] so the model
+		// confirms it rather than reading past it.
+		if pa.Mutation {
+			if actionsBlock.Len() == 0 {
+				actionsBlock.WriteString("[actions performed]\n")
+			}
+			fmt.Fprintf(actionsBlock, "[%s result]\n%s\n\n", pa.Tool, truncateStr(result, 2000))
+			continue
+		}
 		if researchBlock.Len() == 0 {
 			researchBlock.WriteString("[research]\n")
 		}
@@ -336,6 +367,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		var guidance strings.Builder
 		var preTraces []agent.ToolTrace
 		var researchBlock strings.Builder
+		var actionsBlock strings.Builder
 		disambiguationOptions := ambiguousDeletionOptions(msgText)
 		if len(disambiguationOptions) > 0 {
 			appendDisambiguationGuidance(&guidance, disambiguationOptions)
@@ -400,8 +432,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 			memoriesCount = rc.MemoriesCount
 			if len(disambiguationOptions) == 0 {
 				actions := g.hostReflexPreActions(ctx, us, msgText, priorContext, "", rc)
-				g.runReflexPreActions(ctx, us, timings, actions, &preTraces, &researchBlock)
+				g.runReflexPreActions(ctx, us, timings, actions, &preTraces, &researchBlock, &actionsBlock)
 				appendResearchGuidance(&guidance, &researchBlock)
+				appendActionsGuidance(&guidance, &actionsBlock)
 			}
 			appendMemoryGroundingGuidance(&guidance, injectedCtx)
 		}
@@ -547,6 +580,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 
 	// Execute pre-actions (web_search etc.) with timeout.
 	var researchBlock strings.Builder
+	var actionsBlock strings.Builder
 	var preTraces []agent.ToolTrace
 	preActionsToRun := reflexResult.PreActions
 	if len(disambiguationOptions) == 0 {
@@ -555,7 +589,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 			preActionsToRun = hostActions
 		}
 	}
-	g.runReflexPreActions(ctx, us, timings, preActionsToRun, &preTraces, &researchBlock)
+	g.runReflexPreActions(ctx, us, timings, preActionsToRun, &preTraces, &researchBlock, &actionsBlock)
 
 	// Expand matched rules into directive block (dedup by ID).
 	var guidance strings.Builder
@@ -694,8 +728,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		guidance.WriteString("[/active rules]")
 	}
 
-	// Assemble: guidance (rules) + research + traces
+	// Assemble: guidance (rules) + research + performed actions + traces
 	appendResearchGuidance(&guidance, &researchBlock)
+	appendActionsGuidance(&guidance, &actionsBlock)
 
 	// Intent-based guidance injection.
 	if reflexResult.Intent == "memory_operation" && rc.ActiveNotes != "" && guidance.Len() == 0 {

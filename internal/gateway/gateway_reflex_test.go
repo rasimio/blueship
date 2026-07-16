@@ -246,11 +246,12 @@ func TestRunReflexPreActionsFetchFirstSearchResultWhenRequested(t *testing.T) {
 	us := &UserState{Registry: reg}
 	var traces []agent.ToolTrace
 	var research strings.Builder
+	var actions strings.Builder
 
 	g.runReflexPreActions(context.Background(), us, newTurnTimer(), []bs.ToolAction{{
 		Tool:  "browser_search",
 		Input: json.RawMessage(`{"query":"Claude Opus 4.7 release date","fetch_first":true}`),
-	}}, &traces, &research)
+	}}, &traces, &research, &actions)
 
 	if fetchedURL != "https://www.anthropic.com/news/claude-opus-4-7" {
 		t.Fatalf("fetched URL = %q", fetchedURL)
@@ -287,11 +288,12 @@ func TestRunReflexPreActionsRetriesShortFetchFirstResult(t *testing.T) {
 	us := &UserState{Registry: reg}
 	var traces []agent.ToolTrace
 	var research strings.Builder
+	var actions strings.Builder
 
 	g.runReflexPreActions(context.Background(), us, newTurnTimer(), []bs.ToolAction{{
 		Tool:  "browser_search",
 		Input: json.RawMessage(`{"query":"Claude Opus 4.7 release date","fetch_first":true}`),
-	}}, &traces, &research)
+	}}, &traces, &research, &actions)
 
 	if fetchCalls != 2 {
 		t.Fatalf("fetchCalls = %d, want retry", fetchCalls)
@@ -345,5 +347,47 @@ func TestInteractionTierAmbiguousDeleteForcesDisambiguation(t *testing.T) {
 	}
 	if len(result.PreTraces) != 0 {
 		t.Fatalf("unexpected pre-traces: %#v", result.PreTraces)
+	}
+}
+
+func TestRunReflexPreActionsMutationRendersActionsBlock(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	g := &Gateway{logger: logger}
+	reg := bs.NewToolRegistry()
+	reg.Register("agent_task_create", "create task", json.RawMessage(`{"type":"object"}`), func(ctx context.Context, input json.RawMessage) (any, error) {
+		return map[string]any{"id": "task-1", "status": "pending", "start_at": "2026-07-16T20:19:23+03:00"}, nil
+	})
+	us := &UserState{Registry: reg}
+	var traces []agent.ToolTrace
+	var research strings.Builder
+	var actions strings.Builder
+
+	g.runReflexPreActions(context.Background(), us, newTurnTimer(), []bs.ToolAction{{
+		Tool:     "agent_task_create",
+		Input:    json.RawMessage(`{"title":"deferred"}`),
+		Mutation: true,
+	}}, &traces, &research, &actions)
+
+	if research.Len() != 0 {
+		t.Fatalf("mutation result leaked into research block:\n%s", research.String())
+	}
+	got := actions.String()
+	if !strings.Contains(got, "[actions performed]") || !strings.Contains(got, "[agent_task_create result]") || !strings.Contains(got, "2026-07-16T20:19:23+03:00") {
+		t.Fatalf("actions block missing result:\n%s", got)
+	}
+
+	var guidance strings.Builder
+	appendActionsGuidance(&guidance, &actions)
+	g2 := guidance.String()
+	for _, want := range []string{
+		"[performed actions usage]",
+		"ALREADY executed for this turn",
+		"verbatim",
+		"it is already done",
+		"[/actions performed]",
+	} {
+		if !strings.Contains(g2, want) {
+			t.Fatalf("actions guidance missing %q:\n%s", want, g2)
+		}
 	}
 }
