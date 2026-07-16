@@ -329,6 +329,40 @@ func extractFetchedURLsFromTrace(trace json.RawMessage) map[string]struct{} {
 	return out
 }
 
+// toolCallDigest renders the iteration's tool-call trace as a compact
+// evidence log for the acceptance LLM. Criteria like «сообщение
+// отправлено» or «данные получены через browser_fetch» are claims about
+// ACTIONS, and the result text alone can neither prove nor disprove
+// them — the weather-courier task fetched AccuWeather and still failed
+// acceptance because the evaluator only ever saw prose. Inputs are
+// truncated; the digest is machine-generated ground truth.
+func toolCallDigest(trace json.RawMessage) string {
+	if len(trace) == 0 {
+		return ""
+	}
+	var entries []struct {
+		Name  string `json:"name"`
+		Input string `json:"input"`
+	}
+	if err := json.Unmarshal(trace, &entries); err != nil || len(entries) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	const maxLines = 30
+	for i, e := range entries {
+		if i == maxLines {
+			fmt.Fprintf(&sb, "- … %d more tool calls\n", len(entries)-maxLines)
+			break
+		}
+		in := strings.TrimSpace(e.Input)
+		if r := []rune(in); len(r) > 160 {
+			in = string(r[:160]) + "…"
+		}
+		fmt.Fprintf(&sb, "- %s(%s)\n", e.Name, in)
+	}
+	return sb.String()
+}
+
 // ToolOutput is one persisted tool-output row returned by
 // loadToolOutputs. Generic enough to carry browser_fetch bodies, code
 // reads, db query results, etc. — the consuming gate dereferences
@@ -713,9 +747,13 @@ Be strict: half-done work is not done. Criteria like "code is reviewed" require 
 			requiredURLs, verifiedURLCount)
 	}
 
+	actions := toolCallDigest(iterationToolCalls)
+	if actions == "" {
+		actions = "(no tool calls this iteration)"
+	}
 	user := fmt.Sprintf(
-		"TASK: %s\n\nDESCRIPTION:\n%s\n\nACCEPTANCE CRITERIA:\n%s\n\nRESULT:\n%s%s\n\nDoes the result meet the acceptance criteria?",
-		task.Title, desc, *task.AcceptanceCriteria, result, extraHint,
+		"TASK: %s\n\nDESCRIPTION:\n%s\n\nACCEPTANCE CRITERIA:\n%s\n\nRESULT:\n%s%s\n\nACTIONS TAKEN THIS ITERATION (machine-generated tool-call log — ground-truth evidence of what was actually done; use it to judge criteria about actions such as \"message sent\" or \"fetched via browser\"):\n%s\nDoes the result meet the acceptance criteria?",
+		task.Title, desc, *task.AcceptanceCriteria, result, extraHint, actions,
 	)
 
 	model := deps.Config.Models.Primary.ForRouter()
