@@ -6,6 +6,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -105,6 +106,13 @@ type RunConfig struct {
 	// Effort maps to output_config.effort. See CompletionRequest docs.
 	ThinkingMode string
 	Effort       string
+	// TurnNow, when non-zero, is "now" in the user's timezone and turns on
+	// temporal annotation of the dialog window: [date: <Weekday YYYY-MM-DD>]
+	// markers are inserted where the calendar day changes between stored
+	// messages, and a [felt_time] block is added to the turn context when
+	// the previous message is stale. Without it a windowed transcript reads
+	// as one continuous "today" and the model narrates from the wrong day.
+	TurnNow time.Time
 	// OnTiming receives per-component latency spans for observability. It must
 	// not affect loop behavior; callers may leave it nil.
 	OnTiming func(bs.TimingSpan)
@@ -239,6 +247,75 @@ func (a *Loop) toolboxTools(cfg RunConfig) []bs.ToolDefinition {
 	expanded := cfg
 	expanded.ToolOverride = cfg.ToolboxExpansion
 	return a.selectTools(expanded)
+}
+
+// feltTimeStaleAfter is the gap between the previous stored message and now
+// beyond which the turn context carries an explicit elapsed-time reminder.
+const feltTimeStaleAfter = 6 * time.Hour
+
+const dialogDateFormat = "Monday 2006-01-02"
+
+// annotateDialogDays inserts [date: <Weekday YYYY-MM-DD>] user-role markers
+// into the rendered dialog window wherever the calendar day (in now's
+// timezone) changes — including one before the first message, so the model
+// can attribute every part of the transcript to a real day instead of
+// reading the whole window as "today". No-op when now is zero. Markers are
+// prompt-only; nothing is persisted.
+func annotateDialogDays(msgs []bs.Message, now time.Time) []bs.Message {
+	if now.IsZero() || len(msgs) == 0 {
+		return msgs
+	}
+	loc := now.Location()
+	out := make([]bs.Message, 0, len(msgs)+4)
+	lastDay := ""
+	for _, m := range msgs {
+		if !m.CreatedAt.IsZero() {
+			day := m.CreatedAt.In(loc).Format(dialogDateFormat)
+			if day != lastDay {
+				out = append(out, bs.Message{Role: "user", Content: "[date: " + day + "]"})
+				lastDay = day
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// feltTimeContext renders the [felt_time] turn-context block: what "now" is
+// and how long ago the previous message landed. Empty when annotation is off,
+// when there is no prior message, or when the previous message is recent and
+// same-day (nothing to correct).
+func feltTimeContext(msgs []bs.Message, now time.Time) string {
+	if now.IsZero() {
+		return ""
+	}
+	// The last stored message is this turn's own user message; the temporal
+	// anchor that matters is the one before it.
+	var prev time.Time
+	for i := len(msgs) - 2; i >= 0; i-- {
+		if !msgs[i].CreatedAt.IsZero() {
+			prev = msgs[i].CreatedAt
+			break
+		}
+	}
+	if prev.IsZero() {
+		return ""
+	}
+	loc := now.Location()
+	prevLocal := prev.In(loc)
+	gap := now.Sub(prev)
+	sameDay := prevLocal.Format(dialogDateFormat) == now.Format(dialogDateFormat)
+	if sameDay && gap < feltTimeStaleAfter {
+		return ""
+	}
+	gapText := fmt.Sprintf("%.0fh", gap.Hours())
+	if gap < 2*time.Hour {
+		gapText = fmt.Sprintf("%.0fm", gap.Minutes())
+	}
+	return fmt.Sprintf("[felt_time]\nNow: %s %s.\nPrevious message in this conversation: %s %s — %s ago. Everything above the last [date: ...] marker happened on earlier days; do not narrate it as today.\n[/felt_time]",
+		now.Format(dialogDateFormat), now.Format("15:04"),
+		prevLocal.Format(dialogDateFormat), prevLocal.Format("15:04"),
+		gapText)
 }
 
 func toolboxUnlockedResult(tools []bs.ToolDefinition) string {

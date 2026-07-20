@@ -56,6 +56,8 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	if loadErr != nil {
 		return "", nil, fmt.Errorf("load dialog messages: %w", loadErr)
 	}
+	feltTime := feltTimeContext(dialogMessages, cfg.TurnNow)
+	dialogMessages = annotateDialogDays(dialogMessages, cfg.TurnNow)
 	dialogTokens := estimateMessagesTokens(dialogMessages)
 
 	var accumulated strings.Builder
@@ -81,7 +83,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 				appendFinalAnswerDirective(&messages[len(messages)-1])
 			}
 		}
-		turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, turnTools, toolObservationContext)
+		turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, turnTools, feltTime, toolObservationContext)
 		effectiveSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, turnContext)
 		scratchpadTokens := estimateMessagesTokens(convo) - dialogTokens
 		if scratchpadTokens < 0 {

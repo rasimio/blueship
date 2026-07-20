@@ -524,8 +524,9 @@ func visibleDialogCandidate(stored Message) (dialogMessageCandidate, bool) {
 	}
 	return dialogMessageCandidate{
 		msg: bs.Message{
-			Role:    stored.Role,
-			Content: contentFromBlocks(cleaned),
+			Role:      stored.Role,
+			Content:   contentFromBlocks(cleaned),
+			CreatedAt: stored.CreatedAt,
 		},
 		tokens: bs.EstimateTokens(cleaned),
 	}, true

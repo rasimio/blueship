@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 )
 
 // Message represents a message in LLM conversation format (role + content).
@@ -28,6 +29,11 @@ type Message struct {
 	// `msg.ReplyToMessage.MessageID` into our chat_messages.id when
 	// the same chat replies to it. 0 = not from Telegram or unknown.
 	TGMessageID int64 `json:"-"`
+	// CreatedAt is the persistence timestamp of a stored message, populated
+	// when the session store renders dialog history for the API. Never
+	// serialized to providers — prompt-assembly layers use it to annotate
+	// day boundaries and elapsed time. Zero for synthetic messages.
+	CreatedAt time.Time `json:"-"`
 }
 
 // ContentBlock is an element of the content array in LLM API messages.

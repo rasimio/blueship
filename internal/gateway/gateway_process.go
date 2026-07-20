@@ -671,6 +671,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		MessageBudgetSource: turnMessageBudget.Source,
 		ThinkingBudget:      cortexThinkingBudget,
 		ThinkingMode:        cortexRef.ThinkingMode,
+		TurnNow:             now,
 		Effort:              cortexRef.Effort,
 		AllowedTools:        g.allowedToolsForSoul(ctx, us.SoulID, turnRegistry),
 		ReplyToMessageID:    replyToMessageID,
