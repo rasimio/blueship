@@ -46,7 +46,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		}
 	}
 
-	tools := a.selectTools(cfg)
+	tools := withToolboxTool(cfg, a.selectTools(cfg))
 	budgetDecision := a.effectiveMessageBudget(cfg, cfg.SystemPrompt, tools)
 	tokenBudget := budgetDecision.Budget
 
@@ -273,6 +273,22 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			var promptToolResults []bs.ContentBlock
 			for _, block := range resp.Content {
 				if block.Type != "tool_use" {
+					continue
+				}
+
+				if block.Name == ToolboxToolName && len(cfg.ToolboxExpansion) > 0 {
+					tools = a.toolboxTools(cfg)
+					result := toolboxUnlockedResult(tools)
+					a.logger.Info("toolbox unlocked", "role", cfg.Role, "tools", len(tools), "turn", turn+1)
+					resultBlock := bs.ContentBlock{
+						Type:      "tool_result",
+						ToolUseID: block.ID,
+						Name:      block.Name,
+						Content:   result,
+					}
+					toolResults = append(toolResults, resultBlock)
+					promptToolResults = append(promptToolResults, compactToolResultBlockForPrompt(resultBlock))
+					traces = append(traces, ToolTrace{Name: block.Name, Input: "{}", Output: result})
 					continue
 				}
 

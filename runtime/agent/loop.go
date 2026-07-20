@@ -58,6 +58,14 @@ type RunConfig struct {
 	// ToolOverride overrides role-based tool selection with an explicit list.
 	// nil = use role default; empty slice = no tools.
 	ToolOverride []string
+	// ToolboxExpansion, when non-empty alongside a non-nil ToolOverride,
+	// arms the open_toolbox escape hatch: the loop appends a synthetic
+	// open_toolbox tool to the turn's tool list, and when the model calls
+	// it the active toolset is replaced with this list (resolved through
+	// the same role registry + AllowedTools filters as normal selection).
+	// This makes a narrowing tool selector fail open on demand — a missed
+	// pack costs one extra round-trip instead of the whole turn.
+	ToolboxExpansion []string
 	// ToolSelectionSource is diagnostic text describing why ToolOverride was
 	// chosen. It is logged only; empty means role/default selection.
 	ToolSelectionSource string
@@ -197,6 +205,48 @@ func (a *Loop) selectTools(cfg RunConfig) []bs.ToolDefinition {
 		}
 	}
 	return kept
+}
+
+// ToolboxToolName is the loop-intercepted meta-tool that unlocks the full
+// role toolset mid-turn. It is never registered in the ToolRegistry — the
+// loop synthesizes its definition and services its calls itself.
+const ToolboxToolName = "open_toolbox"
+
+func toolboxToolDefinition() bs.ToolDefinition {
+	return bs.ToolDefinition{
+		Name:        ToolboxToolName,
+		Description: "Unlock the full tool set for this turn. Call this when the user's request needs a tool that is not in your current tool list (for example web access, files, calendar, scheduling, memory, or integrations). Every tool available to your role is loaded immediately after this call — then make the real call. Do not tell the user you lack a tool without trying this first.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{}}`),
+	}
+}
+
+// withToolboxTool appends the open_toolbox escape hatch when a narrowed
+// override is active and an expansion set is configured.
+func withToolboxTool(cfg RunConfig, tools []bs.ToolDefinition) []bs.ToolDefinition {
+	if len(cfg.ToolboxExpansion) == 0 || cfg.ToolOverride == nil {
+		return tools
+	}
+	out := make([]bs.ToolDefinition, 0, len(tools)+1)
+	out = append(out, tools...)
+	out = append(out, toolboxToolDefinition())
+	return out
+}
+
+// toolboxTools resolves the expansion set through the same registry and
+// AllowedTools filters as normal selection, so unlocking the toolbox can
+// never expose a tool the soul's allowlist hides.
+func (a *Loop) toolboxTools(cfg RunConfig) []bs.ToolDefinition {
+	expanded := cfg
+	expanded.ToolOverride = cfg.ToolboxExpansion
+	return a.selectTools(expanded)
+}
+
+func toolboxUnlockedResult(tools []bs.ToolDefinition) string {
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		names = append(names, t.Name)
+	}
+	return "Toolbox unlocked for this turn. Available tools now: " + strings.Join(names, ", ") + ". Make the call you need now."
 }
 
 func effectiveSystemPrompt(systemPrompt, compactSummary, turnContext string) string {

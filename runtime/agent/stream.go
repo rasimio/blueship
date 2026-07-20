@@ -41,7 +41,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		}
 	}
 
-	tools := a.selectTools(cfg)
+	tools := withToolboxTool(cfg, a.selectTools(cfg))
 	budgetDecision := a.effectiveMessageBudget(cfg, cfg.SystemPrompt, tools)
 	tokenBudget := budgetDecision.Budget
 	compactSummary := cfg.CompactSummary
@@ -255,6 +255,24 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			var promptToolResults []bs.ContentBlock
 			for _, block := range resp.Content {
 				if block.Type != "tool_use" {
+					continue
+				}
+				if block.Name == ToolboxToolName && len(cfg.ToolboxExpansion) > 0 {
+					tools = a.toolboxTools(cfg)
+					result := toolboxUnlockedResult(tools)
+					a.logger.Info("toolbox unlocked (stream)", "role", cfg.Role, "tools", len(tools), "turn", turn+1)
+					if cb != nil && cb.OnToolResult != nil {
+						cb.OnToolResult(block.ID, result, false, 0)
+					}
+					traces = append(traces, ToolTrace{Name: block.Name, Input: "{}", Output: result})
+					resultBlock := bs.ContentBlock{
+						Type:      "tool_result",
+						ToolUseID: block.ID,
+						Name:      block.Name,
+						Content:   result,
+					}
+					toolResults = append(toolResults, resultBlock)
+					promptToolResults = append(promptToolResults, compactToolResultBlockForPrompt(resultBlock))
 					continue
 				}
 				a.logger.Info("executing tool", "tool", block.Name, "tool_use_id", block.ID)

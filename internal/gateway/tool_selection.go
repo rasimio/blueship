@@ -34,6 +34,11 @@ func (g *Gateway) applyToolSelector(
 	}
 	cfg.ToolOverride = g.filterSelectedToolsToRole(registry, baseTools, selection.Tools)
 	cfg.ToolSelectionSource = selection.Source
+	// Arm the open_toolbox escape hatch: whenever a selector narrows the
+	// toolset, the loop offers a synthetic tool that unlocks the full role
+	// list mid-turn. A selector miss then costs one extra round-trip, not
+	// the whole turn (see agent.RunConfig.ToolboxExpansion).
+	cfg.ToolboxExpansion = cloneStrings(baseTools)
 	g.logger.Info("tool selector applied",
 		"role", cfg.Role,
 		"source", cfg.ToolSelectionSource,
