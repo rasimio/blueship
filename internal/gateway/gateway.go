@@ -935,7 +935,20 @@ func (g *Gateway) getOrInitTelegramUser(ctx context.Context, bi *botInstance, ch
 
 	us := g.buildUserState(chatID, userID, soulID, false, bi, tgChatID)
 	us.debounce = newDebouncer(g.deps.Config.Gateway.DebounceWindow, g.deps.Config.Gateway.DebounceCap, func(msgs []pendingMsg) {
-		sink := g.newTelegramSink(chatID, bi)
+		// Resolve the bot at flush time, not capture time: a private
+		// chat has the SAME Telegram chat id on every bot (it is the
+		// user's id), so a user talking to her own bot rides the
+		// UserState first built for the platform bot. The cache-hit
+		// path above rebinds us.bot to the bot she most recently
+		// pinged — replying through anything else means the answer
+		// arrives from the wrong bot.
+		g.mu.Lock()
+		flushBot := us.bot
+		g.mu.Unlock()
+		if flushBot == nil {
+			flushBot = bi
+		}
+		sink := g.newTelegramSink(chatID, flushBot)
 		go g.processMessages(ctx, us, msgs, sink)
 	})
 
