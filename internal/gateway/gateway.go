@@ -21,6 +21,7 @@ import (
 	"github.com/rasimio/blueship/internal/provider/openai"
 	"github.com/rasimio/blueship/internal/transport/telegram"
 	"github.com/rasimio/blueship/internal/webaccess/browser"
+	pdfint "github.com/rasimio/blueship/integration/pdf"
 	"github.com/rasimio/blueship/runtime/session"
 	"github.com/rasimio/blueship/tool"
 )
@@ -462,6 +463,30 @@ func (g *Gateway) Run(ctx context.Context) {
 	}
 }
 
+// Scanned-PDF fallback knobs: a PDF whose extracted text is shorter than
+// scannedPDFMinTextPerPage×pages (or the absolute floor) is treated as a
+// text-layer-less scan and its leading pages are rendered for vision.
+const (
+	scannedPDFMaxPages       = 6
+	scannedPDFRenderDPI      = 150
+	scannedPDFMinTextPerPage = 20
+	scannedPDFMinTextTotal   = 100
+)
+
+// pdfHasUsableText reports whether extraction produced enough text to stand
+// in for the document. Phone scans typically yield zero characters; a page
+// of real prose yields thousands.
+func pdfHasUsableText(text string, pages int) bool {
+	n := len(strings.TrimSpace(text))
+	if n >= scannedPDFMinTextTotal {
+		return true
+	}
+	if pages <= 0 {
+		pages = 1
+	}
+	return n >= pages*scannedPDFMinTextPerPage
+}
+
 func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update telegram.Update) {
 	// Handle callback queries (inline button presses).
 	// LEGACY: the /model command's inline-keyboard callbacks land here; the
@@ -504,7 +529,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	// rawAttachments so processMessages can hand them off to the
 	// AttachmentSink — that's what makes Telegram-originated files
 	// show up as chips in the cabinet on reload.
-	var docImage *bs.ContentBlock
+	var docImages []bs.ContentBlock
 	var rawAttachments []rawAttachment
 	if msg.Document != nil {
 		data, err := bi.client.DownloadFile(ctx, msg.Document.FileID, attachment.MaxAnyBytes)
@@ -528,14 +553,14 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 						g.logger.Warn("document classified as image but no signature match", "file", msg.Document.FileName)
 						break
 					}
-					docImage = &bs.ContentBlock{
+					docImages = append(docImages, bs.ContentBlock{
 						Type: "image",
 						Source: &bs.ImageSource{
 							Type:      "base64",
 							MediaType: media,
 							Data:      base64.StdEncoding.EncodeToString(data),
 						},
-					}
+					})
 					rawAttachments = append(rawAttachments, rawAttachment{
 						name: msg.Document.FileName, mime: media, kind: "image", data: data,
 					})
@@ -543,6 +568,30 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 					if pdfText, pages, perr := browser.ExtractPDFText(data); perr != nil {
 						g.logger.Warn("failed to extract pdf text", "error", perr, "file", msg.Document.FileName, "size", len(data))
 						text = appendDocInline(text, fmt.Sprintf("[pdf: %s — extraction failed: %v]", msg.Document.FileName, perr))
+					} else if !pdfHasUsableText(pdfText, pages) {
+						// Scanned PDF: the pages are images and extraction has
+						// nothing to give. Render the leading pages and let the
+						// vision-capable model read them directly — otherwise a
+						// contract photographed on a phone gets answered with
+						// "there is nothing to read".
+						pageImgs, ierr := pdfint.PagesToImages(ctx, data, scannedPDFMaxPages, scannedPDFRenderDPI)
+						if ierr != nil || len(pageImgs) == 0 {
+							g.logger.Warn("scanned pdf: page render unavailable", "error", ierr, "file", msg.Document.FileName, "pages", pages)
+							text = appendDocInline(text, fmt.Sprintf("[pdf: %s — %d pages, scanned (no text layer); page rendering unavailable — ask the user for a text version]", msg.Document.FileName, pages))
+						} else {
+							g.logger.Info("scanned pdf: pages rendered for vision", "file", msg.Document.FileName, "pages", pages, "rendered", len(pageImgs))
+							text = appendDocInline(text, fmt.Sprintf("[pdf: %s — scanned, no text layer; first %d of %d pages attached as images — read them visually]", msg.Document.FileName, len(pageImgs), pages))
+							for _, img := range pageImgs {
+								docImages = append(docImages, bs.ContentBlock{
+									Type: "image",
+									Source: &bs.ImageSource{
+										Type:      "base64",
+										MediaType: "image/jpeg",
+										Data:      base64.StdEncoding.EncodeToString(img),
+									},
+								})
+							}
+						}
 					} else {
 						text = appendDocInline(text, fmt.Sprintf("[pdf: %s — %d pages]%s", msg.Document.FileName, pages, pdfText))
 					}
@@ -606,10 +655,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		}
 	}
 
-	var images []bs.ContentBlock
-	if docImage != nil {
-		images = append(images, *docImage)
-	}
+	images := append([]bs.ContentBlock(nil), docImages...)
 	if len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1] // largest resolution
 		data, err := bi.client.DownloadFile(ctx, photo.FileID, attachment.MaxImageBytes)
