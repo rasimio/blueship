@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	bs "github.com/rasimio/blueship/internal/core"
 )
 
@@ -91,7 +92,7 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 	// escalate — the interaction tier's hand-off sentinel to the deep tier.
 	RegisterEscalateTool(r)
 
-	if d.Config.Sender != nil {
+	if d.Config.Sender != nil || d.SendToUser != nil {
 		// message_send routes through the configured MessageSender. For
 		// channel-style targets (no leading digit, '-', or '@') prepend '@'
 		// so providers like Telegram resolve them correctly.
@@ -99,7 +100,7 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 		r.Register(ToolMessageSend,
 			"Send a message to a chat or channel through the agent's configured transport (Telegram, etc.). Use 'to' for a chat id and set is_channel=true for public channel handles.",
 			json.RawMessage(`{"type":"object","properties":{
-				"to":{"type":"string","description":"Recipient chat ID or channel name. Omit (or pass \"owner\") to message the agent's owner — background/scheduled contexts rarely know raw chat ids."},
+				"to":{"type":"string","description":"Recipient chat ID or channel name. Omit (or pass \"owner\") to message the user who owns the current invocation — background/scheduled contexts rarely know raw chat ids."},
 				"text":{"type":"string"},
 				"is_channel":{"type":"boolean","default":false}
 			},"required":["text"]}`),
@@ -113,14 +114,27 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 					return nil, err
 				}
 				target := p.To
-				// Owner fallback: scheduled tasks («напиши мне погоду в
-				// 21:14») know no raw chat id — six live message_send
-				// attempts guessed ids and got «chat not found». An empty
-				// or symbolic recipient resolves to the configured owner;
-				// the transport prefix («telegram:») is the gateway's
-				// address scheme, not the provider chat id.
+				// A symbolic recipient means the user who owns the current
+				// invocation. Tenant-bound tasks must use SendToUser so they
+				// cannot fall through to the process-global owner chat.
 				lower := strings.ToLower(strings.TrimSpace(target))
 				if lower == "" || lower == "owner" || lower == "user" || lower == "владелец" {
+					if d.UserID != uuid.Nil {
+						if d.SendToUser == nil {
+							return nil, fmt.Errorf("message_send: per-user sender is unavailable")
+						}
+						if err := d.SendToUser(ctx, d.UserID, p.Text); err != nil {
+							return nil, fmt.Errorf("message_send: %w", err)
+						}
+						return map[string]any{
+							"to":   p.To,
+							"text": p.Text,
+							"sent": true,
+						}, nil
+					}
+
+					// Preserve the single-user fallback only when the invocation
+					// has no tenant identity at all.
 					target = d.Config.Owner.ChatID
 					if i := strings.IndexByte(target, ':'); i >= 0 {
 						target = target[i+1:]
@@ -129,6 +143,9 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 						return nil, fmt.Errorf("message_send: no recipient and no configured owner chat")
 					}
 					p.IsChannel = false
+				}
+				if sender == nil {
+					return nil, fmt.Errorf("message_send: configured sender is unavailable")
 				}
 				if p.IsChannel && len(target) > 0 && target[0] != '@' && target[0] != '-' {
 					target = "@" + target
