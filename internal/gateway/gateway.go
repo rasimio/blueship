@@ -463,30 +463,6 @@ func (g *Gateway) Run(ctx context.Context) {
 	}
 }
 
-// Scanned-PDF fallback knobs: a PDF whose extracted text is shorter than
-// scannedPDFMinTextPerPage×pages (or the absolute floor) is treated as a
-// text-layer-less scan and its leading pages are rendered for vision.
-const (
-	scannedPDFMaxPages       = 6
-	scannedPDFRenderDPI      = 150
-	scannedPDFMinTextPerPage = 20
-	scannedPDFMinTextTotal   = 100
-)
-
-// pdfHasUsableText reports whether extraction produced enough text to stand
-// in for the document. Phone scans typically yield zero characters; a page
-// of real prose yields thousands.
-func pdfHasUsableText(text string, pages int) bool {
-	n := len(strings.TrimSpace(text))
-	if n >= scannedPDFMinTextTotal {
-		return true
-	}
-	if pages <= 0 {
-		pages = 1
-	}
-	return n >= pages*scannedPDFMinTextPerPage
-}
-
 func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update telegram.Update) {
 	// Handle callback queries (inline button presses).
 	// LEGACY: the /model command's inline-keyboard callbacks land here; the
@@ -568,13 +544,13 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 					if pdfText, pages, perr := browser.ExtractPDFText(data); perr != nil {
 						g.logger.Warn("failed to extract pdf text", "error", perr, "file", msg.Document.FileName, "size", len(data))
 						text = appendDocInline(text, fmt.Sprintf("[pdf: %s — extraction failed: %v]", msg.Document.FileName, perr))
-					} else if !pdfHasUsableText(pdfText, pages) {
+					} else if pdfint.TextLooksScanned(pdfText, pages) {
 						// Scanned PDF: the pages are images and extraction has
 						// nothing to give. Render the leading pages and let the
 						// vision-capable model read them directly — otherwise a
 						// contract photographed on a phone gets answered with
 						// "there is nothing to read".
-						pageImgs, ierr := pdfint.PagesToImages(ctx, data, scannedPDFMaxPages, scannedPDFRenderDPI)
+						pageImgs, ierr := pdfint.PagesToImages(ctx, data, pdfint.DefaultScanMaxPages, pdfint.DefaultScanDPI)
 						if ierr != nil || len(pageImgs) == 0 {
 							g.logger.Warn("scanned pdf: page render unavailable", "error", ierr, "file", msg.Document.FileName, "pages", pages)
 							text = appendDocInline(text, fmt.Sprintf("[pdf: %s — %d pages, scanned (no text layer); page rendering unavailable — ask the user for a text version]", msg.Document.FileName, pages))
@@ -597,6 +573,19 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 					}
 					rawAttachments = append(rawAttachments, rawAttachment{
 						name: msg.Document.FileName, mime: "application/pdf", kind: "pdf", data: data,
+					})
+				case "xlsx":
+					// Excel .xlsx has no native content block either; the
+					// extractor renders sheets as markdown tables (bounded,
+					// truncation announced) so the model reads real data.
+					if xlsxMD, xerr := attachment.ExtractXlsxMarkdown(data); xerr != nil {
+						g.logger.Warn("failed to extract xlsx", "error", xerr, "file", msg.Document.FileName, "size", len(data))
+						text = appendDocInline(text, fmt.Sprintf("[xlsx: %s — could not read this Excel file]", msg.Document.FileName))
+					} else {
+						text = appendDocInline(text, fmt.Sprintf("[xlsx: %s]\n%s", msg.Document.FileName, xlsxMD))
+					}
+					rawAttachments = append(rawAttachments, rawAttachment{
+						name: msg.Document.FileName, mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", kind: "xlsx", data: data,
 					})
 				case "docx":
 					// Word .docx has no native Anthropic content block, so we

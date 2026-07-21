@@ -26,6 +26,7 @@ import (
 	bs "github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/gateway"
 	"github.com/rasimio/blueship/internal/webaccess/browser"
+	pdfint "github.com/rasimio/blueship/integration/pdf"
 )
 
 // Server is the HTTP/SSE chat transport.
@@ -254,8 +255,36 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			if perr != nil {
 				s.logger.Warn("httpchat: pdf extract failed", "name", att.Name, "size", len(data), "err", perr)
 				text = appendInlineFile(text, fmt.Sprintf("[pdf: %s — extraction failed: %v]", att.Name, perr))
+			} else if pdfint.TextLooksScanned(pdfText, pages) {
+				// Scanned PDF — same vision fallback as the Telegram
+				// gateway: render leading pages, let the model read them.
+				pageImgs, ierr := pdfint.PagesToImages(r.Context(), data, pdfint.DefaultScanMaxPages, pdfint.DefaultScanDPI)
+				if ierr != nil || len(pageImgs) == 0 {
+					s.logger.Warn("httpchat: scanned pdf render unavailable", "name", att.Name, "err", ierr)
+					text = appendInlineFile(text, fmt.Sprintf("[pdf: %s — %d pages, scanned (no text layer); page rendering unavailable — ask the user for a text version]", att.Name, pages))
+				} else {
+					text = appendInlineFile(text, fmt.Sprintf("[pdf: %s — scanned, no text layer; first %d of %d pages attached as images — read them visually]", att.Name, len(pageImgs), pages))
+					for _, img := range pageImgs {
+						images = append(images, bs.ContentBlock{
+							Type: "image",
+							Source: &bs.ImageSource{
+								Type:      "base64",
+								MediaType: "image/jpeg",
+								Data:      base64.StdEncoding.EncodeToString(img),
+							},
+						})
+					}
+				}
 			} else {
 				text = appendInlineFile(text, fmt.Sprintf("[pdf: %s — %d pages]%s", att.Name, pages, pdfText))
+			}
+		case "xlsx":
+			xlsxMD, xerr := attachment.ExtractXlsxMarkdown(data)
+			if xerr != nil {
+				s.logger.Warn("httpchat: xlsx extract failed", "name", att.Name, "size", len(data), "err", xerr)
+				text = appendInlineFile(text, fmt.Sprintf("[xlsx: %s — could not read this Excel file]", att.Name))
+			} else {
+				text = appendInlineFile(text, fmt.Sprintf("[xlsx: %s]\n%s", att.Name, xlsxMD))
 			}
 		case "docx":
 			docText, derr := attachment.ExtractDocxText(data)

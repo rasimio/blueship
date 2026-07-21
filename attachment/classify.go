@@ -40,6 +40,11 @@ const (
 	// costs bytes-on-the-wire, not prompt tokens.
 	MaxDocxBytes int64 = 25 << 20
 
+	// MaxXlsxBytes — an Excel .xlsx is a ZIP like docx; real exports
+	// with embedded styles run tens of MB. The extracted markdown is
+	// bounded by XlsxTextHeadCap, so the cap is bytes-on-the-wire only.
+	MaxXlsxBytes int64 = 25 << 20
+
 	// MaxAnyBytes is the upper bound across kinds — useful as the
 	// download / multipart-read cap on transports that don't know the
 	// kind until they've sniffed the bytes. Per-kind enforcement
@@ -73,16 +78,18 @@ func Kind(mime, name string, data []byte) string {
 	if isPDFSignature(data) || mimeLower == "application/pdf" || ext == ".pdf" {
 		return "pdf"
 	}
-	// DOCX (Word OOXML): a ZIP whose payload is word/document.xml. We
-	// classify on the declared type (ext / MIME) gated by the ZIP magic, so
-	// a renamed PDF can't slip in, but a correctly-named .docx whose MIME
-	// arrives as octet-stream (Telegram does this) still lands here.
-	// ExtractDocxText re-validates by actually opening the archive. Other
-	// OOXML (xlsx / pptx) and legacy binary .doc fall through to ""
-	// (unsupported) — the transport inlines a notice rather than going
-	// silent on the user.
+	// OOXML (ZIP-based Office formats): classify on the declared type
+	// (ext / MIME) gated by the ZIP magic, so a renamed PDF can't slip
+	// in, but a correctly-named file whose MIME arrives as octet-stream
+	// (Telegram does this) still lands here. The extractors re-validate
+	// by actually opening the archive. PPTX and legacy binary .doc/.xls
+	// fall through to "" (unsupported) — the transport inlines a notice
+	// rather than going silent on the user.
 	if isZipSignature(data) && (ext == ".docx" || mimeLower == mimeDocx) {
 		return "docx"
+	}
+	if isZipSignature(data) && (ext == ".xlsx" || mimeLower == mimeXlsx) {
+		return "xlsx"
 	}
 	// Text: any UTF-8 buffer that isn't an image / PDF. Catches
 	// every source file we'd want to inline (incl. SVG, which is
@@ -106,6 +113,8 @@ func MaxBytesForKind(kind string) int64 {
 		return MaxPDFBytes
 	case "docx":
 		return MaxDocxBytes
+	case "xlsx":
+		return MaxXlsxBytes
 	case "text":
 		return MaxTextBytes
 	}
