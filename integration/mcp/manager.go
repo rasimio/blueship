@@ -2,7 +2,9 @@ package mcp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -22,11 +24,12 @@ const (
 // Manager is a daemon-lifetime, soul-keyed pool of MCP connections. It
 // implements core.MCPToolSource.
 type Manager struct {
-	store     ServerStore
-	credFetch CredentialFetcher
-	logger    *slog.Logger
-	mu        sync.Mutex
-	souls     map[uuid.UUID]*soulConns
+	store      ServerStore
+	credFetch  CredentialFetcher
+	logger     *slog.Logger
+	dialServer func(context.Context, ServerRow, string) (*Client, error)
+	mu         sync.Mutex
+	souls      map[uuid.UUID]*soulConns
 }
 
 type soulConns struct {
@@ -39,8 +42,10 @@ type soulConns struct {
 }
 
 type connectResult struct {
+	server ServerRow
 	client *Client
 	tools  []core.MCPTool
+	defs   []ToolDef
 }
 
 // NewManager builds an MCP connection manager. store is the host-supplied
@@ -48,10 +53,11 @@ type connectResult struct {
 // catalog); credFetch resolves credentials to secrets.
 func NewManager(store ServerStore, credFetch CredentialFetcher, logger *slog.Logger) *Manager {
 	return &Manager{
-		store:     store,
-		credFetch: credFetch,
-		logger:    logger,
-		souls:     make(map[uuid.UUID]*soulConns),
+		store:      store,
+		credFetch:  credFetch,
+		logger:     logger,
+		dialServer: dial,
+		souls:      make(map[uuid.UUID]*soulConns),
 	}
 }
 
@@ -133,10 +139,44 @@ func (m *Manager) connectSoul(soulID uuid.UUID, sc *soulConns, sig string) {
 	}
 	wg.Wait()
 
+	owners := make(map[string]int)
+	conflicts := make(map[int]string)
+	for i, result := range results {
+		if result.client == nil {
+			continue
+		}
+		for _, tool := range result.tools {
+			owner, exists := owners[tool.Name]
+			if !exists {
+				owners[tool.Name] = i
+				continue
+			}
+			if owner == i {
+				continue
+			}
+			if _, marked := conflicts[owner]; !marked {
+				conflicts[owner] = tool.Name
+			}
+			if _, marked := conflicts[i]; !marked {
+				conflicts[i] = tool.Name
+			}
+		}
+	}
+
 	var clients []*Client
 	var tools []core.MCPTool
-	for _, r := range results {
+	for i, r := range results {
 		if r.client != nil {
+			if name, conflicted := conflicts[i]; conflicted {
+				_ = r.client.close()
+				err := fmt.Errorf("tool name collision across MCP servers: %q", name)
+				m.store.MarkError(context.Background(), r.server.ID, err.Error())
+				m.logger.Warn("mcp: cross-server tool name collision", "server", r.server.Name, "error", err)
+				continue
+			}
+			m.store.UpsertCatalogTools(context.Background(), r.server.ID, r.server.Name, r.defs)
+			m.store.MarkSynced(context.Background(), r.server.ID, len(r.defs))
+			m.logger.Info("mcp: server connected", "server", r.server.Name, "tools", len(r.defs))
 			clients = append(clients, r.client)
 			tools = append(tools, r.tools...)
 		}
@@ -155,8 +195,9 @@ func (m *Manager) connectSoul(soulID uuid.UUID, sc *soulConns, sig string) {
 	}
 }
 
-// connectServer dials one server, lists its tools, and writes status back.
-// A failure isolates to this server — it returns a zero connectResult.
+// connectServer dials one server, lists its tools, and rejects collisions
+// inside that server. Successful catalog publication waits for connectSoul's
+// cross-server collision gate. A failure returns a zero connectResult.
 func (m *Manager) connectServer(ctx context.Context, srv ServerRow) connectResult {
 	sctx, cancel := context.WithTimeout(ctx, serverTimeout)
 	defer cancel()
@@ -171,7 +212,7 @@ func (m *Manager) connectServer(ctx context.Context, srv ServerRow) connectResul
 		secret = s
 	}
 
-	client, err := dial(sctx, srv, secret)
+	client, err := m.dialServer(sctx, srv, secret)
 	if err != nil {
 		m.store.MarkError(context.Background(), srv.ID, err.Error())
 		m.logger.Warn("mcp: dial failed", "server", srv.Name, "error", err)
@@ -186,11 +227,21 @@ func (m *Manager) connectServer(ctx context.Context, srv ServerRow) connectResul
 	}
 
 	tools := make([]core.MCPTool, 0, len(defs))
+	resolvedNames := make(map[string]struct{}, len(defs))
 	for _, d := range defs {
+		resolvedName := NamespacedName(srv.Name, d.Name)
+		if _, exists := resolvedNames[resolvedName]; exists {
+			_ = client.close()
+			err := fmt.Errorf("tool name collision after normalization: %q", resolvedName)
+			m.store.MarkError(context.Background(), srv.ID, err.Error())
+			m.logger.Warn("mcp: duplicate resolved tool name", "server", srv.Name, "error", err)
+			return connectResult{}
+		}
+		resolvedNames[resolvedName] = struct{}{}
 		origName := d.Name
 		cl := client
 		tools = append(tools, core.MCPTool{
-			Name:        NamespacedName(srv.Name, d.Name),
+			Name:        resolvedName,
 			Description: d.Description,
 			Schema:      d.InputSchema,
 			Handler: func(hctx context.Context, input json.RawMessage) (any, error) {
@@ -198,10 +249,7 @@ func (m *Manager) connectServer(ctx context.Context, srv ServerRow) connectResul
 			},
 		})
 	}
-	m.store.UpsertCatalogTools(context.Background(), srv.ID, srv.Name, defs)
-	m.store.MarkSynced(context.Background(), srv.ID, len(defs))
-	m.logger.Info("mcp: server connected", "server", srv.Name, "tools", len(defs))
-	return connectResult{client: client, tools: tools}
+	return connectResult{server: srv, client: client, tools: tools, defs: defs}
 }
 
 // Invalidate drops a soul's cached connections; the next ToolsForSoul
@@ -238,12 +286,15 @@ func (m *Manager) CloseAll() {
 	}
 }
 
-// NamespacedName builds the registry tool name mcp__<label>__<tool>,
-// capped at 64 chars (the model's tool-name limit).
+// NamespacedName builds the registry tool name mcp__<label>__<tool>. Long
+// names keep a readable prefix and gain a stable hash suffix within the
+// model's 64-byte tool-name limit, so differences after byte 64 do not alias.
 func NamespacedName(label, tool string) string {
 	n := "mcp__" + sanitize(label) + "__" + sanitize(tool)
 	if len(n) > 64 {
-		n = n[:64]
+		digest := sha256.Sum256([]byte(n))
+		suffix := fmt.Sprintf("_%x", digest[:6])
+		n = n[:64-len(suffix)] + suffix
 	}
 	return n
 }

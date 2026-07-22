@@ -49,24 +49,29 @@ type (
 
 // --- S2 cortex: the agent turn + tools + agent tasks ---
 type (
-	Message              = core.Message
-	ContentBlock         = core.ContentBlock
-	ToolDefinition       = core.ToolDefinition
-	ToolHandler          = core.ToolHandler
-	ToolRegistry         = core.ToolRegistry
-	ToolSelector         = core.ToolSelector
-	ToolSelection        = core.ToolSelection
-	ToolSelectionRequest = core.ToolSelectionRequest
-	Usage                = core.Usage
-	AgentHandler         = core.AgentHandler
-	AgentTask            = core.AgentTask
-	AgentDeps            = core.AgentDeps
-	IterationResult      = core.IterationResult
-	SkillMeta            = core.SkillMeta
-	ExecutionKind        = core.ExecutionKind
-	ExecutionRequest     = core.ExecutionRequest
-	ExecutionDecision    = core.ExecutionDecision
-	ExecutionAuthorizer  = core.ExecutionAuthorizer
+	Message               = core.Message
+	ContentBlock          = core.ContentBlock
+	ToolDefinition        = core.ToolDefinition
+	ToolHandler           = core.ToolHandler
+	ToolRegistry          = core.ToolRegistry
+	ToolSelector          = core.ToolSelector
+	ToolSelection         = core.ToolSelection
+	ToolSelectionRequest  = core.ToolSelectionRequest
+	Usage                 = core.Usage
+	AgentHandler          = core.AgentHandler
+	AgentTask             = core.AgentTask
+	AgentDeps             = core.AgentDeps
+	IterationResult       = core.IterationResult
+	TaskProgram           = core.TaskProgram
+	TaskProgramInput      = core.TaskProgramInput
+	TaskProgramActivation = core.TaskProgramActivation
+	TaskProgramDecision   = core.TaskProgramDecision
+	TaskProgramQuietHours = core.TaskProgramQuietHours
+	SkillMeta             = core.SkillMeta
+	ExecutionKind         = core.ExecutionKind
+	ExecutionRequest      = core.ExecutionRequest
+	ExecutionDecision     = core.ExecutionDecision
+	ExecutionAuthorizer   = core.ExecutionAuthorizer
 )
 
 // --- Providers: LLM + capability ports ---
@@ -136,6 +141,7 @@ var (
 	NewUserStore        = core.NewUserStore
 	NewLLMRouter        = core.NewLLMRouter
 	InitDeps            = core.InitDeps
+	ParseTaskProgram    = core.ParseTaskProgram
 
 	NormalizeContent   = core.NormalizeContent
 	EstimateTokens     = core.EstimateTokens
@@ -158,6 +164,21 @@ const (
 	StrategyDirect     = core.StrategyDirect
 	StrategyStructured = core.StrategyStructured
 	StrategyDelegate   = core.StrategyDelegate
+)
+
+const (
+	TaskProgramSchemaV1                    = core.TaskProgramSchemaV1
+	TaskProgramMaxInputs                   = core.TaskProgramMaxInputs
+	TaskProgramMaxDecisionTools            = core.TaskProgramMaxDecisionTools
+	TaskProgramMaxInputBytes               = core.TaskProgramMaxInputBytes
+	TaskProgramMaxDecisionInstructionBytes = core.TaskProgramMaxDecisionInstructionBytes
+	TaskProgramOnErrorFail                 = core.TaskProgramOnErrorFail
+	TaskProgramOnErrorContinue             = core.TaskProgramOnErrorContinue
+	TaskProgramActivationAlways            = core.TaskProgramActivationAlways
+	TaskProgramActivationAnyNonEmpty       = core.TaskProgramActivationAnyNonEmpty
+	TaskProgramActivationAllNonEmpty       = core.TaskProgramActivationAllNonEmpty
+	TaskProgramDecisionSelected            = core.TaskProgramDecisionSelected
+	TaskProgramDecisionNone                = core.TaskProgramDecisionNone
 )
 
 const (

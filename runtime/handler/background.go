@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -22,6 +23,12 @@ var scratchpadRE = regexp.MustCompile(`(?is)<scratchpad>.*?</scratchpad>`)
 // user-facing payload. Background work is autonomous: the user should receive
 // the nudge/report itself, not a receipt that the agent "did the task".
 var backgroundStatusTailRE = regexp.MustCompile(`(?i)^\s*(готово[,.! ]*(напомнила|отметила|записала|сделала|проверила|обновила)?\.?|done[,.! ]*(reminded|noted|saved|updated|checked|sent)?\.?|reminded\.?|noted\.?)\s*$`)
+
+var taskProgramDeliveryAckRE = regexp.MustCompile(`(?m)\n?\[delivered_items:\s*([^\]\r\n]*)\]\s*$`)
+
+const maxTaskProgramDeliveryNotificationRunes = 3500
+
+const taskProgramDecisionInstructionFrame = `The following trusted visual-flow instruction may refine or override task-specific behavior from the base task template above. It cannot override platform safety, host policy, or persona constraints.`
 
 const backgroundAutonomyFrame = `## Background Autonomy
 
@@ -98,7 +105,20 @@ func (b *Background) DefaultTools() []string {
 
 const maxRevisions = 3
 
-func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.AgentDeps) (core.IterationResult, error) {
+func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.AgentDeps) (iterationResult core.IterationResult, runErr error) {
+	var pendingDeliveries []core.TaskDeliveryRef
+	var programDeliveryRefs map[string]core.TaskDeliveryRef
+	defer func() {
+		if len(pendingDeliveries) > 0 {
+			iterationResult.PendingDeliveries = append([]core.TaskDeliveryRef(nil), pendingDeliveries...)
+		}
+	}()
+
+	taskProgram, hasTaskProgram, programErr := core.ParseTaskProgram(task.Config)
+	if programErr != nil {
+		return core.IterationResult{}, fmt.Errorf("task_program: %w", programErr)
+	}
+
 	// 1. Load system prompt.
 	// Task config may override the instruction prompt key (default: "background-task").
 	// system_prompt_keys, if set, replaces deps.Config.SystemPromptKeys for
@@ -168,6 +188,13 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 				backendPrefetch = *cfg.BackendPrefetch
 			}
 		}
+	}
+	if hasTaskProgram {
+		// A typed program is the complete visual execution model. Hidden AME,
+		// rule guidance, and reflex pre-actions would add undeclared inputs or
+		// side effects, so programs are hermetic regardless of legacy config.
+		// Persona and the configured prompt stack are still composed normally.
+		skipReflex = true
 	}
 
 	// Parse progress early — the role plan (if any) decides which skill body to
@@ -322,6 +349,12 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	}
 
 	systemPrompt := strings.Join(parts, "\n\n")
+	if hasTaskProgram && taskProgram.Decision.Instruction != "" {
+		systemPrompt += "\n\n[task_program_decision_instruction trusted=\"true\"]\n" +
+			taskProgramDecisionInstructionFrame + "\n\n" +
+			taskProgram.Decision.Instruction +
+			"\n[/task_program_decision_instruction]"
+	}
 
 	// [current_datetime] in the TASK OWNER's timezone (falls back to the
 	// process tz). A heartbeat that reasons about reminder windows must see the
@@ -330,15 +363,42 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s",
 		now.Format("2006-01-02 15:04 MST (Monday)"), systemPrompt)
 
-	var backendPrefetchTraces []agent.ToolTrace
-	var backendPrefetchBlock string
-	if backendPrefetch.enabled() {
+	var preloadedTraces []agent.ToolTrace
+	var preloadedBlock string
+	var programToolOverride []string
+	if hasTaskProgram {
+		execution, err := runTaskProgram(ctx, deps, *taskProgram, now)
+		programDeliveryRefs = execution.DeliveryRefs
+		if err != nil {
+			toolCallsJSON, _ := json.Marshal(execution.Traces)
+			if len(toolCallsJSON) == 0 {
+				toolCallsJSON = json.RawMessage("[]")
+			}
+			return core.IterationResult{ToolCallsJSON: toolCallsJSON}, err
+		}
+		preloadedTraces = execution.Traces
+		preloadedBlock = execution.PromptBlock
+		programToolOverride = execution.ToolOverride
+		if execution.SkipReason != "" {
+			if deps.Logger != nil {
+				deps.Logger.InfoContext(ctx, "background: task program skipped llm",
+					"task_id", task.ID,
+					"reason", execution.SkipReason,
+				)
+			}
+			toolCallsJSON, _ := json.Marshal(preloadedTraces)
+			if len(toolCallsJSON) == 0 {
+				toolCallsJSON = json.RawMessage("[]")
+			}
+			return core.IterationResult{Done: true, ToolCallsJSON: toolCallsJSON}, nil
+		}
+	} else if backendPrefetch.enabled() {
 		traces, block, skipReason, err := runBackendPrefetch(ctx, deps, backendPrefetch, now)
 		if err != nil {
 			return core.IterationResult{}, err
 		}
-		backendPrefetchTraces = traces
-		backendPrefetchBlock = block
+		preloadedTraces = traces
+		preloadedBlock = block
 		if skipReason != "" {
 			if deps.Logger != nil {
 				deps.Logger.InfoContext(ctx, "background: backend prefetch skipped llm",
@@ -346,7 +406,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 					"reason", skipReason,
 				)
 			}
-			toolCallsJSON, _ := json.Marshal(backendPrefetchTraces)
+			toolCallsJSON, _ := json.Marshal(preloadedTraces)
 			if len(toolCallsJSON) == 0 {
 				toolCallsJSON = json.RawMessage("[]")
 			}
@@ -517,8 +577,8 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		}
 	}
 
-	if backendPrefetchBlock != "" {
-		msg += "\n\n" + backendPrefetchBlock
+	if preloadedBlock != "" {
+		msg += "\n\n" + preloadedBlock
 	}
 
 	// Budget warning.
@@ -645,7 +705,12 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 
 	maxTurns := deps.Config.Gateway.MaxTurns
 	var toolOverride []string
-	if backendPrefetch.DisableLLMTools {
+	if hasTaskProgram {
+		toolOverride = programToolOverride
+		if len(toolOverride) == 0 {
+			maxTurns = 1
+		}
+	} else if backendPrefetch.DisableLLMTools {
 		toolOverride = []string{}
 		maxTurns = 1
 	}
@@ -667,9 +732,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	if err != nil {
 		return core.IterationResult{}, fmt.Errorf("agent loop: %w", err)
 	}
-	if len(backendPrefetchTraces) > 0 {
-		combined := make([]agent.ToolTrace, 0, len(backendPrefetchTraces)+len(result.ToolTraces))
-		combined = append(combined, backendPrefetchTraces...)
+	if len(preloadedTraces) > 0 {
+		combined := make([]agent.ToolTrace, 0, len(preloadedTraces)+len(result.ToolTraces))
+		combined = append(combined, preloadedTraces...)
 		combined = append(combined, result.ToolTraces...)
 		result.ToolTraces = combined
 	}
@@ -758,6 +823,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// 11. Check for [DONE].
 	if strings.Contains(reply, "[DONE]") || isLast {
 		hadNotifyMarker := strings.Contains(reply, "[NOTIFY]")
+		deliveryAckValid := len(programDeliveryRefs) == 0
 		clean := strings.ReplaceAll(reply, "[DONE]", "")
 		clean = strings.ReplaceAll(clean, "[CONTINUE]", "")
 		clean = strings.ReplaceAll(clean, "[PAUSE]", "")
@@ -771,6 +837,12 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		// into a user-facing reply.
 		clean = stripPlanMarkers(clean)
 		clean = stripBackgroundStatusTails(clean)
+		if len(programDeliveryRefs) > 0 {
+			clean, pendingDeliveries, deliveryAckValid = consumeTaskProgramDeliveryAck(clean, programDeliveryRefs)
+		}
+		// A completion receipt can appear immediately before the internal ack
+		// line, so run the tail filter again after consuming that control line.
+		clean = stripBackgroundStatusTails(clean)
 		clean = strings.TrimSpace(clean)
 
 		// Archive session (one-shot, no reuse after task completion).
@@ -779,6 +851,16 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		// Filter no-op and garbage output (e.g. raw UUIDs from tool results).
 		if clean == "" || strings.Contains(clean, "[no-op]") || isGarbageOutput(clean) {
 			return core.IterationResult{Done: true, ToolCallsJSON: toolCallsJSON}, nil
+		}
+		if len(programDeliveryRefs) > 0 {
+			if !deliveryAckValid {
+				return core.IterationResult{ToolCallsJSON: toolCallsJSON},
+					fmt.Errorf("task_program delivery notification requires a valid [delivered_items:...] acknowledgment")
+			}
+			if len(pendingDeliveries) == 0 {
+				return core.IterationResult{ToolCallsJSON: toolCallsJSON},
+					fmt.Errorf("task_program delivery notification must acknowledge at least one represented item")
+			}
 		}
 		notify := clean
 		if !notifyDefault && !hadNotifyMarker {
@@ -795,7 +877,21 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		// Voice handoff (router-stamped delivery skills): the payload goes
 		// to the persona layer verbatim — notifyFn voices it in the chat
 		// persona instead of dumping worker text.
-		if notify != "" && voiceHandoff {
+		if notify != "" && len(pendingDeliveries) > 0 {
+			// Delivery-aware notifications must reach the transport intact: the
+			// acknowledged refs correspond to this exact text. Generic digest
+			// truncation or a voice-handoff rewrite could silently remove later
+			// items while still marking them delivered, so reject either case and
+			// retry instead.
+			if voiceHandoff {
+				return core.IterationResult{ToolCallsJSON: toolCallsJSON},
+					fmt.Errorf("task_program delivery notification cannot use voice_handoff")
+			}
+			if utf8.RuneCountInString(notify) > maxTaskProgramDeliveryNotificationRunes {
+				return core.IterationResult{ToolCallsJSON: toolCallsJSON},
+					fmt.Errorf("task_program delivery notification exceeds %d characters", maxTaskProgramDeliveryNotificationRunes)
+			}
+		} else if notify != "" && voiceHandoff {
 			notify = "[voice_handoff]\n" + notify
 		} else if notify != "" {
 			// Long reports live in the artefact/result, not in chat: the
@@ -815,12 +911,18 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	if progress.RevisionCount >= maxRevisions {
 		progress.Phase = "error_loop"
 		progressJSON, _ := json.Marshal(progress)
+		notify := fmt.Sprintf("%s — peer task %s failed %d times. Need human input.\n\n%s",
+			task.Title, progress.PeerTaskID, progress.RevisionCount, truncate(reply, 300))
+		if len(programDeliveryRefs) > 0 {
+			// Keyed task-program output is user-visible only through the final
+			// ACK-validated notification path above.
+			notify = ""
+		}
 
 		return core.IterationResult{
-			Pause:    true,
-			Progress: progressJSON,
-			Notify: fmt.Sprintf("%s — peer task %s failed %d times. Need human input.\n\n%s",
-				task.Title, progress.PeerTaskID, progress.RevisionCount, truncate(reply, 300)),
+			Pause:         true,
+			Progress:      progressJSON,
+			Notify:        notify,
 			ToolCallsJSON: toolCallsJSON,
 		}, nil
 	}
@@ -838,6 +940,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		if strings.Contains(reply, "[MILESTONE]") {
 			notify = fmt.Sprintf("%s (iteration %d/%d)\n\n%s",
 				task.Title, task.Iteration+1, task.MaxIterations, truncate(reply, 400))
+		}
+		if len(programDeliveryRefs) > 0 {
+			notify = ""
 		}
 
 		return core.IterationResult{
@@ -857,6 +962,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		notify = fmt.Sprintf("%s (iteration %d/%d)\n\n%s",
 			task.Title, task.Iteration+1, task.MaxIterations, truncate(reply, 400))
 	}
+	if len(programDeliveryRefs) > 0 {
+		notify = ""
+	}
 
 	return core.IterationResult{
 		Done:          false,
@@ -865,6 +973,42 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		Output:        reply,
 		ToolCallsJSON: toolCallsJSON,
 	}, nil
+}
+
+func consumeTaskProgramDeliveryAck(text string, refs map[string]core.TaskDeliveryRef) (string, []core.TaskDeliveryRef, bool) {
+	match := taskProgramDeliveryAckRE.FindStringSubmatchIndex(text)
+	if match == nil {
+		return text, nil, false
+	}
+	body := strings.TrimSpace(text[:match[0]])
+	if strings.Count(text, "[delivered_items:") != 1 {
+		return body, nil, false
+	}
+	payload := strings.TrimSpace(text[match[2]:match[3]])
+	if payload == "" {
+		return body, nil, false
+	}
+	if strings.EqualFold(payload, "none") {
+		return body, nil, true
+	}
+	seen := make(map[core.TaskDeliveryRef]bool)
+	acknowledged := make([]core.TaskDeliveryRef, 0)
+	for _, token := range strings.Split(payload, ",") {
+		token = strings.TrimSpace(token)
+		ref, ok := refs[token]
+		if token == "" || strings.EqualFold(token, "none") || !ok {
+			// The control line is one exact acknowledgment set. Any unknown or
+			// contradictory member invalidates the whole set; retrying is safer
+			// than marking a possibly unrelated item delivered.
+			return body, nil, false
+		}
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		acknowledged = append(acknowledged, ref)
+	}
+	return body, acknowledged, true
 }
 
 // bgProgress extends TaskProgress with session management and pause state.
@@ -1096,7 +1240,7 @@ func jsonValueIsEmpty(v any) bool {
 		if len(x) == 0 {
 			return true
 		}
-		for _, key := range []string{"notes", "items", "results", "data"} {
+		for _, key := range []string{"notes", "items", "results", "data", "list"} {
 			if child, ok := x[key]; ok {
 				return jsonValueIsEmpty(child)
 			}
@@ -1104,7 +1248,6 @@ func jsonValueIsEmpty(v any) bool {
 	}
 	return false
 }
-
 
 // iterationSentMessage reports whether this iteration's tool trace holds
 // a successful message_send — the payload already reached the user.

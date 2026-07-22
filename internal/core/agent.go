@@ -101,6 +101,30 @@ const (
 	StrategyDelegate   = "delegate"
 )
 
+// TaskDeliveryRef identifies one stable item emitted by one task-program
+// input. InputID is part of the identity so unrelated integrations may reuse
+// the same provider-owned key without suppressing each other.
+type TaskDeliveryRef struct {
+	InputID string
+	ItemKey string
+}
+
+// TaskDeliveryItemKeyMaxBytes keeps provider-owned keys comfortably below
+// PostgreSQL btree tuple limits even when combined with the task/input keys.
+// Runtime adapters must reject larger keyed output instead of treating it as
+// legacy unkeyed data, which would bypass delivery deduplication.
+const TaskDeliveryItemKeyMaxBytes = 512
+
+// TaskDeliveryLedger is the persistence boundary for task-program delivery
+// deduplication. Implementations must be safe for concurrent scheduler runs.
+// Notification and ledger persistence cannot be one atomic transaction: a
+// successful notification followed by a MarkDelivered failure is therefore
+// intentionally at-least-once and may be retried as a duplicate.
+type TaskDeliveryLedger interface {
+	LookupDelivered(ctx context.Context, taskID uuid.UUID, refs []TaskDeliveryRef) (map[TaskDeliveryRef]bool, error)
+	MarkDelivered(ctx context.Context, taskID uuid.UUID, refs []TaskDeliveryRef) error
+}
+
 // IterationResult is returned by AgentHandler.Run after each iteration.
 type IterationResult struct {
 	Done     bool            // true = task complete
@@ -139,6 +163,11 @@ type IterationResult struct {
 	// column when it records the iteration. Empty/nil means the handler
 	// either didn't use tools or didn't bother to expose the trace.
 	ToolCallsJSON json.RawMessage
+
+	// PendingDeliveries are keyed task-program input items represented by this
+	// iteration's Notify. The scheduler persists them only after Notify reaches
+	// the user successfully; handler execution alone never marks delivery.
+	PendingDeliveries []TaskDeliveryRef
 }
 
 // TaskProgress is structured progress for multi-iteration background tasks.
@@ -165,6 +194,7 @@ type AgentDeps struct {
 	DB         func(module string) (*sqlx.DB, error)
 	UserID     uuid.UUID
 	Config     *Config
+	Deliveries TaskDeliveryLedger
 
 	// SelfAgentID is the Ship's own Fleet-issued agent id. Empty until
 	// the first Fleet bootstrap call completes; used by delegate-strategy

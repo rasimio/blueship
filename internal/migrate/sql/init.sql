@@ -108,6 +108,14 @@ CREATE INDEX IF NOT EXISTS idx_agent_tasks_running ON agent_tasks(last_run_at) W
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_user ON agent_tasks(user_id, status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_tasks_recurring ON agent_tasks(user_id, handler) WHERE schedule IS NOT NULL AND status != 'failed';
 
+CREATE TABLE IF NOT EXISTS agent_task_deliveries (
+    task_id      UUID NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+    input_id     TEXT NOT NULL,
+    item_key     TEXT NOT NULL CHECK (octet_length(item_key) <= 512),
+    delivered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (task_id, input_id, item_key)
+);
+
 -- ============================================================
 -- A2A (Agent-to-Agent) protocol — universal tool bus
 -- Each ship exposes selected local tools to other ships and imports

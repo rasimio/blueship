@@ -14,8 +14,10 @@ func TestToolResultIsEmpty(t *testing.T) {
 		{name: "empty array", raw: `[]`, want: true},
 		{name: "empty wrapper notes", raw: `{"notes":[]}`, want: true},
 		{name: "empty wrapper data", raw: `{"data":[]}`, want: true},
+		{name: "empty wrapper list", raw: `{"list":[]}`, want: true},
 		{name: "nonempty array", raw: `[{"id":"n1"}]`, want: false},
 		{name: "nonempty wrapper", raw: `{"notes":[{"id":"n1"}]}`, want: false},
+		{name: "nonempty wrapper list", raw: `{"list":[{"id":"n1"}]}`, want: false},
 		{name: "plain error text", raw: `something`, want: false},
 	}
 	for _, tt := range tests {

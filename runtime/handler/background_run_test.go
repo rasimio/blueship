@@ -20,10 +20,14 @@ import (
 type capturingProvider struct {
 	requests  []core.CompletionRequest
 	responses []*core.CompletionResponse
+	respond   func(core.CompletionRequest) (*core.CompletionResponse, error)
 }
 
 func (p *capturingProvider) Complete(_ context.Context, req core.CompletionRequest) (*core.CompletionResponse, error) {
 	p.requests = append(p.requests, req)
+	if p.respond != nil {
+		return p.respond(req)
+	}
 	if len(p.responses) == 0 {
 		return &core.CompletionResponse{
 			StopReason: "end_turn",

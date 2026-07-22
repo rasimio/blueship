@@ -139,10 +139,11 @@ func (a *Loop) SetCompactor(c *Compactor) {
 
 // ToolTrace records a single tool invocation during the agent loop.
 type ToolTrace struct {
-	Name   string `json:"name"`
-	Input  string `json:"input"`
-	Output string `json:"output,omitempty"`
-	Error  bool   `json:"error,omitempty"`
+	Name    string `json:"name"`
+	BlockID string `json:"block_id,omitempty"`
+	Input   string `json:"input"`
+	Output  string `json:"output,omitempty"`
+	Error   bool   `json:"error,omitempty"`
 }
 
 // RunResult extends the text response with tool execution trace.

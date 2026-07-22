@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -20,6 +21,87 @@ type AgentTaskStore struct {
 // NewAgentTaskStore creates a store backed by the agent_tasks table.
 func NewAgentTaskStore(db *sqlx.DB) *AgentTaskStore {
 	return &AgentTaskStore{db: db}
+}
+
+type taskDeliveryRow struct {
+	InputID string `db:"input_id"`
+	ItemKey string `db:"item_key"`
+}
+
+// LookupDelivered returns the requested refs already recorded for a task.
+func (s *AgentTaskStore) LookupDelivered(ctx context.Context, taskID uuid.UUID, refs []TaskDeliveryRef) (map[TaskDeliveryRef]bool, error) {
+	refs, err := normalizeTaskDeliveryRefs(refs)
+	if err != nil {
+		return nil, err
+	}
+	delivered := make(map[TaskDeliveryRef]bool, len(refs))
+	if len(refs) == 0 {
+		return delivered, nil
+	}
+	inputIDs := make([]string, 0, len(refs))
+	itemKeys := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		inputIDs = append(inputIDs, ref.InputID)
+		itemKeys = append(itemKeys, ref.ItemKey)
+	}
+	var rows []taskDeliveryRow
+	if err := s.db.SelectContext(ctx, &rows, `
+		SELECT d.input_id, d.item_key
+		FROM agent_task_deliveries AS d
+		JOIN unnest($2::text[], $3::text[]) AS wanted(input_id, item_key)
+		  ON wanted.input_id = d.input_id AND wanted.item_key = d.item_key
+		WHERE d.task_id = $1`, taskID, pq.Array(inputIDs), pq.Array(itemKeys)); err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		delivered[TaskDeliveryRef{InputID: row.InputID, ItemKey: row.ItemKey}] = true
+	}
+	return delivered, nil
+}
+
+// MarkDelivered records refs idempotently after their notification was sent.
+func (s *AgentTaskStore) MarkDelivered(ctx context.Context, taskID uuid.UUID, refs []TaskDeliveryRef) error {
+	refs, err := normalizeTaskDeliveryRefs(refs)
+	if err != nil {
+		return err
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	inputIDs := make([]string, 0, len(refs))
+	itemKeys := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		inputIDs = append(inputIDs, ref.InputID)
+		itemKeys = append(itemKeys, ref.ItemKey)
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO agent_task_deliveries (task_id, input_id, item_key)
+		SELECT $1, wanted.input_id, wanted.item_key
+		FROM unnest($2::text[], $3::text[]) AS wanted(input_id, item_key)
+		ON CONFLICT (task_id, input_id, item_key) DO NOTHING`,
+		taskID, pq.Array(inputIDs), pq.Array(itemKeys))
+	return err
+}
+
+func normalizeTaskDeliveryRefs(refs []TaskDeliveryRef) ([]TaskDeliveryRef, error) {
+	seen := make(map[TaskDeliveryRef]struct{}, len(refs))
+	out := make([]TaskDeliveryRef, 0, len(refs))
+	for _, ref := range refs {
+		ref.InputID = strings.TrimSpace(ref.InputID)
+		ref.ItemKey = strings.TrimSpace(ref.ItemKey)
+		if ref.InputID == "" || ref.ItemKey == "" {
+			continue
+		}
+		if len(ref.ItemKey) > TaskDeliveryItemKeyMaxBytes {
+			return nil, fmt.Errorf("task delivery item_key exceeds %d bytes", TaskDeliveryItemKeyMaxBytes)
+		}
+		if _, exists := seen[ref]; exists {
+			continue
+		}
+		seen[ref] = struct{}{}
+		out = append(out, ref)
+	}
+	return out, nil
 }
 
 // PendingTasks returns tasks ready to be picked up by the scheduler.
@@ -43,6 +125,25 @@ func (s *AgentTaskStore) SetRunning(ctx context.Context, id uuid.UUID) error {
 		SET status = 'running', last_run_at = NOW()
 		WHERE id = $1`, id)
 	return err
+}
+
+// TrySetRunning atomically claims a pending task. The in-process busy map is
+// only an optimization; this status predicate is the cross-goroutine/process
+// correctness fence that prevents two schedulers from sending the same tick.
+func (s *AgentTaskStore) TrySetRunning(ctx context.Context, id uuid.UUID) (bool, error) {
+	var claimed uuid.UUID
+	err := s.db.GetContext(ctx, &claimed, `
+		UPDATE agent_tasks
+		SET status = 'running', last_run_at = NOW()
+		WHERE id = $1 AND status = 'pending'
+		RETURNING id`, id)
+	if err == nil {
+		return true, nil
+	}
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return false, err
 }
 
 // UpdateProgress saves intermediate state, increments iteration, and sets
@@ -168,6 +269,18 @@ func (s *AgentTaskStore) UpdateShaping(ctx context.Context, id uuid.UUID, config
 func (s *AgentTaskStore) SetPending(ctx context.Context, id uuid.UUID) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks SET status = 'pending' WHERE id = $1`, id)
+	return err
+}
+
+// SetPendingForNotificationRetry requeues a recurring task for the very next
+// scheduler tick after its user-facing send failed. Clearing last_run_at is
+// intentional: waiting the full task cadence can move a time-windowed source
+// (for example an upcoming meeting) out of view before the retry.
+func (s *AgentTaskStore) SetPendingForNotificationRetry(ctx context.Context, id uuid.UUID) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE agent_tasks
+		SET status = 'pending', last_run_at = NULL
+		WHERE id = $1`, id)
 	return err
 }
 

@@ -7,6 +7,12 @@ import (
 	"strings"
 )
 
+const (
+	maxFlattenedToolTextBytes = 256 << 10
+	maxListedTools            = 500
+	maxListToolPages          = 100
+)
+
 // Client is an initialized MCP session with one server.
 type Client struct {
 	t transport
@@ -57,7 +63,13 @@ func (c *Client) initialize(ctx context.Context) error {
 func (c *Client) listTools(ctx context.Context) ([]ToolDef, error) {
 	var all []ToolDef
 	cursor := ""
+	seenCursors := make(map[string]struct{})
+	pages := 0
 	for {
+		pages++
+		if pages > maxListToolPages {
+			return nil, fmt.Errorf("tools/list exceeded %d pages", maxListToolPages)
+		}
 		params := map[string]any{}
 		if cursor != "" {
 			params["cursor"] = cursor
@@ -71,13 +83,17 @@ func (c *Client) listTools(ctx context.Context) ([]ToolDef, error) {
 			return nil, fmt.Errorf("tools/list decode: %w", err)
 		}
 		all = append(all, res.Tools...)
+		if len(all) > maxListedTools {
+			return nil, fmt.Errorf("tools/list exceeded %d tools", maxListedTools)
+		}
 		if res.NextCursor == "" {
 			break
 		}
-		cursor = res.NextCursor
-		if len(all) > 500 { // pagination runaway guard
-			break
+		if _, exists := seenCursors[res.NextCursor]; exists {
+			return nil, fmt.Errorf("tools/list repeated cursor %q", res.NextCursor)
 		}
+		seenCursors[res.NextCursor] = struct{}{}
+		cursor = res.NextCursor
 	}
 	return all, nil
 }
@@ -100,7 +116,10 @@ func (c *Client) callTool(ctx context.Context, name string, args json.RawMessage
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return "", fmt.Errorf("tools/call decode: %w", err)
 	}
-	text := flattenContent(res.Content)
+	text, err := flattenContent(res.Content)
+	if err != nil {
+		return "", err
+	}
 	if res.IsError {
 		if text == "" {
 			text = "the MCP tool reported an error"
@@ -113,16 +132,23 @@ func (c *Client) callTool(ctx context.Context, name string, args json.RawMessage
 func (c *Client) close() error { return c.t.close() }
 
 // flattenContent joins the text blocks of a tools/call result.
-func flattenContent(blocks []contentBlock) string {
+func flattenContent(blocks []contentBlock) (string, error) {
 	var sb strings.Builder
 	for _, b := range blocks {
 		if b.Type != "text" || b.Text == "" {
 			continue
 		}
+		separatorBytes := 0
 		if sb.Len() > 0 {
+			separatorBytes = 1
+		}
+		if len(b.Text) > maxFlattenedToolTextBytes-sb.Len()-separatorBytes {
+			return "", fmt.Errorf("mcp tool text exceeds %d bytes", maxFlattenedToolTextBytes)
+		}
+		if separatorBytes != 0 {
 			sb.WriteString("\n")
 		}
 		sb.WriteString(b.Text)
 	}
-	return sb.String()
+	return sb.String(), nil
 }

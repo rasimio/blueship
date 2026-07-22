@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // transport carries JSON-RPC messages to one MCP server.
@@ -22,6 +21,11 @@ type transport interface {
 	notify(ctx context.Context, method string, params any) error
 	close() error
 }
+
+const (
+	maxRPCResponseBytes = 2 << 20
+	maxRPCLineBytes     = 1 << 20
+)
 
 // ── Streamable HTTP transport ───────────────────────────────────────────
 
@@ -40,7 +44,7 @@ func newHTTPTransport(url, authHeader, authValue string) *httpTransport {
 		url:        url,
 		authHeader: authHeader,
 		authValue:  authValue,
-		hc:         &http.Client{Timeout: 60 * time.Second},
+		hc:         newMCPHTTPClient(authHeader),
 	}
 }
 
@@ -135,10 +139,17 @@ func (t *httpTransport) close() error {
 // response as an SSE event.
 func readRPCResponse(resp *http.Response, wantID int) (*rpcResponse, error) {
 	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
-		sc := bufio.NewScanner(resp.Body)
-		sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+		limited := &io.LimitedReader{R: resp.Body, N: maxRPCResponseBytes + 1}
+		sc := bufio.NewScanner(limited)
+		sc.Buffer(make([]byte, 0, 64*1024), maxRPCLineBytes+1)
 		for sc.Scan() {
+			if maxRPCResponseBytes+1-limited.N > maxRPCResponseBytes {
+				return nil, fmt.Errorf("mcp sse response exceeds %d bytes", maxRPCResponseBytes)
+			}
 			line := sc.Text()
+			if len(line) > maxRPCLineBytes {
+				return nil, fmt.Errorf("mcp sse line exceeds %d bytes", maxRPCLineBytes)
+			}
 			if !strings.HasPrefix(line, "data:") {
 				continue
 			}
@@ -155,26 +166,50 @@ func readRPCResponse(resp *http.Response, wantID int) (*rpcResponse, error) {
 			}
 		}
 		if err := sc.Err(); err != nil {
-			return nil, fmt.Errorf("mcp sse read: %w", err)
+			return nil, fmt.Errorf("mcp sse read (line limit %d bytes): %w", maxRPCLineBytes, err)
+		}
+		if limited.N == 0 {
+			return nil, fmt.Errorf("mcp sse response exceeds %d bytes", maxRPCResponseBytes)
 		}
 		return nil, fmt.Errorf("mcp sse: no response for request %d", wantID)
 	}
+	body, err := readLimited(resp.Body, maxRPCResponseBytes)
+	if err != nil {
+		return nil, fmt.Errorf("mcp json response: %w", err)
+	}
 	var rpc rpcResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rpc); err != nil {
+	if err := json.Unmarshal(body, &rpc); err != nil {
 		return nil, fmt.Errorf("mcp json decode: %w", err)
 	}
 	return &rpc, nil
 }
 
+func readLimited(r io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("exceeds %d bytes", limit)
+	}
+	return body, nil
+}
+
 // ── stdio transport ─────────────────────────────────────────────────────
 
 type stdioTransport struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	id      atomic.Int64
-	mu      sync.Mutex
-	pending map[int]chan rpcResponse
-	closed  atomic.Bool
+	cmd         *exec.Cmd
+	stdin       io.WriteCloser
+	id          atomic.Int64
+	mu          sync.Mutex
+	pending     map[int]chan stdioCallResult
+	terminalErr error
+	closed      atomic.Bool
+}
+
+type stdioCallResult struct {
+	rpc rpcResponse
+	err error
 }
 
 func newStdioTransport(command string, args []string) (*stdioTransport, error) {
@@ -193,7 +228,7 @@ func newStdioTransport(command string, args []string) (*stdioTransport, error) {
 	t := &stdioTransport{
 		cmd:     cmd,
 		stdin:   stdin,
-		pending: make(map[int]chan rpcResponse),
+		pending: make(map[int]chan stdioCallResult),
 	}
 	go t.readLoop(stdout)
 	return t, nil
@@ -203,8 +238,13 @@ func newStdioTransport(command string, args []string) (*stdioTransport, error) {
 // and routes each response to the waiting caller by id.
 func (t *stdioTransport) readLoop(stdout io.Reader) {
 	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), maxRPCLineBytes+1)
+	lineTooLarge := false
 	for sc.Scan() {
+		if len(sc.Bytes()) > maxRPCLineBytes {
+			lineTooLarge = true
+			break
+		}
 		var rpc rpcResponse
 		if json.Unmarshal(sc.Bytes(), &rpc) != nil || rpc.ID == nil {
 			continue // not a response we're waiting on
@@ -214,26 +254,38 @@ func (t *stdioTransport) readLoop(stdout io.Reader) {
 		delete(t.pending, *rpc.ID)
 		t.mu.Unlock()
 		if ch != nil {
-			ch <- rpc
+			ch <- stdioCallResult{rpc: rpc}
 		}
 	}
 	// stdout closed — the process is gone. Fail every pending call.
-	t.closed.Store(true)
+	terminalErr := errors.New("mcp stdio: connection closed")
+	if lineTooLarge {
+		terminalErr = fmt.Errorf("mcp stdio stdout line exceeds %d bytes", maxRPCLineBytes)
+	} else if err := sc.Err(); err != nil {
+		terminalErr = fmt.Errorf("mcp stdio stdout read (line limit %d bytes): %w", maxRPCLineBytes, err)
+	}
 	t.mu.Lock()
+	t.terminalErr = terminalErr
+	t.closed.Store(true)
 	for id, ch := range t.pending {
-		close(ch)
+		ch <- stdioCallResult{err: terminalErr}
 		delete(t.pending, id)
 	}
 	t.mu.Unlock()
 }
 
 func (t *stdioTransport) call(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	if t.closed.Load() {
-		return nil, errors.New("mcp stdio: process has exited")
-	}
 	id := int(t.id.Add(1))
-	ch := make(chan rpcResponse, 1)
+	ch := make(chan stdioCallResult, 1)
 	t.mu.Lock()
+	if t.closed.Load() {
+		err := t.terminalErr
+		t.mu.Unlock()
+		if err == nil {
+			err = errors.New("mcp stdio: process has exited")
+		}
+		return nil, err
+	}
 	t.pending[id] = ch
 	t.mu.Unlock()
 
@@ -250,10 +302,11 @@ func (t *stdioTransport) call(ctx context.Context, method string, params any) (j
 	case <-ctx.Done():
 		t.dropPending(id)
 		return nil, ctx.Err()
-	case rpc, ok := <-ch:
-		if !ok {
-			return nil, errors.New("mcp stdio: connection closed")
+	case result := <-ch:
+		if result.err != nil {
+			return nil, result.err
 		}
+		rpc := result.rpc
 		if rpc.Error != nil {
 			return nil, rpc.Error
 		}

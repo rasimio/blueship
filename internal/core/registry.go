@@ -145,6 +145,17 @@ func (r *ToolRegistry) HandlerByName(name string) (ToolHandler, bool) {
 	return t.Handler, true
 }
 
+// Has reports whether an exact tool name is registered. It deliberately does
+// not expand peer wildcards: typed task programs execute concrete tools, and
+// must fail explicitly when a configured integration is unavailable.
+func (r *ToolRegistry) Has(name string) bool {
+	if r == nil {
+		return false
+	}
+	_, ok := r.tools[name]
+	return ok
+}
+
 // Definitions returns all registered tool definitions sorted by name.
 func (r *ToolRegistry) Definitions() []ToolDefinition {
 	defs := make([]ToolDefinition, 0, len(r.tools))

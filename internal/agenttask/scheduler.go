@@ -3,6 +3,7 @@ package agenttask
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -25,6 +26,13 @@ var jsonUnmarshal = json.Unmarshal
 // next LLM/DB call. Critical state writes are additionally detached from this
 // ctx (agent.persistCtx) so they survive even when an iteration does overrun.
 const DefaultTaskTimeout = 10 * time.Minute
+
+// scheduleDueTolerance absorbs sub-second scheduler/DB timestamp skew. The
+// polling loop otherwise arrives a few milliseconds before an exact duration,
+// skips, and turns a 5-minute task into a 6-minute task. It is always clamped
+// below the configured duration so short cadences cannot become continuously
+// due.
+const scheduleDueTolerance = time.Second
 
 // Scheduler polls agent_tasks and dispatches handlers.
 //
@@ -201,6 +209,18 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			continue
 		}
 
+		// Quiet hours are a free scheduler gate. Keeping the task pending here
+		// avoids stamping last_run_at, so the first tick after quiet hours runs
+		// immediately instead of waiting another full cadence. The handler keeps
+		// the same check as a second barrier against races/timezone changes.
+		var schedulerConfig *core.Config
+		if s.deps != nil {
+			schedulerConfig = s.deps.Config
+		}
+		if taskProgramInQuietHours(ctx, task, schedulerConfig, time.Now()) {
+			continue
+		}
+
 		// Not-before gate for tasks carrying config {"start_at": "ISO"}:
 		// a delayed one-shot («сделай в 21:14») sleeps until its moment
 		// without burning iterations. Same pre-dispatch placement as the
@@ -226,6 +246,13 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		if !s.executionAllowed(ctx, task) {
 			continue
 		}
+		// Acquire the local lease synchronously before spawning. The previous
+		// check-then-set inside runTask left a window where two Run triggers
+		// could launch the same task; TrySetRunning below remains the DB-level
+		// fence across processes.
+		if !s.trySetBusy(task.ID.String()) {
+			continue
+		}
 
 		s.taskWg.Add(1)
 		go s.runTask(ctx, task, handler, dispatchTag)
@@ -244,6 +271,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 // iteration inside executeTaskOnce, so a crash mid-loop just resumes next tick.
 func (s *Scheduler) runTask(ctx context.Context, task core.AgentTask, handler core.AgentHandler, dispatchTag string) {
 	defer s.taskWg.Done()
+	defer s.setBusy(task.ID.String(), false)
 	// Third agent between creation and execution: shape the task once
 	// (skill from the catalog, iteration cap) before the first iteration.
 	task = s.routeTaskSkill(ctx, task)
@@ -263,12 +291,6 @@ func (s *Scheduler) runTask(ctx context.Context, task core.AgentTask, handler co
 			return
 		}
 	}
-	// Hold the busy lease across the ENTIRE back-to-back run so the 60s tick
-	// can't double-launch a task that's mid-loop (its row is 'pending' between
-	// iterations).
-	s.setBusy(task.ID.String(), true)
-	defer s.setBusy(task.ID.String(), false)
-
 	for {
 		again := s.executeTaskOnce(ctx, task, handler, dispatchTag)
 		if !again {
@@ -335,10 +357,16 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		"iteration", task.Iteration+1,
 	)
 
-	if err := s.store.SetRunning(ctx, task.ID); err != nil {
+	claimed, claimErr := s.store.TrySetRunning(ctx, task.ID)
+	if claimErr != nil {
 		span.SetAttributes(attribute.String("agent_task.outcome", "set_running_failed"))
-		telemetry.RecordError(span, err)
-		s.logger.ErrorContext(ctx, "agent-tasks: set running failed", "task_id", task.ID, "error", err)
+		telemetry.RecordError(span, claimErr)
+		s.logger.ErrorContext(ctx, "agent-tasks: set running failed", "task_id", task.ID, "error", claimErr)
+		return false
+	}
+	if !claimed {
+		span.SetAttributes(attribute.String("agent_task.outcome", "claim_lost"))
+		s.logger.DebugContext(ctx, "agent-tasks: task already claimed", "task_id", task.ID)
 		return false
 	}
 
@@ -354,14 +382,13 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		userDeps := s.deps.ForUser(task.UserID, "agent_task:"+task.ID.String(), false)
 		baseRegistry = s.registryBuilder(userDeps)
 	}
-	var registry *core.ToolRegistry
-	if len(task.Tools) > 0 {
-		registry = baseRegistry.SubsetForNames(task.Tools)
-	} else if tools := handler.DefaultTools(); len(tools) > 0 {
-		registry = baseRegistry.SubsetForNames(tools)
+	requestedTools, hasRequestedTools, registryErr := taskRequestedTools(task)
+	if registryErr == nil {
+		baseRegistry, registryErr = s.composeSoulTaskRegistry(ctx, task, baseRegistry, requestedTools)
 	} else {
-		registry = baseRegistry
+		baseRegistry = core.NewToolRegistry()
 	}
+	registry := registryForTask(baseRegistry, handler.DefaultTools(), requestedTools, hasRequestedTools)
 
 	agentDeps := core.AgentDeps{
 		LLM:             s.deps.LLM,
@@ -377,6 +404,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		DB:              s.deps.DB,
 		UserID:          task.UserID,
 		Config:          s.deps.Config,
+		Deliveries:      s.store,
 		SelfAgentID:     s.deps.SelfAgentID,
 		ContextInjector: s.deps.ContextInjector,
 		ReflexPreparer:  s.deps.ReflexPreparer,
@@ -421,7 +449,13 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 	var iterationGroundingVerdict json.RawMessage
 	traceCtx := span.SpanContext()
 
-	result, err := handler.Run(ctx, task, agentDeps)
+	var result core.IterationResult
+	var err error
+	if registryErr != nil {
+		err = registryErr
+	} else {
+		result, err = handler.Run(ctx, task, agentDeps)
+	}
 
 	// Fresh ctx per DB op. We use background-rooted (not the iteration
 	// ctx, which may be cancelled on shutdown), but allocate per-call so
@@ -513,7 +547,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 	}()
 
 	// Don't fire s.notify here — gate it on each branch's outcome below.
-	// shouldNotify computes the predicate once; each branch decides
+	// Each branch decides
 	// whether to actually push to the user. Critical for research-style
 	// agent_tasks with strict acceptance criteria: handler returns Done
 	// with a long Output, evaluator rejects (0 URLs, etc.), and we used
@@ -521,27 +555,26 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 	// the gate. On 2026-05-10 task 988183c5 leaked a 6.5K-char fake
 	// "AWM final report" to Telegram on iter 15 right before the gate
 	// failed it for missing citations — exactly this bug.
-	shouldNotify := result.Notify != "" && s.notify != nil && !strings.Contains(result.Notify, "[no-op]")
-	deliverNotify := func() bool {
-		if !shouldNotify {
-			return false
-		}
+	deliverNotify := func() (bool, error) {
 		notifyCtx, notifyCancel := newDBCtx()
 		defer notifyCancel()
-		if err := s.notify(notifyCtx, task.UserID, result.Notify); err != nil {
-			s.logger.WarnContext(ctx, "agent-tasks: notify failed",
+		notified, err := deliverTaskNotification(
+			notifyCtx, s.notify, agentDeps.Deliveries,
+			task.ID, task.UserID, result.Notify, result.PendingDeliveries,
+		)
+		if err != nil {
+			s.logger.WarnContext(ctx, "agent-tasks: notify delivery failed",
 				"task_id", task.ID, "error", err)
-			return false
 		}
-		result.Notified = true
-		return true
+		result.Notified = notified
+		return notified, err
 	}
 
 	if result.Pause {
 		iterationOutcome = "pause"
 		// Pause carries explicit milestone notifications (handler sets
 		// Notify only when there's something user-actionable). Push.
-		notified := deliverNotify()
+		notified, _ := deliverNotify()
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "paused"),
 			attribute.Bool("agent_task.notified", notified),
@@ -627,7 +660,22 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		// rejected drafts.
 		iterationOutcome = "done"
 		result.IsFinal = true
-		notified := deliverNotify()
+		notified, notifyErr := deliverNotify()
+		if notifyErr != nil && !notified && task.Schedule != nil {
+			// A failed transport send is not a completed recurring tick. Requeue
+			// immediately so time-windowed inputs remain retryable; successful
+			// send + ledger-mark failure is different (at-least-once) and must not
+			// blindly send the same payload again here.
+			iterationOutcome = "notify_failed"
+			iterationError = notifyErr.Error()
+			result.IsFinal = false
+			retryCtx, retryCancel := newDBCtx()
+			if err := s.store.SetPendingForNotificationRetry(retryCtx, task.ID); err != nil {
+				s.logger.ErrorContext(ctx, "agent-tasks: notification retry requeue failed", "error", err)
+			}
+			retryCancel()
+			return false
+		}
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "done"),
 			attribute.Int("agent_task.output_size_bytes", len(result.Output)),
@@ -668,7 +716,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		// Mid-task iteration. Push only when the handler explicitly
 		// flagged something user-relevant via Notify (milestone, blocker)
 		// — random in-progress output is noise, not a message.
-		notified := deliverNotify()
+		notified, _ := deliverNotify()
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "iteration_done"),
 			attribute.Bool("agent_task.notified", notified),
@@ -688,6 +736,156 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		// immediately (back-to-back); recurring waits for the next tick.
 		return task.Schedule == nil
 	}
+}
+
+func deliverTaskNotification(
+	ctx context.Context,
+	notify func(context.Context, uuid.UUID, string) error,
+	ledger core.TaskDeliveryLedger,
+	taskID, userID uuid.UUID,
+	text string,
+	refs []core.TaskDeliveryRef,
+) (bool, error) {
+	if notify == nil || text == "" || strings.Contains(text, "[no-op]") {
+		return false, nil
+	}
+	if err := notify(ctx, userID, text); err != nil {
+		return false, fmt.Errorf("notify: %w", err)
+	}
+	if len(refs) == 0 {
+		return true, nil
+	}
+	if ledger == nil {
+		return true, fmt.Errorf("mark deliveries: ledger unavailable")
+	}
+	if err := ledger.MarkDelivered(ctx, taskID, refs); err != nil {
+		return true, fmt.Errorf("mark deliveries: %w", err)
+	}
+	return true, nil
+}
+
+// taskRequestedTools returns the task-owned side of tool selection. A typed
+// task program is authoritative when present; AgentTask.Tools remains the
+// legacy source for every task without a program. present-but-invalid programs
+// intentionally request an empty registry — the background handler will
+// return the validation error before executing anything.
+func taskRequestedTools(task core.AgentTask) ([]string, bool, error) {
+	if program, present, err := core.ParseTaskProgram(task.Config); present {
+		if err != nil {
+			return nil, true, fmt.Errorf("task_program: %w", err)
+		}
+		return program.RequestedTools(), true, nil
+	}
+	if len(task.Tools) == 0 {
+		return nil, false, nil
+	}
+	return []string(task.Tools), true, nil
+}
+
+// registryForTask applies two independent restrictions in order:
+//
+//  1. handlerDefaults is the hard role/handler ceiling;
+//  2. requested is the task-specific narrowing.
+//
+// Subsetting the already-ceilinged registry is important: taking only the
+// task list first let a persisted task expand beyond Background.DefaultTools.
+func registryForTask(base *core.ToolRegistry, handlerDefaults, requested []string, hasRequested bool) *core.ToolRegistry {
+	allowed := base
+	if len(handlerDefaults) > 0 {
+		allowed = base.SubsetForNames(handlerDefaults)
+	}
+	if hasRequested {
+		allowed = allowed.SubsetForNames(requested)
+	}
+	return allowed
+}
+
+// composeSoulTaskRegistry adds the task owner's live MCP tools to its native
+// registry and applies the same provider/override policy used by interactive
+// turns. Unlike chat, a background policy lookup error fails closed: an
+// unattended task must not gain tools because its policy store is unavailable.
+func (s *Scheduler) composeSoulTaskRegistry(ctx context.Context, task core.AgentTask, base *core.ToolRegistry, requestedTools []string) (*core.ToolRegistry, error) {
+	if base == nil {
+		base = core.NewToolRegistry()
+	}
+	if s.deps == nil || s.deps.Config == nil {
+		return base, nil
+	}
+	cfg := s.deps.Config
+	registry := base
+	// MCP discovery can cold-connect external servers. Do it only when the
+	// task explicitly requested a concrete MCP tool; a broad host ceiling such
+	// as peer:mcp must not wake every server for a native-only heartbeat.
+	if cfg.MCPSource != nil && requestsMCPTool(requestedTools) && !taskProgramInQuietHours(ctx, task, cfg, time.Now()) {
+		if mcpTools := cfg.MCPSource.ToolsForSoul(ctx, task.SoulID); len(mcpTools) > 0 {
+			registry = base.Clone()
+			for _, tool := range mcpTools {
+				registry.RegisterRemote(tool.Name, tool.Description, tool.Schema, core.ToolModeSync, "mcp", tool.Handler)
+			}
+		}
+	}
+
+	if task.SoulID == uuid.Nil || cfg.Gateway.ResolveSoulToolPolicy == nil {
+		return registry, nil
+	}
+	overrides, providers, err := cfg.Gateway.ResolveSoulToolPolicy(ctx, task.SoulID)
+	if err != nil {
+		return core.NewToolRegistry(), fmt.Errorf("background tool policy for soul %s: %w", task.SoulID, err)
+	}
+	connected := make(map[string]bool, len(providers))
+	for _, provider := range providers {
+		connected[provider] = true
+	}
+
+	allowed := make([]string, 0, registry.Count())
+	for _, definition := range registry.Definitions() {
+		name := definition.Name
+		meta := cfg.ToolMeta[name]
+		if meta.Provider != "" && !connected[meta.Provider] {
+			continue
+		}
+		if meta.Core {
+			allowed = append(allowed, name)
+			continue
+		}
+		if enabled, exists := overrides[name]; exists {
+			if enabled {
+				allowed = append(allowed, name)
+			}
+			continue
+		}
+		allowed = append(allowed, name)
+	}
+	return registry.SubsetForNames(allowed), nil
+}
+
+func requestsMCPTool(tools []string) bool {
+	for _, tool := range tools {
+		if strings.HasPrefix(strings.TrimSpace(tool), "mcp__") {
+			return true
+		}
+	}
+	return false
+}
+
+func taskProgramInQuietHours(ctx context.Context, task core.AgentTask, cfg *core.Config, now time.Time) bool {
+	program, present, err := core.ParseTaskProgram(task.Config)
+	if err != nil || !present || program.QuietHours == nil {
+		return false
+	}
+	loc := time.UTC
+	if cfg != nil {
+		if configured, err := time.LoadLocation(cfg.Timezone); err == nil {
+			loc = configured
+		}
+		loc = cfg.Gateway.TimezoneFor(core.WithSoulID(ctx, task.SoulID), loc)
+	}
+	hour := now.In(loc).Hour()
+	from, to := program.QuietHours.FromHour, program.QuietHours.ToHour
+	if from < to {
+		return hour >= from && hour < to
+	}
+	return hour >= from || hour < to
 }
 
 func (s *Scheduler) executionAllowed(ctx context.Context, task core.AgentTask) bool {
@@ -745,7 +943,7 @@ func (s *Scheduler) cadenceElapsed(task core.AgentTask) bool {
 	if task.LastRunAt == nil {
 		return true
 	}
-	return time.Since(*task.LastRunAt) >= d
+	return durationDue(time.Since(*task.LastRunAt), d)
 }
 
 // shouldRunNow checks if a recurring task should run based on its schedule.
@@ -763,7 +961,18 @@ func (s *Scheduler) shouldRunNow(task core.AgentTask) bool {
 	if task.LastRunAt == nil {
 		return true
 	}
-	return time.Since(*task.LastRunAt) >= d
+	return durationDue(time.Since(*task.LastRunAt), d)
+}
+
+func durationDue(elapsed, interval time.Duration) bool {
+	if interval <= 0 {
+		return elapsed >= interval
+	}
+	tolerance := scheduleDueTolerance
+	if tolerance >= interval {
+		tolerance = interval / 2
+	}
+	return elapsed >= interval-tolerance
 }
 
 // startAtGateOpen enforces the optional not-before gate a task may carry
@@ -917,6 +1126,16 @@ func (s *Scheduler) setBusy(handler string, val bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.busy[handler] = val
+}
+
+func (s *Scheduler) trySetBusy(handler string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.busy[handler] {
+		return false
+	}
+	s.busy[handler] = true
+	return true
 }
 
 // outputPreview is the short form of result.Output that lands on the

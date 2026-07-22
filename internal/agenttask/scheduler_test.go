@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -14,6 +15,273 @@ import (
 
 	"github.com/rasimio/blueship/internal/core"
 )
+
+type recordingMCPSource struct {
+	seen  []uuid.UUID
+	tools []core.MCPTool
+}
+
+func (s *recordingMCPSource) ToolsForSoul(_ context.Context, soulID uuid.UUID) []core.MCPTool {
+	s.seen = append(s.seen, soulID)
+	return s.tools
+}
+
+func (*recordingMCPSource) Invalidate(uuid.UUID) {}
+
+func noopTool(context.Context, json.RawMessage) (any, error) { return map[string]any{"ok": true}, nil }
+
+type schedulerDeliveryLedger struct {
+	mark func([]core.TaskDeliveryRef) error
+}
+
+func (*schedulerDeliveryLedger) LookupDelivered(context.Context, uuid.UUID, []core.TaskDeliveryRef) (map[core.TaskDeliveryRef]bool, error) {
+	return nil, nil
+}
+
+func (l *schedulerDeliveryLedger) MarkDelivered(_ context.Context, _ uuid.UUID, refs []core.TaskDeliveryRef) error {
+	if l.mark == nil {
+		return nil
+	}
+	return l.mark(refs)
+}
+
+func TestDeliverTaskNotificationMarksOnlyAfterSuccessfulNotify(t *testing.T) {
+	taskID, userID := uuid.New(), uuid.New()
+	refs := []core.TaskDeliveryRef{{InputID: "calendar", ItemKey: "event:1"}}
+
+	t.Run("success orders notify before mark", func(t *testing.T) {
+		var order []string
+		ledger := &schedulerDeliveryLedger{mark: func(got []core.TaskDeliveryRef) error {
+			order = append(order, "mark")
+			if len(got) != 1 || got[0] != refs[0] {
+				t.Fatalf("marked refs = %#v, want %#v", got, refs)
+			}
+			return nil
+		}}
+		notified, err := deliverTaskNotification(
+			context.Background(),
+			func(context.Context, uuid.UUID, string) error {
+				order = append(order, "notify")
+				return nil
+			},
+			ledger, taskID, userID, "soon", refs,
+		)
+		if err != nil || !notified || strings.Join(order, ",") != "notify,mark" {
+			t.Fatalf("notified=%v err=%v order=%v", notified, err, order)
+		}
+	})
+
+	t.Run("failed notify does not mark", func(t *testing.T) {
+		marked := false
+		ledger := &schedulerDeliveryLedger{mark: func([]core.TaskDeliveryRef) error {
+			marked = true
+			return nil
+		}}
+		notified, err := deliverTaskNotification(
+			context.Background(),
+			func(context.Context, uuid.UUID, string) error { return errors.New("telegram down") },
+			ledger, taskID, userID, "soon", refs,
+		)
+		if err == nil || notified || marked {
+			t.Fatalf("notified=%v err=%v marked=%v", notified, err, marked)
+		}
+	})
+
+	t.Run("mark failure reports transport success", func(t *testing.T) {
+		notifyCalls := 0
+		ledger := &schedulerDeliveryLedger{mark: func([]core.TaskDeliveryRef) error {
+			return errors.New("database down")
+		}}
+		notified, err := deliverTaskNotification(
+			context.Background(),
+			func(context.Context, uuid.UUID, string) error {
+				notifyCalls++
+				return nil
+			},
+			ledger, taskID, userID, "soon", refs,
+		)
+		if err == nil || !strings.Contains(err.Error(), "mark deliveries") || !notified || notifyCalls != 1 {
+			t.Fatalf("notified=%v err=%v notify_calls=%d, want sent-but-uncommitted", notified, err, notifyCalls)
+		}
+	})
+
+	t.Run("no-op does not notify or mark", func(t *testing.T) {
+		notifyCalls, markCalls := 0, 0
+		ledger := &schedulerDeliveryLedger{mark: func([]core.TaskDeliveryRef) error {
+			markCalls++
+			return nil
+		}}
+		notified, err := deliverTaskNotification(
+			context.Background(),
+			func(context.Context, uuid.UUID, string) error {
+				notifyCalls++
+				return nil
+			},
+			ledger, taskID, userID, "[no-op]", refs,
+		)
+		if err != nil || notified || notifyCalls != 0 || markCalls != 0 {
+			t.Fatalf("notified=%v err=%v notify=%d mark=%d", notified, err, notifyCalls, markCalls)
+		}
+	})
+}
+
+func TestRegistryForTaskEnforcesHandlerCeiling(t *testing.T) {
+	base := core.NewToolRegistry()
+	base.Register("safe", "", json.RawMessage(`{}`), noopTool)
+	base.Register("dangerous", "", json.RawMessage(`{}`), noopTool)
+
+	registry := registryForTask(base, []string{"safe"}, []string{"safe", "dangerous"}, true)
+	if !registry.Has("safe") || registry.Has("dangerous") || registry.Count() != 1 {
+		t.Fatalf("task expanded handler ceiling: definitions=%v", registry.Definitions())
+	}
+
+	// Without a handler ceiling, the legacy task list remains the narrowing.
+	registry = registryForTask(base, nil, []string{"dangerous"}, true)
+	if registry.Has("safe") || !registry.Has("dangerous") || registry.Count() != 1 {
+		t.Fatalf("legacy no-ceiling selection changed: definitions=%v", registry.Definitions())
+	}
+}
+
+func TestComposeSoulTaskRegistryCallsMCPForRequestedToolAndPreservesSoul(t *testing.T) {
+	soulID := uuid.New()
+	source := &recordingMCPSource{tools: []core.MCPTool{{
+		Name:        "mcp__github__list_issues",
+		Description: "issues",
+		Schema:      json.RawMessage(`{}`),
+		Handler:     noopTool,
+	}}}
+	cfg := &core.Config{MCPSource: source}
+	scheduler := &Scheduler{deps: &core.Deps{Config: cfg}}
+	base := core.NewToolRegistry()
+	base.Register("native", "", json.RawMessage(`{}`), noopTool)
+
+	registry, err := scheduler.composeSoulTaskRegistry(context.Background(), core.AgentTask{SoulID: soulID}, base, []string{"mcp__github__list_issues"})
+	if err != nil {
+		t.Fatalf("composeSoulTaskRegistry: %v", err)
+	}
+	if len(source.seen) != 1 || source.seen[0] != soulID {
+		t.Fatalf("MCP source souls = %v, want [%s]", source.seen, soulID)
+	}
+	if !registry.Has("mcp__github__list_issues") || registry.PeerForTool("mcp__github__list_issues") != "mcp" {
+		t.Fatalf("MCP tool not registered as peer:mcp: %v", registry.Definitions())
+	}
+	if base.Has("mcp__github__list_issues") {
+		t.Fatal("shared native registry was mutated")
+	}
+
+	// The host wildcard admits MCP as a class, then the exact task request
+	// narrows it to this one concrete capability.
+	registry = registryForTask(registry, []string{"native", "peer:mcp"}, []string{"mcp__github__list_issues"}, true)
+	if registry.Count() != 1 || !registry.Has("mcp__github__list_issues") || registry.Has("native") {
+		t.Fatalf("MCP wildcard/request intersection failed: %v", registry.Definitions())
+	}
+}
+
+func TestComposeSoulTaskRegistryDoesNotWakeMCPForNativeOnlyTask(t *testing.T) {
+	source := &recordingMCPSource{}
+	cfg := &core.Config{MCPSource: source}
+	scheduler := &Scheduler{deps: &core.Deps{Config: cfg}}
+	base := core.NewToolRegistry()
+	base.Register("notes_list", "", json.RawMessage(`{}`), noopTool)
+
+	registry, err := scheduler.composeSoulTaskRegistry(context.Background(), core.AgentTask{SoulID: uuid.New()}, base, []string{"notes_list"})
+	if err != nil {
+		t.Fatalf("composeSoulTaskRegistry: %v", err)
+	}
+	if len(source.seen) != 0 {
+		t.Fatalf("native-only task cold-connected MCP for souls %v", source.seen)
+	}
+	if registry != base {
+		t.Fatal("native-only task should reuse its native registry when no policy is configured")
+	}
+}
+
+func TestTaskProgramQuietHoursSuppressMCPDiscovery(t *testing.T) {
+	program := core.TaskProgram{
+		Schema:     core.TaskProgramSchemaV1,
+		Activation: core.TaskProgramActivation{Mode: core.TaskProgramActivationAlways},
+		Decision:   core.TaskProgramDecision{Mode: core.TaskProgramDecisionSelected, Tools: []string{"mcp__github__list_issues"}},
+		QuietHours: &core.TaskProgramQuietHours{FromHour: 22, ToHour: 7},
+	}
+	config, _ := json.Marshal(map[string]any{"task_program": program})
+	task := core.AgentTask{SoulID: uuid.New(), Config: config}
+	if !taskProgramInQuietHours(context.Background(), task, &core.Config{Timezone: "UTC"}, time.Date(2026, 7, 22, 23, 0, 0, 0, time.UTC)) {
+		t.Fatal("23:00 UTC should be inside wrapped quiet hours")
+	}
+	if taskProgramInQuietHours(context.Background(), task, &core.Config{Timezone: "UTC"}, time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)) {
+		t.Fatal("12:00 UTC should be outside wrapped quiet hours")
+	}
+}
+
+func TestComposeSoulTaskRegistryPolicyErrorFailsClosed(t *testing.T) {
+	soulID := uuid.New()
+	cfg := &core.Config{}
+	cfg.Gateway.ResolveSoulToolPolicy = func(context.Context, uuid.UUID) (map[string]bool, []string, error) {
+		return nil, nil, errors.New("policy database down")
+	}
+	scheduler := &Scheduler{deps: &core.Deps{Config: cfg}}
+	base := core.NewToolRegistry()
+	base.Register("message_send", "", json.RawMessage(`{}`), noopTool)
+
+	registry, err := scheduler.composeSoulTaskRegistry(context.Background(), core.AgentTask{SoulID: soulID}, base, []string{"message_send"})
+	if err == nil || !strings.Contains(err.Error(), "policy database down") {
+		t.Fatalf("policy error = %v, want explicit failure", err)
+	}
+	if registry.Count() != 0 {
+		t.Fatalf("policy error did not fail closed: %v", registry.Definitions())
+	}
+}
+
+func TestComposeSoulTaskRegistryStripsDisconnectedAndDisabledTools(t *testing.T) {
+	soulID := uuid.New()
+	var policySoul uuid.UUID
+	cfg := &core.Config{ToolMeta: map[string]core.ToolMeta{
+		"calendar_list": {Provider: "google_calendar"},
+		"disabled":      {},
+		"core_internal": {Core: true},
+	}}
+	cfg.Gateway.ResolveSoulToolPolicy = func(_ context.Context, gotSoul uuid.UUID) (map[string]bool, []string, error) {
+		policySoul = gotSoul
+		return map[string]bool{"disabled": false, "core_internal": false}, []string{"github"}, nil
+	}
+	scheduler := &Scheduler{deps: &core.Deps{Config: cfg}}
+	base := core.NewToolRegistry()
+	for _, name := range []string{"calendar_list", "disabled", "core_internal", "notes_list"} {
+		base.Register(name, "", json.RawMessage(`{}`), noopTool)
+	}
+
+	registry, err := scheduler.composeSoulTaskRegistry(context.Background(), core.AgentTask{SoulID: soulID}, base, []string{"notes_list"})
+	if err != nil {
+		t.Fatalf("composeSoulTaskRegistry: %v", err)
+	}
+	if policySoul != soulID {
+		t.Fatalf("policy soul = %s, want %s", policySoul, soulID)
+	}
+	if registry.Has("calendar_list") || registry.Has("disabled") {
+		t.Fatalf("disconnected/disabled tools survived policy: %v", registry.Definitions())
+	}
+	if !registry.Has("notes_list") || !registry.Has("core_internal") {
+		t.Fatalf("default-on/core tools were lost: %v", registry.Definitions())
+	}
+}
+
+func TestDurationDueTolerance(t *testing.T) {
+	interval := 5 * time.Minute
+	if !durationDue(interval-500*time.Millisecond, interval) {
+		t.Fatal("sub-second early scheduler tick should be due")
+	}
+	if durationDue(interval-time.Second-time.Nanosecond, interval) {
+		t.Fatal("scheduler must not run more than one second early")
+	}
+	if !durationDue(interval, interval) {
+		t.Fatal("exact interval must be due")
+	}
+
+	// The tolerance is clamped below very short intervals.
+	if durationDue(0, 500*time.Millisecond) {
+		t.Fatal("short interval became continuously due")
+	}
+}
 
 // newDailyGateScheduler builds the minimal Scheduler the daily_at gate
 // needs: deps with a Config (process tz = UTC, i.e. "server time" in
