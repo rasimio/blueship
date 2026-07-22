@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
@@ -32,6 +33,23 @@ type botInstance struct {
 	tgUsername string // bare username (no @)
 
 	cancel context.CancelFunc // stops this bot's polling goroutine
+}
+
+type userBotResolutionError struct {
+	err       error
+	retryable bool
+}
+
+func (e *userBotResolutionError) Error() string { return e.err.Error() }
+func (e *userBotResolutionError) Unwrap() error { return e.err }
+
+func userBotResolutionFailure(err error, retryable bool) error {
+	return &userBotResolutionError{err: err, retryable: retryable}
+}
+
+func isRetryableUserBotResolution(err error) bool {
+	var resolutionErr *userBotResolutionError
+	return errors.As(err, &resolutionErr) && resolutionErr.retryable
 }
 
 // taggedUpdate wraps a telegram.Update with the id of the bot that
@@ -280,10 +298,9 @@ func (g *Gateway) telegramEnabled() bool {
 
 // SendToUser delivers a free-form message to a platform user via the
 // Telegram bot they paired against (vaelum.bot_links → bot_id +
-// tg_chat_id). Returns nil if the user has no link (caller may fall
-// back to a different sink or skip silently). Returns the bot's send
-// error verbatim — including the dreaded 403 "Forbidden: bot was
-// blocked" so the agent-task scheduler can log it intelligibly.
+// tg_chat_id). Missing or invalid routing returns an error so callers can
+// distinguish transient preflight failures from permanent configuration
+// problems. Provider send errors are returned verbatim.
 //
 // Used by scheduler.notify so agent-task replies (heartbeat, etc) go
 // through the SAME bot the user is talking to, not the legacy
@@ -298,32 +315,42 @@ func (g *Gateway) telegramEnabled() bool {
 func (g *Gateway) resolveUserBot(ctx context.Context, userID uuid.UUID) (*botInstance, int64, error) {
 	db, err := g.deps.DB("ship")
 	if err != nil {
-		return nil, 0, fmt.Errorf("send to user: db unavailable: %w", err)
+		return nil, 0, userBotResolutionFailure(fmt.Errorf("send to user: db unavailable: %w", err), true)
 	}
 	var primaryChatID string
 	if err := db.GetContext(ctx, &primaryChatID,
 		`SELECT chat_id FROM user_profiles WHERE id = $1`, userID); err != nil {
-		return nil, 0, fmt.Errorf("send to user %s: no profile: %w", userID, err)
+		return nil, 0, userBotResolutionFailure(
+			fmt.Errorf("send to user %s: no profile: %w", userID, err),
+			!errors.Is(err, sql.ErrNoRows),
+		)
 	}
 	const tgPrefix = "telegram:"
 	if !strings.HasPrefix(primaryChatID, tgPrefix) {
-		return nil, 0, fmt.Errorf("send to user %s: primary channel is %q, not telegram", userID, primaryChatID)
+		return nil, 0, userBotResolutionFailure(
+			fmt.Errorf("send to user %s: primary channel is %q, not telegram", userID, primaryChatID), false)
 	}
 	tgChatID, parseErr := strconv.ParseInt(strings.TrimPrefix(primaryChatID, tgPrefix), 10, 64)
 	if parseErr != nil {
-		return nil, 0, fmt.Errorf("send to user %s: malformed chat_id %q: %w", userID, primaryChatID, parseErr)
+		return nil, 0, userBotResolutionFailure(
+			fmt.Errorf("send to user %s: malformed chat_id %q: %w", userID, primaryChatID, parseErr), false)
 	}
 	resolveBot := g.deps.Config.Gateway.ResolveUserBotID
 	if resolveBot == nil {
-		return nil, 0, fmt.Errorf("send to user %s: no per-user bot router configured", userID)
+		return nil, 0, userBotResolutionFailure(
+			fmt.Errorf("send to user %s: no per-user bot router configured", userID), false)
 	}
 	botID, err := resolveBot(ctx, userID, tgChatID)
 	if err != nil {
-		return nil, 0, fmt.Errorf("send to user %s: no bot for primary chat %d: %w", userID, tgChatID, err)
+		return nil, 0, userBotResolutionFailure(
+			fmt.Errorf("send to user %s: no bot for primary chat %d: %w", userID, tgChatID, err),
+			!errors.Is(err, sql.ErrNoRows),
+		)
 	}
 	bi := g.botByID(botID)
 	if bi == nil {
-		return nil, 0, fmt.Errorf("send to user %s: bot %s not loaded", userID, botID)
+		return nil, 0, userBotResolutionFailure(
+			fmt.Errorf("send to user %s: bot %s not loaded", userID, botID), true)
 	}
 	return bi, tgChatID, nil
 }
@@ -334,6 +361,66 @@ func (g *Gateway) SendToUser(ctx context.Context, userID uuid.UUID, text string)
 		return err
 	}
 	return bi.client.SendRichLong(ctx, tgChatID, text)
+}
+
+// SendToUserOnce performs exactly one Telegram API request and returns the
+// provider receipt. It deliberately has no retry or plain-text fallback: after
+// an EOF/timeout the Bot API gives us no idempotency key with which to tell a
+// lost response from a lost send, so another request could create a duplicate.
+func (g *Gateway) SendToUserOnce(ctx context.Context, userID uuid.UUID, text string) (bs.TaskNotificationReceipt, error) {
+	bi, tgChatID, err := g.resolveUserBot(ctx, userID)
+	receipt := bs.TaskNotificationReceipt{
+		Transport: "telegram",
+		ChatID:    strconv.FormatInt(tgChatID, 10),
+	}
+	if bi != nil && bi.id != uuid.Nil {
+		receipt.BotID = bi.id.String()
+	}
+	if err != nil {
+		// Resolution only reads local routing state; no Telegram request has
+		// happened yet. Transient DB/load failures retry on the next scheduler
+		// tick; invalid or absent routing waits for the task's next cadence.
+		if isRetryableUserBotResolution(err) {
+			return receipt, bs.DefinitelyNotSent(err)
+		}
+		return receipt, bs.PermanentlyNotSent(err)
+	}
+	if !bi.client.IsConfigured() {
+		return receipt, bs.PermanentlyNotSent(fmt.Errorf("telegram bot not configured"))
+	}
+	result, err := bi.client.SendRichMessage(ctx, tgChatID, text)
+	if err != nil {
+		if apiErr, rejected := explicitTelegramRejection(err); rejected {
+			// Telegram explicitly rejected this request (including 429). The
+			// first attempt did not create a message, so retry admission is safe.
+			if apiErr.ErrorCode == 429 || apiErr.StatusCode == 429 {
+				retryAfter := time.Duration(apiErr.Parameters.RetryAfter) * time.Second
+				return receipt, bs.DefinitelyNotSentAfter(err, retryAfter)
+			}
+			return receipt, bs.PermanentlyNotSent(err)
+		}
+		return receipt, err
+	}
+	if result == nil || result.Result.MessageID == 0 {
+		return receipt, fmt.Errorf("telegram send returned no message id")
+	}
+	receipt.MessageID = strconv.Itoa(result.Result.MessageID)
+	return receipt, nil
+}
+
+func explicitTelegramRejection(err error) (*telegram.APIError, bool) {
+	var apiErr *telegram.APIError
+	if !errors.As(err, &apiErr) {
+		return nil, false
+	}
+	// HTTP 408 is ambiguous at the network boundary: an intermediary may time
+	// out after Telegram accepted the POST. Keep it tombstoned like EOF/timeout.
+	if apiErr.ErrorCode == 408 || apiErr.StatusCode == 408 {
+		return nil, false
+	}
+	rejected := (apiErr.ErrorCode >= 400 && apiErr.ErrorCode < 500) ||
+		(apiErr.StatusCode >= 400 && apiErr.StatusCode < 500)
+	return apiErr, rejected
 }
 
 // SendToUserAttachment ships a CDN-resolved file out the user's paired bot —

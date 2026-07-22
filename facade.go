@@ -67,6 +67,7 @@ type (
 	TaskProgramActivation = core.TaskProgramActivation
 	TaskProgramDecision   = core.TaskProgramDecision
 	TaskProgramQuietHours = core.TaskProgramQuietHours
+	TaskDeliveryRef       = core.TaskDeliveryRef
 	SkillMeta             = core.SkillMeta
 	ExecutionKind         = core.ExecutionKind
 	ExecutionRequest      = core.ExecutionRequest

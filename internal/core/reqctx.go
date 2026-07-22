@@ -100,6 +100,13 @@ func SoulIDFromContextOK(ctx context.Context) (uuid.UUID, bool) {
 // is a normal, fully-persisted turn.
 type ephemeralCtxKey struct{}
 
+// singleAttemptNotificationCtxKey marks an outbound notification whose
+// durable journal has already reserved its occurrence keys. Transports must
+// make at most one provider request for such a notification: retrying an
+// ambiguous timeout/EOF can duplicate a reminder even though the scheduler
+// itself will never call the transport a second time.
+type singleAttemptNotificationCtxKey struct{}
+
 // WithEphemeral tags ctx as an ephemeral (read-only, non-persisting) turn.
 func WithEphemeral(ctx context.Context, ephemeral bool) context.Context {
 	if !ephemeral {
@@ -111,5 +118,19 @@ func WithEphemeral(ctx context.Context, ephemeral bool) context.Context {
 // EphemeralFromContext reports whether this turn is ephemeral (skip all writes).
 func EphemeralFromContext(ctx context.Context) bool {
 	v, _ := ctx.Value(ephemeralCtxKey{}).(bool)
+	return v
+}
+
+// ContextWithSingleAttemptNotification marks ctx as an at-most-once outbound
+// delivery. The marker is deliberately boolean and one-way: callers create a
+// child context for the transport call and never need to unset it.
+func ContextWithSingleAttemptNotification(ctx context.Context) context.Context {
+	return context.WithValue(ctx, singleAttemptNotificationCtxKey{}, true)
+}
+
+// SingleAttemptNotificationFromContext reports whether transport-level
+// retries and fallbacks are forbidden for this notification.
+func SingleAttemptNotificationFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(singleAttemptNotificationCtxKey{}).(bool)
 	return v
 }

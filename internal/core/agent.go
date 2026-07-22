@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -115,14 +116,142 @@ type TaskDeliveryRef struct {
 // legacy unkeyed data, which would bypass delivery deduplication.
 const TaskDeliveryItemKeyMaxBytes = 512
 
-// TaskDeliveryLedger is the persistence boundary for task-program delivery
-// deduplication. Implementations must be safe for concurrent scheduler runs.
-// Notification and ledger persistence cannot be one atomic transaction: a
-// successful notification followed by a MarkDelivered failure is therefore
-// intentionally at-least-once and may be retried as a duplicate.
+// TaskDeliveryLedger is the read-side persistence boundary for task-program
+// delivery deduplication. Implementations must be safe for concurrent
+// scheduler runs. MarkDelivered remains for legacy callers; scheduler-owned
+// notifications use TaskNotificationJournal so send admission is persisted
+// before the transport is called.
 type TaskDeliveryLedger interface {
 	LookupDelivered(ctx context.Context, taskID uuid.UUID, refs []TaskDeliveryRef) (map[TaskDeliveryRef]bool, error)
 	MarkDelivered(ctx context.Context, taskID uuid.UUID, refs []TaskDeliveryRef) error
+}
+
+// TaskNotificationReceipt is the transport identity returned after one
+// confirmed notification attempt. String fields keep the framework neutral to
+// provider-specific identifier widths and make the value safe to persist as
+// JSON without precision loss.
+type TaskNotificationReceipt struct {
+	Transport string `json:"transport"`
+	BotID     string `json:"bot_id,omitempty"`
+	ChatID    string `json:"chat_id,omitempty"`
+	MessageID string `json:"message_id,omitempty"`
+}
+
+// TaskNotificationIntent is one immutable journaled message selected for a
+// durable retry. Its occurrence reservations remain owned by ID in every
+// journal state; retry workers resend Text and never rerun the task program.
+type TaskNotificationIntent struct {
+	ID     uuid.UUID         `db:"id" json:"id"`
+	TaskID uuid.UUID         `db:"task_id" json:"task_id"`
+	UserID uuid.UUID         `db:"user_id" json:"user_id"`
+	Text   string            `db:"text" json:"text"`
+	Refs   []TaskDeliveryRef `db:"-" json:"refs"`
+}
+
+type definitelyNotSentError struct {
+	err error
+}
+
+func (e *definitelyNotSentError) Error() string { return e.err.Error() }
+func (e *definitelyNotSentError) Unwrap() error { return e.err }
+
+// DefinitelyNotSent marks an outbound-notification error as a conclusive
+// pre-provider rejection. A durable notification worker may retry only errors
+// carrying this marker; ordinary timeout/EOF errors remain ambiguous and are
+// tombstoned to preserve at-most-once delivery.
+func DefinitelyNotSent(err error) error {
+	if err == nil || IsDefinitelyNotSent(err) {
+		return err
+	}
+	return &definitelyNotSentError{err: err}
+}
+
+// IsDefinitelyNotSent reports whether err was marked with DefinitelyNotSent.
+func IsDefinitelyNotSent(err error) bool {
+	var target *definitelyNotSentError
+	return errors.As(err, &target)
+}
+
+type notificationRetryDelayError struct {
+	err   error
+	delay time.Duration
+}
+
+func (e *notificationRetryDelayError) Error() string { return e.err.Error() }
+func (e *notificationRetryDelayError) Unwrap() error { return e.err }
+
+// DefinitelyNotSentAfter marks a conclusive pre-provider rejection and carries
+// the provider's requested delay for the durable retry. A non-positive delay is
+// preserved; callers may substitute their own safe default.
+func DefinitelyNotSentAfter(err error, delay time.Duration) error {
+	if err == nil || IsPermanentlyNotSent(err) {
+		return err
+	}
+	return DefinitelyNotSent(&notificationRetryDelayError{err: err, delay: delay})
+}
+
+// NotificationRetryDelay returns the retry delay attached by
+// DefinitelyNotSentAfter. Permanent rejections intentionally never expose a
+// delay, even if they wrap a previously delayed error.
+func NotificationRetryDelay(err error) (time.Duration, bool) {
+	if IsPermanentlyNotSent(err) {
+		return 0, false
+	}
+	var target *notificationRetryDelayError
+	if !errors.As(err, &target) {
+		return 0, false
+	}
+	return target.delay, true
+}
+
+type permanentlyNotSentError struct {
+	err error
+}
+
+func (e *permanentlyNotSentError) Error() string { return e.err.Error() }
+func (e *permanentlyNotSentError) Unwrap() error { return e.err }
+
+// PermanentlyNotSent marks a conclusive pre-provider rejection that retrying
+// cannot heal without an external state change (for example, a blocked bot or
+// a non-Telegram primary channel). It is also DefinitelyNotSent, but carries no
+// retry delay; the durable notification journal retains and rejects the
+// occurrence instead of rerunning its task program.
+func PermanentlyNotSent(err error) error {
+	if err == nil || IsPermanentlyNotSent(err) {
+		return err
+	}
+	return &permanentlyNotSentError{err: DefinitelyNotSent(err)}
+}
+
+// IsPermanentlyNotSent reports whether err was marked with PermanentlyNotSent.
+func IsPermanentlyNotSent(err error) bool {
+	var target *permanentlyNotSentError
+	return errors.As(err, &target)
+}
+
+// TaskNotificationJournal is the durable at-most-once admission boundary for
+// keyed task-program notifications. BeginNotificationAttempt must atomically
+// reserve every ref and persist the immutable user/text intent. created=false
+// means this exact occurrence set was already journaled and the caller MUST
+// NOT invoke the transport again. A partial overlap with a differently grouped
+// attempt is an error so a later scheduled execution can rebuild from only the
+// still-free refs. ConfirmNotificationAttempt atomically marks both
+// the reservation and all of its refs delivered. An ambiguous transport
+// failure is tombstoned with MarkNotificationUncertain rather than retried.
+// Explicitly retryable failures retain the immutable intent and are claimed by
+// ClaimRetryableNotification without rerunning integrations or the LLM.
+type TaskNotificationJournal interface {
+	BeginNotificationAttempt(
+		ctx context.Context,
+		taskID, userID uuid.UUID,
+		text string,
+		refs []TaskDeliveryRef,
+	) (id uuid.UUID, created bool, err error)
+	ConfirmNotificationAttempt(ctx context.Context, id uuid.UUID, receipt TaskNotificationReceipt) error
+	MarkNotificationUncertain(ctx context.Context, id uuid.UUID, reason string) error
+	DeferNotificationAttempt(ctx context.Context, id uuid.UUID, reason string, retryAt time.Time) error
+	RejectNotificationAttempt(ctx context.Context, id uuid.UUID, reason string) error
+	ClaimRetryableNotification(ctx context.Context, now time.Time) (*TaskNotificationIntent, error)
 }
 
 // IterationResult is returned by AgentHandler.Run after each iteration.

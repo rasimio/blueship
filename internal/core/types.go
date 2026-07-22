@@ -24,8 +24,8 @@ type Message struct {
 	// parent row by it to render a relational reply-quote chip.
 	// Empty for non-reply turns.
 	ReplyToMessageID string `json:"-"`
-	// TGMessageID is the Telegram-side message id of an inbound
-	// user message. Lets the gateway resolve a future
+	// TGMessageID is the Telegram-side message id of an inbound user message or
+	// a confirmed outbound notification. Lets the gateway resolve a future
 	// `msg.ReplyToMessage.MessageID` into our chat_messages.id when
 	// the same chat replies to it. 0 = not from Telegram or unknown.
 	TGMessageID int64 `json:"-"`

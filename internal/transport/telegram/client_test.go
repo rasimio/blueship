@@ -52,6 +52,65 @@ func TestPostJSONSurfacesTelegramAPIError(t *testing.T) {
 	}
 }
 
+func TestSendRichMessageDoesNotRetryAmbiguousTransportError(t *testing.T) {
+	calls := 0
+	c := testClient(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, io.ErrUnexpectedEOF
+	})
+
+	if _, err := c.SendRichMessage(context.Background(), 42, "reminder"); err == nil {
+		t.Fatal("SendRichMessage error = nil, want ambiguous transport error")
+	}
+	if calls != 1 {
+		t.Fatalf("transport calls = %d, want exactly 1", calls)
+	}
+}
+
+func TestSendRichMessageMakesOneRequestForEveryProviderOutcome(t *testing.T) {
+	tests := []struct {
+		name      string
+		response  *http.Response
+		wantError bool
+		wantID    int
+	}{
+		{
+			name:     "confirmed",
+			response: jsonResponse(http.StatusOK, `{"ok":true,"result":{"message_id":91}}`),
+			wantID:   91,
+		},
+		{
+			name:     "accepted but scheduled message id zero",
+			response: jsonResponse(http.StatusOK, `{"ok":true,"result":{"message_id":0}}`),
+		},
+		{
+			name:      "explicit rejection",
+			response:  jsonResponse(http.StatusBadRequest, `{"ok":false,"error_code":400,"description":"Bad Request"}`),
+			wantError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			c := testClient(func(*http.Request) (*http.Response, error) {
+				calls++
+				return tt.response, nil
+			})
+			result, err := c.SendRichMessage(context.Background(), 42, "reminder")
+			if (err != nil) != tt.wantError {
+				t.Fatalf("SendRichMessage error = %v, want_error=%v", err, tt.wantError)
+			}
+			if !tt.wantError && (result == nil || result.Result.MessageID != tt.wantID) {
+				t.Fatalf("SendRichMessage result = %#v, want message_id=%d", result, tt.wantID)
+			}
+			if calls != 1 {
+				t.Fatalf("transport calls = %d, want exactly 1", calls)
+			}
+		})
+	}
+}
+
 func TestSplitMessageUsesRunesAndPreservesText(t *testing.T) {
 	input := strings.Repeat("я", 9000)
 	chunks := splitMessage(input, maxTelegramMessageLength)

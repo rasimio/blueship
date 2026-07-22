@@ -2,8 +2,10 @@ package blueship
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -184,6 +186,7 @@ func (s *Ship) Run(ctx context.Context) error {
 
 	// 4b. Start agent task scheduler (if handlers registered).
 	var agentSched *agenttask.Scheduler
+	var agentTaskTrigger <-chan string
 	// Start the agent-task scheduler if EITHER recurring handlers OR
 	// strategy executors are registered. An agent that exposes only
 	// strategy executors (no recurring jobs) still needs the scheduler
@@ -210,12 +213,75 @@ func (s *Ship) Run(ctx context.Context) error {
 		msgStore := session.NewStore(shipDB) // MessageStore for agent loops
 
 		// Notification callback: append to chat session (so cortex sees it) + send to Telegram.
-		var notifyFn func(ctx context.Context, userID uuid.UUID, text string) error
+		var notifyFn func(ctx context.Context, userID uuid.UUID, text string) (core.TaskNotificationReceipt, error)
 		if deps.Users != nil {
-			notifyFn = func(ctx context.Context, userID uuid.UUID, text string) error {
+			notifyFn = func(ctx context.Context, userID uuid.UUID, text string) (core.TaskNotificationReceipt, error) {
+				var receipt core.TaskNotificationReceipt
+
+				// Keyed task-program notifications are admitted by a durable
+				// at-most-once journal before this callback. Keep the transport
+				// equally strict: one provider request, no rich/plain fallback,
+				// and persist chat history only after Telegram confirms a message
+				// id. Attachments and voice handoffs require multiple/rewritten
+				// sends, so they are outside this delivery mode.
+				if core.SingleAttemptNotificationFromContext(ctx) {
+					if strings.HasPrefix(text, "[voice_handoff]\n") {
+						return receipt, core.PermanentlyNotSent(fmt.Errorf("single-attempt notification cannot use voice handoff"))
+					}
+					if ids, _, ok := core.ParseAttachmentMarkers(text); ok && len(ids) > 0 {
+						return receipt, core.PermanentlyNotSent(fmt.Errorf("single-attempt notification cannot include attachments"))
+					}
+					if deps.SendToUserOnce == nil {
+						return receipt, core.PermanentlyNotSent(fmt.Errorf("single-attempt sender unavailable"))
+					}
+					var err error
+					receipt, err = deps.SendToUserOnce(ctx, userID, text)
+					if err != nil {
+						return receipt, err
+					}
+					// Telegram may consume the outer transport deadline while still
+					// returning a confirmed message id. History persistence is not part
+					// of send admission, so give it a fresh DB budget and never turn a
+					// confirmed send into a retryable transport error.
+					historyCtx, historyCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+					defer historyCancel()
+					uid := userID.String()
+					var sessID string
+					soulID, hasSoul := core.SoulIDFromContextOK(ctx)
+					if !hasSoul {
+						s.logger.WarnContext(historyCtx, "agent-tasks: notification history missing soul",
+							"user_id", userID)
+					} else if historyErr := shipDB.GetContext(historyCtx, &sessID,
+						`SELECT id FROM chat_sessions WHERE user_id = $1 AND soul_id = $2 AND source = 'chat' AND active = true ORDER BY updated_at DESC LIMIT 1`,
+						uid, soulID); historyErr != nil && !errors.Is(historyErr, sql.ErrNoRows) {
+						s.logger.WarnContext(historyCtx, "agent-tasks: notification history lookup failed",
+							"user_id", userID, "soul_id", soulID, "error", historyErr)
+					}
+					if sessID != "" && strings.TrimSpace(text) != "" {
+						var tgMessageID int64
+						if receipt.Transport == "telegram" && receipt.MessageID != "" {
+							if parsed, parseErr := strconv.ParseInt(receipt.MessageID, 10, 64); parseErr == nil {
+								tgMessageID = parsed
+							} else {
+								s.logger.WarnContext(historyCtx, "agent-tasks: invalid telegram receipt message id",
+									"message_id", receipt.MessageID, "error", parseErr)
+							}
+						}
+						if historyErr := msgStore.Append(historyCtx, sessID, core.Message{
+							Role:        "assistant",
+							Content:     core.NormalizeContent(text),
+							TGMessageID: tgMessageID,
+						}); historyErr != nil {
+							s.logger.WarnContext(historyCtx, "agent-tasks: notification history append failed",
+								"session_id", sessID, "error", historyErr)
+						}
+					}
+					return receipt, nil
+				}
+
 				profile, err := deps.Users.GetByID(ctx, userID.String())
 				if err != nil {
-					return fmt.Errorf("user lookup for notify: %w", err)
+					return receipt, fmt.Errorf("user lookup for notify: %w", err)
 				}
 
 				// Voice handoff: a router-shaped delivery task returns its
@@ -264,7 +330,8 @@ func (s *Ship) Run(ctx context.Context) error {
 				uid := userID.String()
 				var sessID string
 				_ = shipDB.GetContext(ctx, &sessID,
-					`SELECT id FROM chat_sessions WHERE user_id = $1 AND source = 'chat' AND active = true ORDER BY updated_at DESC LIMIT 1`, uid)
+					`SELECT id FROM chat_sessions WHERE user_id = $1 AND soul_id = $2 AND source = 'chat' AND active = true ORDER BY updated_at DESC LIMIT 1`,
+					uid, core.SoulIDFromContext(ctx))
 				if sessID != "" && strings.TrimSpace(cleaned) != "" {
 					_ = msgStore.Append(ctx, sessID, core.Message{
 						Role:    "assistant",
@@ -276,9 +343,9 @@ func (s *Ship) Run(ctx context.Context) error {
 				// text once the file is dispatched.
 				if strings.TrimSpace(cleaned) == "" {
 					if sentAttachment {
-						return nil
+						return receipt, nil
 					}
-					return errors.Join(notifyErrs...)
+					return receipt, errors.Join(notifyErrs...)
 				}
 
 				// Send to Telegram. Prefer the per-user multi-bot sender wired
@@ -300,7 +367,7 @@ func (s *Ship) Run(ctx context.Context) error {
 				} else {
 					notifyErrs = append(notifyErrs, fmt.Errorf("no sender configured"))
 				}
-				return errors.Join(notifyErrs...)
+				return receipt, errors.Join(notifyErrs...)
 			}
 		}
 
@@ -336,17 +403,9 @@ func (s *Ship) Run(ctx context.Context) error {
 		})
 
 		// Use trigger channel for instant callback wakeup (if configured).
-		var trigger <-chan string
 		if s.cfg.A2A.TaskTrigger != nil {
-			trigger = s.cfg.A2A.TaskTrigger
+			agentTaskTrigger = s.cfg.A2A.TaskTrigger
 		}
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			looprunner.RunLoopWithTrigger(ctx, s.logger, "agent-tasks", 1*time.Minute, agentSched.Run, trigger, agentSched.WakeFromCallback)
-		}()
-
 	}
 
 	// 5. Start Gateway. The gateway is the inbound-message router for every
@@ -369,6 +428,7 @@ func (s *Ship) Run(ctx context.Context) error {
 		// scheduler can deliver Notify via the SAME bot the user paired
 		// with, instead of the legacy single-bot Transport.BotToken.
 		deps.SendToUser = gw.SendToUser
+		deps.SendToUserOnce = gw.SendToUserOnce
 		deps.SendToUserAttachment = gw.SendToUserAttachment
 	}
 
@@ -385,6 +445,18 @@ func (s *Ship) Run(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			gw.Run(ctx)
+		}()
+	}
+
+	// Start task execution only after the initial outbound gateway wiring and
+	// bot load. RunLoopWithTrigger executes immediately; starting it above the
+	// gateway used to race deps.SendToUserOnce assignment and could reserve a
+	// due occurrence as uncertain without making any Telegram request.
+	if agentSched != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			looprunner.RunLoopWithTrigger(ctx, s.logger, "agent-tasks", 1*time.Minute, agentSched.Run, agentTaskTrigger, agentSched.WakeFromCallback)
 		}()
 	}
 

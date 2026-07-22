@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -30,99 +31,655 @@ func (*recordingMCPSource) Invalidate(uuid.UUID) {}
 
 func noopTool(context.Context, json.RawMessage) (any, error) { return map[string]any{"ok": true}, nil }
 
-type schedulerDeliveryLedger struct {
-	mark func([]core.TaskDeliveryRef) error
+type schedulerHandlerFunc func(context.Context, core.AgentTask, core.AgentDeps) (core.IterationResult, error)
+
+func (f schedulerHandlerFunc) Run(ctx context.Context, task core.AgentTask, deps core.AgentDeps) (core.IterationResult, error) {
+	return f(ctx, task, deps)
 }
 
-func (*schedulerDeliveryLedger) LookupDelivered(context.Context, uuid.UUID, []core.TaskDeliveryRef) (map[core.TaskDeliveryRef]bool, error) {
-	return nil, nil
+func (schedulerHandlerFunc) DefaultTools() []string { return nil }
+
+type schedulerNotificationJournal struct {
+	begin        func(context.Context, uuid.UUID, uuid.UUID, string, []core.TaskDeliveryRef) (uuid.UUID, bool, error)
+	confirm      func(context.Context, uuid.UUID, core.TaskNotificationReceipt) error
+	uncertain    func(context.Context, uuid.UUID, string) error
+	deferAttempt func(context.Context, uuid.UUID, string, time.Time) error
+	reject       func(context.Context, uuid.UUID, string) error
+	claim        func(context.Context, time.Time) (*core.TaskNotificationIntent, error)
 }
 
-func (l *schedulerDeliveryLedger) MarkDelivered(_ context.Context, _ uuid.UUID, refs []core.TaskDeliveryRef) error {
-	if l.mark == nil {
+func (j *schedulerNotificationJournal) BeginNotificationAttempt(
+	ctx context.Context,
+	taskID, userID uuid.UUID,
+	text string,
+	refs []core.TaskDeliveryRef,
+) (uuid.UUID, bool, error) {
+	if j.begin == nil {
+		return uuid.New(), true, nil
+	}
+	return j.begin(ctx, taskID, userID, text, refs)
+}
+
+func (j *schedulerNotificationJournal) ConfirmNotificationAttempt(
+	ctx context.Context,
+	id uuid.UUID,
+	receipt core.TaskNotificationReceipt,
+) error {
+	if j.confirm == nil {
 		return nil
 	}
-	return l.mark(refs)
+	return j.confirm(ctx, id, receipt)
 }
 
-func TestDeliverTaskNotificationMarksOnlyAfterSuccessfulNotify(t *testing.T) {
+func (j *schedulerNotificationJournal) MarkNotificationUncertain(ctx context.Context, id uuid.UUID, reason string) error {
+	if j.uncertain == nil {
+		return nil
+	}
+	return j.uncertain(ctx, id, reason)
+}
+
+func (j *schedulerNotificationJournal) DeferNotificationAttempt(ctx context.Context, id uuid.UUID, reason string, retryAt time.Time) error {
+	if j.deferAttempt == nil {
+		return nil
+	}
+	return j.deferAttempt(ctx, id, reason, retryAt)
+}
+
+func (j *schedulerNotificationJournal) RejectNotificationAttempt(ctx context.Context, id uuid.UUID, reason string) error {
+	if j.reject == nil {
+		return nil
+	}
+	return j.reject(ctx, id, reason)
+}
+
+func (j *schedulerNotificationJournal) ClaimRetryableNotification(ctx context.Context, now time.Time) (*core.TaskNotificationIntent, error) {
+	if j.claim == nil {
+		return nil, nil
+	}
+	return j.claim(ctx, now)
+}
+
+func TestDeliverTaskNotificationJournal(t *testing.T) {
 	taskID, userID := uuid.New(), uuid.New()
 	refs := []core.TaskDeliveryRef{{InputID: "calendar", ItemKey: "event:1"}}
+	receipt := core.TaskNotificationReceipt{
+		Transport: "telegram",
+		BotID:     "bot-1",
+		ChatID:    "42",
+		MessageID: "99",
+	}
 
-	t.Run("success orders notify before mark", func(t *testing.T) {
+	t.Run("success orders begin notify confirm", func(t *testing.T) {
 		var order []string
-		ledger := &schedulerDeliveryLedger{mark: func(got []core.TaskDeliveryRef) error {
-			order = append(order, "mark")
-			if len(got) != 1 || got[0] != refs[0] {
-				t.Fatalf("marked refs = %#v, want %#v", got, refs)
+		attemptID := uuid.New()
+		journal := &schedulerNotificationJournal{
+			begin: func(_ context.Context, gotTaskID, gotUserID uuid.UUID, gotText string, got []core.TaskDeliveryRef) (uuid.UUID, bool, error) {
+				order = append(order, "begin")
+				if gotTaskID != taskID || gotUserID != userID || gotText != "soon" {
+					t.Fatalf("begin args task=%s user=%s text=%q", gotTaskID, gotUserID, gotText)
+				}
+				if len(got) != 1 || got[0] != refs[0] {
+					t.Fatalf("reserved refs = %#v, want %#v", got, refs)
+				}
+				return attemptID, true, nil
+			},
+			confirm: func(_ context.Context, gotID uuid.UUID, gotReceipt core.TaskNotificationReceipt) error {
+				order = append(order, "confirm")
+				if gotID != attemptID || gotReceipt != receipt {
+					t.Fatalf("confirm id=%s receipt=%#v", gotID, gotReceipt)
+				}
+				return nil
+			},
+		}
+		outcome, err := deliverTaskNotification(
+			context.Background(),
+			func(ctx context.Context, _ uuid.UUID, _ string) (core.TaskNotificationReceipt, error) {
+				order = append(order, "notify")
+				if !core.SingleAttemptNotificationFromContext(ctx) {
+					t.Fatal("keyed transport was not marked single-attempt")
+				}
+				return receipt, nil
+			},
+			journal, taskID, userID, "soon", refs,
+		)
+		if err != nil || !outcome.Handled || !outcome.Delivered || strings.Join(order, ",") != "begin,notify,confirm" {
+			t.Fatalf("outcome=%+v err=%v order=%v", outcome, err, order)
+		}
+	})
+
+	t.Run("existing reservation forbids notify", func(t *testing.T) {
+		notifyCalls := 0
+		journal := &schedulerNotificationJournal{begin: func(context.Context, uuid.UUID, uuid.UUID, string, []core.TaskDeliveryRef) (uuid.UUID, bool, error) {
+			return uuid.New(), false, nil
+		}}
+		outcome, err := deliverTaskNotification(
+			context.Background(),
+			func(context.Context, uuid.UUID, string) (core.TaskNotificationReceipt, error) {
+				notifyCalls++
+				return receipt, nil
+			},
+			journal, taskID, userID, "soon", refs,
+		)
+		if err != nil || !outcome.Handled || outcome.Delivered || notifyCalls != 0 {
+			t.Fatalf("outcome=%+v err=%v notify_calls=%d", outcome, err, notifyCalls)
+		}
+	})
+
+	t.Run("begin failure forbids notify and never reruns task", func(t *testing.T) {
+		notifyCalls := 0
+		journal := &schedulerNotificationJournal{begin: func(context.Context, uuid.UUID, uuid.UUID, string, []core.TaskDeliveryRef) (uuid.UUID, bool, error) {
+			return uuid.Nil, false, errors.New("database down")
+		}}
+		outcome, err := deliverTaskNotification(
+			context.Background(),
+			func(context.Context, uuid.UUID, string) (core.TaskNotificationReceipt, error) {
+				notifyCalls++
+				return receipt, nil
+			},
+			journal, taskID, userID, "soon", refs,
+		)
+		if err == nil || !strings.Contains(err.Error(), "begin notification attempt") || !outcome.Handled || outcome.Delivered || notifyCalls != 0 {
+			t.Fatalf("outcome=%+v err=%v notify_calls=%d", outcome, err, notifyCalls)
+		}
+	})
+
+	t.Run("missing journal never sends or reruns keyed task", func(t *testing.T) {
+		notifyCalls := 0
+		outcome, err := deliverTaskNotification(
+			context.Background(),
+			func(context.Context, uuid.UUID, string) (core.TaskNotificationReceipt, error) {
+				notifyCalls++
+				return receipt, nil
+			},
+			nil, taskID, userID, "soon", refs,
+		)
+		if err == nil || !strings.Contains(err.Error(), "journal unavailable") || !outcome.Handled || outcome.Delivered || notifyCalls != 0 {
+			t.Fatalf("outcome=%+v err=%v notify_calls=%d", outcome, err, notifyCalls)
+		}
+	})
+
+	t.Run("notify error is tombstoned uncertain", func(t *testing.T) {
+		var order []string
+		attemptID := uuid.New()
+		journal := &schedulerNotificationJournal{
+			begin: func(context.Context, uuid.UUID, uuid.UUID, string, []core.TaskDeliveryRef) (uuid.UUID, bool, error) {
+				order = append(order, "begin")
+				return attemptID, true, nil
+			},
+			uncertain: func(_ context.Context, gotID uuid.UUID, reason string) error {
+				order = append(order, "uncertain")
+				if gotID != attemptID || !strings.Contains(reason, "connection reset") {
+					t.Fatalf("uncertain id=%s reason=%q", gotID, reason)
+				}
+				return nil
+			},
+			confirm: func(context.Context, uuid.UUID, core.TaskNotificationReceipt) error {
+				t.Fatal("confirm called after transport error")
+				return nil
+			},
+		}
+		outcome, err := deliverTaskNotification(
+			context.Background(),
+			func(ctx context.Context, _ uuid.UUID, _ string) (core.TaskNotificationReceipt, error) {
+				order = append(order, "notify")
+				if !core.SingleAttemptNotificationFromContext(ctx) {
+					t.Fatal("keyed transport was not marked single-attempt")
+				}
+				return core.TaskNotificationReceipt{}, errors.New("connection reset")
+			},
+			journal, taskID, userID, "soon", refs,
+		)
+		if err == nil || !outcome.Handled || outcome.Delivered || strings.Join(order, ",") != "begin,notify,uncertain" {
+			t.Fatalf("outcome=%+v err=%v order=%v", outcome, err, order)
+		}
+	})
+
+	t.Run("definitely not sent defers immutable intent", func(t *testing.T) {
+		var order []string
+		attemptID := uuid.New()
+		before := time.Now()
+		journal := &schedulerNotificationJournal{
+			begin: func(context.Context, uuid.UUID, uuid.UUID, string, []core.TaskDeliveryRef) (uuid.UUID, bool, error) {
+				order = append(order, "begin")
+				return attemptID, true, nil
+			},
+			deferAttempt: func(_ context.Context, gotID uuid.UUID, reason string, retryAt time.Time) error {
+				order = append(order, "defer")
+				if gotID != attemptID || !strings.Contains(reason, "rate limited") {
+					t.Fatalf("defer id=%s reason=%q", gotID, reason)
+				}
+				if retryAt.Before(before.Add(89*time.Second)) || retryAt.After(time.Now().Add(91*time.Second)) {
+					t.Fatalf("retry_at=%s, want provider delay near 90s", retryAt)
+				}
+				return nil
+			},
+			uncertain: func(context.Context, uuid.UUID, string) error {
+				t.Fatal("definitely-not-sent error was marked uncertain")
+				return nil
+			},
+			confirm: func(context.Context, uuid.UUID, core.TaskNotificationReceipt) error {
+				t.Fatal("definitely-not-sent error was confirmed")
+				return nil
+			},
+		}
+		outcome, err := deliverTaskNotification(
+			context.Background(),
+			func(ctx context.Context, _ uuid.UUID, _ string) (core.TaskNotificationReceipt, error) {
+				order = append(order, "notify")
+				if !core.SingleAttemptNotificationFromContext(ctx) {
+					t.Fatal("keyed transport was not marked single-attempt")
+				}
+				return core.TaskNotificationReceipt{}, core.DefinitelyNotSentAfter(errors.New("rate limited"), 90*time.Second)
+			},
+			journal, taskID, userID, "soon", refs,
+		)
+		if err == nil || !outcome.Handled || outcome.Delivered || !core.IsDefinitelyNotSent(err) || strings.Join(order, ",") != "begin,notify,defer" {
+			t.Fatalf("outcome=%+v err=%v order=%v", outcome, err, order)
+		}
+	})
+
+	t.Run("permanently not sent rejects immutable intent", func(t *testing.T) {
+		attemptID := uuid.New()
+		rejected := false
+		journal := &schedulerNotificationJournal{
+			begin: func(context.Context, uuid.UUID, uuid.UUID, string, []core.TaskDeliveryRef) (uuid.UUID, bool, error) {
+				return attemptID, true, nil
+			},
+			reject: func(_ context.Context, gotID uuid.UUID, _ string) error {
+				rejected = true
+				if gotID != attemptID {
+					t.Fatalf("reject id=%s, want %s", gotID, attemptID)
+				}
+				return nil
+			},
+		}
+		outcome, err := deliverTaskNotification(
+			context.Background(),
+			func(context.Context, uuid.UUID, string) (core.TaskNotificationReceipt, error) {
+				return core.TaskNotificationReceipt{}, core.PermanentlyNotSent(errors.New("bot blocked"))
+			},
+			journal, taskID, userID, "soon", refs,
+		)
+		if err == nil || !core.IsPermanentlyNotSent(err) || !outcome.Handled || outcome.Delivered || !rejected {
+			t.Fatalf("outcome=%+v err=%v rejected=%v", outcome, err, rejected)
+		}
+	})
+
+	t.Run("missing sender after begin defers without rerunning task", func(t *testing.T) {
+		attemptID := uuid.New()
+		deferred := false
+		journal := &schedulerNotificationJournal{
+			begin: func(context.Context, uuid.UUID, uuid.UUID, string, []core.TaskDeliveryRef) (uuid.UUID, bool, error) {
+				return attemptID, true, nil
+			},
+			deferAttempt: func(_ context.Context, gotID uuid.UUID, reason string, retryAt time.Time) error {
+				deferred = true
+				if gotID != attemptID || !strings.Contains(reason, "sender unavailable") || time.Until(retryAt) < 59*time.Second {
+					t.Fatalf("defer id=%s reason=%q retry_at=%s", gotID, reason, retryAt)
+				}
+				return nil
+			},
+		}
+		outcome, err := deliverTaskNotification(context.Background(), nil, journal, taskID, userID, "soon", refs)
+		if err == nil || !outcome.Handled || outcome.Delivered || !deferred {
+			t.Fatalf("outcome=%+v err=%v deferred=%v", outcome, err, deferred)
+		}
+	})
+
+	t.Run("transport gets fresh deadline and preserves values", func(t *testing.T) {
+		soulID := uuid.New()
+		baseCtx, cancelBase := context.WithCancel(core.WithSoulID(context.Background(), soulID))
+		journal := &schedulerNotificationJournal{begin: func(context.Context, uuid.UUID, uuid.UUID, string, []core.TaskDeliveryRef) (uuid.UUID, bool, error) {
+			cancelBase() // Simulate the reservation consuming/cancelling its DB budget.
+			return uuid.New(), true, nil
+		}}
+		outcome, err := deliverTaskNotification(
+			baseCtx,
+			func(ctx context.Context, _ uuid.UUID, _ string) (core.TaskNotificationReceipt, error) {
+				if ctx.Err() != nil {
+					t.Fatalf("transport inherited spent DB context: %v", ctx.Err())
+				}
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) < 9*time.Second {
+					t.Fatalf("transport deadline = %v, want fresh ~10s", deadline)
+				}
+				if got := core.SoulIDFromContext(ctx); got != soulID {
+					t.Fatalf("transport soul = %s, want %s", got, soulID)
+				}
+				return receipt, nil
+			},
+			journal, taskID, userID, "soon", refs,
+		)
+		if err != nil || !outcome.Handled || !outcome.Delivered {
+			t.Fatalf("outcome=%+v err=%v", outcome, err)
+		}
+	})
+
+	t.Run("confirm failure reservation suppresses retry", func(t *testing.T) {
+		attemptID := uuid.New()
+		begun := false
+		notifyCalls := 0
+		confirmCalls := 0
+		journal := &schedulerNotificationJournal{
+			begin: func(context.Context, uuid.UUID, uuid.UUID, string, []core.TaskDeliveryRef) (uuid.UUID, bool, error) {
+				if begun {
+					return attemptID, false, nil
+				}
+				begun = true
+				return attemptID, true, nil
+			},
+			confirm: func(context.Context, uuid.UUID, core.TaskNotificationReceipt) error {
+				confirmCalls++
+				return errors.New("commit failed")
+			},
+		}
+		notify := func(context.Context, uuid.UUID, string) (core.TaskNotificationReceipt, error) {
+			notifyCalls++
+			return receipt, nil
+		}
+		outcome, err := deliverTaskNotification(context.Background(), notify, journal, taskID, userID, "soon", refs)
+		if err == nil || !strings.Contains(err.Error(), "confirm notification attempt") || !outcome.Handled || !outcome.Delivered {
+			t.Fatalf("first attempt outcome=%+v err=%v", outcome, err)
+		}
+		outcome, err = deliverTaskNotification(context.Background(), notify, journal, taskID, userID, "soon", refs)
+		if err != nil || !outcome.Handled || outcome.Delivered || notifyCalls != 1 || confirmCalls != 1 {
+			t.Fatalf("retry outcome=%+v err=%v notify_calls=%d confirm_calls=%d", outcome, err, notifyCalls, confirmCalls)
+		}
+	})
+
+	t.Run("ordinary notification path is unchanged", func(t *testing.T) {
+		notifyCalls := 0
+		outcome, err := deliverTaskNotification(
+			context.Background(),
+			func(ctx context.Context, _ uuid.UUID, _ string) (core.TaskNotificationReceipt, error) {
+				notifyCalls++
+				if core.SingleAttemptNotificationFromContext(ctx) {
+					t.Fatal("unkeyed transport unexpectedly marked single-attempt")
+				}
+				return receipt, nil
+			},
+			nil, taskID, userID, "ordinary", nil,
+		)
+		if err != nil || !outcome.Handled || !outcome.Delivered || notifyCalls != 1 {
+			t.Fatalf("outcome=%+v err=%v notify_calls=%d", outcome, err, notifyCalls)
+		}
+
+		outcome, err = deliverTaskNotification(
+			context.Background(),
+			func(context.Context, uuid.UUID, string) (core.TaskNotificationReceipt, error) {
+				return core.TaskNotificationReceipt{}, errors.New("telegram down")
+			},
+			nil, taskID, userID, "ordinary", nil,
+		)
+		if err == nil || outcome.Handled || outcome.Delivered || !strings.Contains(err.Error(), "notify: telegram down") {
+			t.Fatalf("failed ordinary notification outcome=%+v err=%v", outcome, err)
+		}
+	})
+
+	t.Run("unkeyed no-op is handled without notify", func(t *testing.T) {
+		beginCalls, notifyCalls := 0, 0
+		journal := &schedulerNotificationJournal{begin: func(context.Context, uuid.UUID, uuid.UUID, string, []core.TaskDeliveryRef) (uuid.UUID, bool, error) {
+			beginCalls++
+			return uuid.New(), true, nil
+		}}
+		outcome, err := deliverTaskNotification(
+			context.Background(),
+			func(context.Context, uuid.UUID, string) (core.TaskNotificationReceipt, error) {
+				notifyCalls++
+				return receipt, nil
+			},
+			journal, taskID, userID, "[no-op]", nil,
+		)
+		if err != nil || !outcome.Handled || outcome.Delivered || notifyCalls != 0 || beginCalls != 0 {
+			t.Fatalf("outcome=%+v err=%v notify=%d begin=%d", outcome, err, notifyCalls, beginCalls)
+		}
+	})
+
+	t.Run("literal no-op inside ordinary text is delivered", func(t *testing.T) {
+		notifyCalls := 0
+		text := "model mentioned [no-op], but this is still a real notification"
+		outcome, err := deliverTaskNotification(
+			context.Background(),
+			func(_ context.Context, _ uuid.UUID, gotText string) (core.TaskNotificationReceipt, error) {
+				notifyCalls++
+				if gotText != text {
+					t.Fatalf("notify text = %q, want %q", gotText, text)
+				}
+				return receipt, nil
+			},
+			nil, taskID, userID, text, nil,
+		)
+		if err != nil || !outcome.Handled || !outcome.Delivered || notifyCalls != 1 {
+			t.Fatalf("outcome=%+v err=%v notify=%d", outcome, err, notifyCalls)
+		}
+	})
+
+	t.Run("keyed no-op fails closed", func(t *testing.T) {
+		beginCalls, notifyCalls := 0, 0
+		journal := &schedulerNotificationJournal{begin: func(context.Context, uuid.UUID, uuid.UUID, string, []core.TaskDeliveryRef) (uuid.UUID, bool, error) {
+			beginCalls++
+			return uuid.New(), true, nil
+		}}
+		outcome, err := deliverTaskNotification(
+			context.Background(),
+			func(context.Context, uuid.UUID, string) (core.TaskNotificationReceipt, error) {
+				notifyCalls++
+				return receipt, nil
+			},
+			journal, taskID, userID, "[no-op]", refs,
+		)
+		if err == nil || !outcome.Handled || outcome.Delivered || notifyCalls != 0 || beginCalls != 0 {
+			t.Fatalf("outcome=%+v err=%v notify=%d begin=%d", outcome, err, notifyCalls, beginCalls)
+		}
+	})
+}
+
+func TestClassifyNotificationFailure(t *testing.T) {
+	schedule := "5m"
+	keyed := core.IterationResult{PendingDeliveries: []core.TaskDeliveryRef{{InputID: "notes", ItemKey: "note:1"}}}
+	unkeyed := core.IterationResult{}
+	ambiguous := errors.New("connection reset")
+
+	tests := []struct {
+		name         string
+		task         core.AgentTask
+		result       core.IterationResult
+		outcome      taskNotificationOutcome
+		err          error
+		retryUnkeyed bool
+		want         notificationFailureDisposition
+	}{
+		{name: "keyed one-shot admission failure never reruns task", task: core.AgentTask{}, result: keyed, err: errors.New("begin failed"), want: notificationFailureProceed},
+		{name: "keyed recurring admission failure never reruns task", task: core.AgentTask{Schedule: &schedule}, result: keyed, outcome: taskNotificationOutcome{Handled: true}, err: errors.New("begin failed"), want: notificationFailureProceed},
+		{name: "keyed retryable intent advances task", task: core.AgentTask{}, result: keyed, outcome: taskNotificationOutcome{Handled: true}, err: core.DefinitelyNotSent(errors.New("rate limited")), want: notificationFailureProceed},
+		{name: "keyed permanent intent advances task", task: core.AgentTask{}, result: keyed, outcome: taskNotificationOutcome{Handled: true}, err: core.PermanentlyNotSent(errors.New("bot blocked")), want: notificationFailureProceed},
+		{name: "legacy recurring done error still retries", task: core.AgentTask{Schedule: &schedule}, result: unkeyed, err: ambiguous, retryUnkeyed: true, want: notificationFailureRetry},
+		{name: "legacy recurring milestone preserves transition", task: core.AgentTask{Schedule: &schedule}, result: unkeyed, err: ambiguous, want: notificationFailureProceed},
+		{name: "unkeyed one-shot preserves legacy completion", task: core.AgentTask{}, result: unkeyed, err: errors.New("transport down"), retryUnkeyed: true, want: notificationFailureProceed},
+		{name: "ambiguous keyed is handled but not delivered", task: core.AgentTask{}, result: keyed, outcome: taskNotificationOutcome{Handled: true}, err: ambiguous, want: notificationFailureProceed},
+		{name: "confirm failure is handled and delivered", task: core.AgentTask{}, result: keyed, outcome: taskNotificationOutcome{Handled: true, Delivered: true}, err: errors.New("confirm failed"), want: notificationFailureProceed},
+		{name: "success", task: core.AgentTask{}, result: keyed, outcome: taskNotificationOutcome{Handled: true, Delivered: true}, want: notificationFailureProceed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := classifyNotificationFailure(test.task, test.result, test.outcome, test.err, test.retryUnkeyed); got != test.want {
+				t.Fatalf("classification = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestDrainRetryableNotificationsUsesImmutableIntent(t *testing.T) {
+	taskID, userID, soulID, attemptID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	refs := []core.TaskDeliveryRef{{InputID: "calendar", ItemKey: "event:shaorma"}}
+	const immutableText = "Завтра закажите шаурму прямо в офисе."
+	receipt := core.TaskNotificationReceipt{Transport: "telegram", BotID: "bot-1", ChatID: "42", MessageID: "100"}
+
+	var stored *core.TaskNotificationIntent
+	claimCalls, confirmCalls, handlerRuns := 0, 0, 0
+	journal := &schedulerNotificationJournal{
+		begin: func(_ context.Context, gotTaskID, gotUserID uuid.UUID, text string, gotRefs []core.TaskDeliveryRef) (uuid.UUID, bool, error) {
+			if gotTaskID != taskID || gotUserID != userID || text != immutableText {
+				t.Fatalf("begin task=%s user=%s text=%q", gotTaskID, gotUserID, text)
+			}
+			stored = &core.TaskNotificationIntent{ID: attemptID, TaskID: taskID, UserID: userID, Text: text, Refs: append([]core.TaskDeliveryRef(nil), gotRefs...)}
+			return attemptID, true, nil
+		},
+		deferAttempt: func(_ context.Context, gotID uuid.UUID, reason string, retryAt time.Time) error {
+			if gotID != attemptID || !strings.Contains(reason, "429") {
+				t.Fatalf("defer id=%s reason=%q", gotID, reason)
+			}
+			if time.Until(retryAt) < defaultNotificationRetryDelay-time.Second {
+				t.Fatalf("retry delay too short: retry_at=%s", retryAt)
 			}
 			return nil
-		}}
-		notified, err := deliverTaskNotification(
-			context.Background(),
-			func(context.Context, uuid.UUID, string) error {
-				order = append(order, "notify")
-				return nil
-			},
-			ledger, taskID, userID, "soon", refs,
-		)
-		if err != nil || !notified || strings.Join(order, ",") != "notify,mark" {
-			t.Fatalf("notified=%v err=%v order=%v", notified, err, order)
-		}
-	})
-
-	t.Run("failed notify does not mark", func(t *testing.T) {
-		marked := false
-		ledger := &schedulerDeliveryLedger{mark: func([]core.TaskDeliveryRef) error {
-			marked = true
+		},
+		claim: func(_ context.Context, _ time.Time) (*core.TaskNotificationIntent, error) {
+			claimCalls++
+			if claimCalls == 1 {
+				copyIntent := *stored
+				return &copyIntent, nil
+			}
+			return nil, nil
+		},
+		confirm: func(_ context.Context, gotID uuid.UUID, gotReceipt core.TaskNotificationReceipt) error {
+			confirmCalls++
+			if gotID != attemptID || gotReceipt != receipt {
+				t.Fatalf("confirm id=%s receipt=%+v", gotID, gotReceipt)
+			}
 			return nil
-		}}
-		notified, err := deliverTaskNotification(
-			context.Background(),
-			func(context.Context, uuid.UUID, string) error { return errors.New("telegram down") },
-			ledger, taskID, userID, "soon", refs,
-		)
-		if err == nil || notified || marked {
-			t.Fatalf("notified=%v err=%v marked=%v", notified, err, marked)
-		}
-	})
+		},
+	}
 
-	t.Run("mark failure reports transport success", func(t *testing.T) {
-		notifyCalls := 0
-		ledger := &schedulerDeliveryLedger{mark: func([]core.TaskDeliveryRef) error {
-			return errors.New("database down")
-		}}
-		notified, err := deliverTaskNotification(
-			context.Background(),
-			func(context.Context, uuid.UUID, string) error {
-				notifyCalls++
-				return nil
-			},
-			ledger, taskID, userID, "soon", refs,
-		)
-		if err == nil || !strings.Contains(err.Error(), "mark deliveries") || !notified || notifyCalls != 1 {
-			t.Fatalf("notified=%v err=%v notify_calls=%d, want sent-but-uncommitted", notified, err, notifyCalls)
-		}
-	})
+	initialOutcome, initialErr := deliverTaskNotification(
+		context.Background(),
+		func(context.Context, uuid.UUID, string) (core.TaskNotificationReceipt, error) {
+			return core.TaskNotificationReceipt{}, core.DefinitelyNotSentAfter(errors.New("telegram 429"), 5*time.Second)
+		},
+		journal, taskID, userID, immutableText, refs,
+	)
+	if initialErr == nil || !initialOutcome.Handled || initialOutcome.Delivered || stored == nil {
+		t.Fatalf("initial outcome=%+v err=%v stored=%+v", initialOutcome, initialErr, stored)
+	}
 
-	t.Run("no-op does not notify or mark", func(t *testing.T) {
-		notifyCalls, markCalls := 0, 0
-		ledger := &schedulerDeliveryLedger{mark: func([]core.TaskDeliveryRef) error {
-			markCalls++
+	hookResult := make(chan core.IterationResult, 1)
+	s := &Scheduler{
+		handlers: map[string]core.AgentHandler{
+			"heartbeat": schedulerHandlerFunc(func(context.Context, core.AgentTask, core.AgentDeps) (core.IterationResult, error) {
+				handlerRuns++
+				return core.IterationResult{}, nil
+			}),
+		},
+		notifyJournal: journal,
+		notifyTask: func(_ context.Context, gotTaskID uuid.UUID) (core.AgentTask, error) {
+			if gotTaskID != taskID {
+				t.Fatalf("lookup task=%s, want %s", gotTaskID, taskID)
+			}
+			return core.AgentTask{ID: taskID, UserID: userID, SoulID: soulID, Handler: "heartbeat"}, nil
+		},
+		notify: func(ctx context.Context, gotUserID uuid.UUID, text string) (core.TaskNotificationReceipt, error) {
+			if gotUserID != userID || text != immutableText {
+				t.Fatalf("retry user=%s text=%q; want immutable journal intent", gotUserID, text)
+			}
+			if !core.SingleAttemptNotificationFromContext(ctx) || core.SoulIDFromContext(ctx) != soulID || core.UserIDFromContext(ctx) != userID {
+				t.Fatalf("retry context single=%v soul=%s user=%s", core.SingleAttemptNotificationFromContext(ctx), core.SoulIDFromContext(ctx), core.UserIDFromContext(ctx))
+			}
+			deadline, ok := ctx.Deadline()
+			if !ok || time.Until(deadline) < 9*time.Second {
+				t.Fatalf("retry transport deadline=%s, want fresh ~10s", deadline)
+			}
+			return receipt, nil
+		},
+		deps: &core.Deps{AgentIterationCompletedHook: func(_ context.Context, _ core.AgentTask, result core.IterationResult) {
+			hookResult <- result
+		}},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	s.drainRetryableNotifications(context.Background())
+
+	if claimCalls != 2 || confirmCalls != 1 || handlerRuns != 0 {
+		t.Fatalf("claim=%d confirm=%d handler_runs=%d; retry must not rerun task", claimCalls, confirmCalls, handlerRuns)
+	}
+	select {
+	case result := <-hookResult:
+		if !result.Notified || len(result.PendingDeliveries) != 1 || result.PendingDeliveries[0] != refs[0] {
+			t.Fatalf("delivery hook result=%+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("deferred confirm did not fire delivery hook")
+	}
+}
+
+func TestDrainRetryableNotificationsDefersPreflightFailuresAndIsBounded(t *testing.T) {
+	userID := uuid.New()
+	claimCalls, deferCalls, notifyCalls := 0, 0, 0
+	journal := &schedulerNotificationJournal{
+		claim: func(_ context.Context, _ time.Time) (*core.TaskNotificationIntent, error) {
+			claimCalls++
+			return &core.TaskNotificationIntent{
+				ID: uuid.New(), TaskID: uuid.New(), UserID: userID, Text: "stored",
+				Refs: []core.TaskDeliveryRef{{InputID: "notes", ItemKey: fmt.Sprintf("note:%d", claimCalls)}},
+			}, nil
+		},
+		deferAttempt: func(_ context.Context, _ uuid.UUID, reason string, retryAt time.Time) error {
+			deferCalls++
+			if !strings.Contains(reason, "lookup task") || time.Until(retryAt) < defaultNotificationRetryDelay-time.Second {
+				t.Fatalf("reason=%q retry_at=%s", reason, retryAt)
+			}
 			return nil
-		}}
-		notified, err := deliverTaskNotification(
-			context.Background(),
-			func(context.Context, uuid.UUID, string) error {
-				notifyCalls++
-				return nil
-			},
-			ledger, taskID, userID, "[no-op]", refs,
-		)
-		if err != nil || notified || notifyCalls != 0 || markCalls != 0 {
-			t.Fatalf("notified=%v err=%v notify=%d mark=%d", notified, err, notifyCalls, markCalls)
-		}
+		},
+	}
+	s := &Scheduler{
+		notifyJournal: journal,
+		notifyTask: func(context.Context, uuid.UUID) (core.AgentTask, error) {
+			return core.AgentTask{}, errors.New("database unavailable")
+		},
+		notify: func(context.Context, uuid.UUID, string) (core.TaskNotificationReceipt, error) {
+			notifyCalls++
+			return core.TaskNotificationReceipt{}, nil
+		},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	s.drainRetryableNotifications(context.Background())
+	if claimCalls != maxNotificationRetriesPerTick || deferCalls != maxNotificationRetriesPerTick || notifyCalls != 0 {
+		t.Fatalf("claim=%d defer=%d notify=%d; want bounded safe preflight defers", claimCalls, deferCalls, notifyCalls)
+	}
+}
+
+func TestRetryTaskNotificationMissingSenderDefers(t *testing.T) {
+	taskID, userID, soulID, attemptID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	deferCalls, hookCalls := 0, 0
+	journal := &schedulerNotificationJournal{
+		deferAttempt: func(ctx context.Context, gotID uuid.UUID, reason string, retryAt time.Time) error {
+			deferCalls++
+			if gotID != attemptID || !strings.Contains(reason, "sender unavailable") {
+				t.Fatalf("defer id=%s reason=%q", gotID, reason)
+			}
+			if core.SoulIDFromContext(ctx) != soulID || core.UserIDFromContext(ctx) != userID {
+				t.Fatalf("defer context soul=%s user=%s", core.SoulIDFromContext(ctx), core.UserIDFromContext(ctx))
+			}
+			if time.Until(retryAt) < defaultNotificationRetryDelay-time.Second {
+				t.Fatalf("retry_at=%s, want default delay", retryAt)
+			}
+			return nil
+		},
+	}
+	s := &Scheduler{
+		notifyJournal: journal,
+		notifyTask: func(context.Context, uuid.UUID) (core.AgentTask, error) {
+			return core.AgentTask{ID: taskID, UserID: userID, SoulID: soulID}, nil
+		},
+		deps: &core.Deps{AgentIterationCompletedHook: func(context.Context, core.AgentTask, core.IterationResult) {
+			hookCalls++
+		}},
+	}
+	err := s.retryTaskNotification(context.Background(), core.TaskNotificationIntent{
+		ID: attemptID, TaskID: taskID, UserID: userID, Text: "stored",
+		Refs: []core.TaskDeliveryRef{{InputID: "notes", ItemKey: "note:1"}},
 	})
+	if err == nil || !core.IsDefinitelyNotSent(err) || deferCalls != 1 || hookCalls != 0 {
+		t.Fatalf("err=%v defer_calls=%d hook_calls=%d", err, deferCalls, hookCalls)
+	}
 }
 
 func TestRegistryForTaskEnforcesHandlerCeiling(t *testing.T) {

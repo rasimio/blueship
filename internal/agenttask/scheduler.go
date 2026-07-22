@@ -56,7 +56,9 @@ type Scheduler struct {
 	registryBuilder func(userDeps *core.Deps) *core.ToolRegistry
 	msgStore        core.MessageStore
 	deps            *core.Deps
-	notify          func(ctx context.Context, userID uuid.UUID, text string) error
+	notify          func(ctx context.Context, userID uuid.UUID, text string) (core.TaskNotificationReceipt, error)
+	notifyJournal   core.TaskNotificationJournal
+	notifyTask      func(context.Context, uuid.UUID) (core.AgentTask, error)
 	onStatusChange  func(ctx context.Context, task core.AgentTask)
 	logger          *slog.Logger
 
@@ -79,6 +81,12 @@ type Scheduler struct {
 // maxConcurrentTasks bounds simultaneous task execution (S2-a2 worker-pool
 // lite). Conservative default; fairness/queueing is a later hardening slice.
 const maxConcurrentTasks = 8
+
+const (
+	maxNotificationRetriesPerTick = 20
+	notificationAttemptTimeout    = 10 * time.Second
+	defaultNotificationRetryDelay = time.Minute
+)
 
 // SetStatusCallback registers a function called after a task transitions
 // to a terminal status (done/failed/canceled). Used to send A2A
@@ -104,9 +112,14 @@ func NewScheduler(
 	registry *core.ToolRegistry,
 	msgStore core.MessageStore,
 	deps *core.Deps,
-	notify func(ctx context.Context, userID uuid.UUID, text string) error,
+	notify func(ctx context.Context, userID uuid.UUID, text string) (core.TaskNotificationReceipt, error),
 	logger *slog.Logger,
 ) *Scheduler {
+	// AgentTaskStore is also the production notification journal. Keep the
+	// dependency expressed as an interface so delivery ordering can be tested
+	// without a database and older custom stores fail closed instead of sending
+	// an unreserved keyed notification.
+	notifyJournal, _ := any(store).(core.TaskNotificationJournal)
 	return &Scheduler{
 		store:            store,
 		handlers:         handlers,
@@ -115,6 +128,8 @@ func NewScheduler(
 		msgStore:         msgStore,
 		deps:             deps,
 		notify:           notify,
+		notifyJournal:    notifyJournal,
+		notifyTask:       store.Get,
 		logger:           logger,
 		busy:             make(map[string]bool),
 		sem:              make(chan struct{}, maxConcurrentTasks),
@@ -140,6 +155,7 @@ func (s *Scheduler) WakeFromCallback(ctx context.Context, peerTaskID string) {
 
 func (s *Scheduler) Run(ctx context.Context) error {
 	s.logger.Info("agent-tasks: tick")
+	s.drainRetryableNotifications(ctx)
 
 	// Auto-complete tasks that exhausted iterations but weren't marked done.
 	// This is the one TERMINAL failure worth alerting the owner about — a
@@ -555,29 +571,49 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 	// the gate. On 2026-05-10 task 988183c5 leaked a 6.5K-char fake
 	// "AWM final report" to Telegram on iter 15 right before the gate
 	// failed it for missing citations — exactly this bug.
-	deliverNotify := func() (bool, error) {
+	deliverNotify := func() (taskNotificationOutcome, error) {
 		notifyCtx, notifyCancel := newDBCtx()
 		defer notifyCancel()
-		notified, err := deliverTaskNotification(
-			notifyCtx, s.notify, agentDeps.Deliveries,
+		outcome, err := deliverTaskNotification(
+			notifyCtx, s.notify, s.notifyJournal,
 			task.ID, task.UserID, result.Notify, result.PendingDeliveries,
 		)
 		if err != nil {
 			s.logger.WarnContext(ctx, "agent-tasks: notify delivery failed",
 				"task_id", task.ID, "error", err)
 		}
-		result.Notified = notified
-		return notified, err
+		result.Notified = outcome.Delivered
+		return outcome, err
+	}
+	stopForNotificationFailure := func(disposition notificationFailureDisposition, notifyErr error) bool {
+		if disposition == notificationFailureProceed {
+			return false
+		}
+		iterationOutcome = "notify_failed"
+		iterationError = notifyErr.Error()
+		result.IsFinal = false
+		dbCtx, dbCancel := newDBCtx()
+		defer dbCancel()
+		if err := s.store.SetPendingForNotificationRetry(dbCtx, task.ID); err != nil {
+			s.logger.ErrorContext(ctx, "agent-tasks: notification retry requeue failed", "error", err)
+		}
+		return true
 	}
 
 	if result.Pause {
 		iterationOutcome = "pause"
 		// Pause carries explicit milestone notifications (handler sets
 		// Notify only when there's something user-actionable). Push.
-		notified, _ := deliverNotify()
+		notifyOutcome, notifyErr := deliverNotify()
+		if stopForNotificationFailure(
+			classifyNotificationFailure(task, result, notifyOutcome, notifyErr, false),
+			notifyErr,
+		) {
+			return false
+		}
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "paused"),
-			attribute.Bool("agent_task.notified", notified),
+			attribute.Bool("agent_task.notified", notifyOutcome.Delivered),
 		)
 		peerTaskID := extractPeerTaskID(result.Progress)
 		if peerTaskID != "" {
@@ -660,26 +696,17 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		// rejected drafts.
 		iterationOutcome = "done"
 		result.IsFinal = true
-		notified, notifyErr := deliverNotify()
-		if notifyErr != nil && !notified && task.Schedule != nil {
-			// A failed transport send is not a completed recurring tick. Requeue
-			// immediately so time-windowed inputs remain retryable; successful
-			// send + ledger-mark failure is different (at-least-once) and must not
-			// blindly send the same payload again here.
-			iterationOutcome = "notify_failed"
-			iterationError = notifyErr.Error()
-			result.IsFinal = false
-			retryCtx, retryCancel := newDBCtx()
-			if err := s.store.SetPendingForNotificationRetry(retryCtx, task.ID); err != nil {
-				s.logger.ErrorContext(ctx, "agent-tasks: notification retry requeue failed", "error", err)
-			}
-			retryCancel()
+		notifyOutcome, notifyErr := deliverNotify()
+		if stopForNotificationFailure(
+			classifyNotificationFailure(task, result, notifyOutcome, notifyErr, true),
+			notifyErr,
+		) {
 			return false
 		}
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "done"),
 			attribute.Int("agent_task.output_size_bytes", len(result.Output)),
-			attribute.Bool("agent_task.notified", notified),
+			attribute.Bool("agent_task.notified", notifyOutcome.Delivered),
 		)
 		if task.AcceptanceCriteria != nil && *task.AcceptanceCriteria != "" {
 			span.SetAttributes(attribute.Bool("agent_task.acceptance_met", true))
@@ -689,7 +716,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 			"dispatch", dispatchTag,
 			"output_size_bytes", len(result.Output),
 			"output_preview", outputPreview(result.Output),
-			"notified", notified,
+			"notified", notifyOutcome.Delivered,
 		)
 		completeCtx, completeCancel := newDBCtx()
 		if err := s.store.Complete(completeCtx, task.ID, result.Output); err != nil {
@@ -716,16 +743,22 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		// Mid-task iteration. Push only when the handler explicitly
 		// flagged something user-relevant via Notify (milestone, blocker)
 		// — random in-progress output is noise, not a message.
-		notified, _ := deliverNotify()
+		notifyOutcome, notifyErr := deliverNotify()
+		if stopForNotificationFailure(
+			classifyNotificationFailure(task, result, notifyOutcome, notifyErr, false),
+			notifyErr,
+		) {
+			return false
+		}
 		span.SetAttributes(
 			attribute.String("agent_task.outcome", "iteration_done"),
-			attribute.Bool("agent_task.notified", notified),
+			attribute.Bool("agent_task.notified", notifyOutcome.Delivered),
 		)
 		s.logger.InfoContext(ctx, "agent-tasks: iteration done",
 			"task_id", task.ID,
 			"handler", task.Handler,
 			"iteration", task.Iteration+1,
-			"notified", notified,
+			"notified", notifyOutcome.Delivered,
 		)
 		dbCtx, dbCancel := newDBCtx()
 		defer dbCancel()
@@ -738,30 +771,210 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 	}
 }
 
+type notificationFailureDisposition uint8
+
+const (
+	notificationFailureProceed notificationFailureDisposition = iota
+	notificationFailureRetry
+)
+
+func classifyNotificationFailure(
+	task core.AgentTask,
+	result core.IterationResult,
+	outcome taskNotificationOutcome,
+	notifyErr error,
+	retryUnkeyed bool,
+) notificationFailureDisposition {
+	if notifyErr == nil {
+		return notificationFailureProceed
+	}
+	keyed := len(result.PendingDeliveries) > 0
+	if keyed {
+		// The handler has already run and may have performed external MCP
+		// actions. Even admission failures cannot safely rerun the task program;
+		// only a persisted journal intent may retry its immutable message.
+		return notificationFailureProceed
+	}
+	if retryUnkeyed && task.Schedule != nil && !outcome.Delivered {
+		return notificationFailureRetry
+	}
+	return notificationFailureProceed
+}
+
+type taskNotificationOutcome struct {
+	// Handled means the task state may advance without rerunning the handler.
+	// Every keyed post-handler outcome is handled because the handler may already
+	// have performed external actions; this does not prove journal admission or
+	// user-visible delivery.
+	Handled bool
+	// Delivered is true only when the transport returned success. Confirmation
+	// persistence may still have failed; the reservation remains the retry fence.
+	Delivered bool
+}
+
 func deliverTaskNotification(
 	ctx context.Context,
-	notify func(context.Context, uuid.UUID, string) error,
-	ledger core.TaskDeliveryLedger,
+	notify func(context.Context, uuid.UUID, string) (core.TaskNotificationReceipt, error),
+	journal core.TaskNotificationJournal,
 	taskID, userID uuid.UUID,
 	text string,
 	refs []core.TaskDeliveryRef,
-) (bool, error) {
-	if notify == nil || text == "" || strings.Contains(text, "[no-op]") {
-		return false, nil
-	}
-	if err := notify(ctx, userID, text); err != nil {
-		return false, fmt.Errorf("notify: %w", err)
+) (taskNotificationOutcome, error) {
+	if strings.TrimSpace(text) == "" || strings.TrimSpace(text) == "[no-op]" {
+		if len(refs) > 0 {
+			return taskNotificationOutcome{Handled: true}, fmt.Errorf("keyed notification has no deliverable text")
+		}
+		return taskNotificationOutcome{Handled: true}, nil
 	}
 	if len(refs) == 0 {
+		if notify == nil {
+			return taskNotificationOutcome{}, fmt.Errorf("notify: sender unavailable")
+		}
+		if _, err := notify(ctx, userID, text); err != nil {
+			return taskNotificationOutcome{}, fmt.Errorf("notify: %w", err)
+		}
+		return taskNotificationOutcome{Handled: true, Delivered: true}, nil
+	}
+	if journal == nil {
+		return taskNotificationOutcome{Handled: true}, fmt.Errorf("begin notification attempt: journal unavailable")
+	}
+	attemptID, created, err := journal.BeginNotificationAttempt(ctx, taskID, userID, text, refs)
+	if err != nil {
+		return taskNotificationOutcome{Handled: true}, fmt.Errorf("begin notification attempt: %w", err)
+	}
+	if !created {
+		// The immutable intent already owns these refs. Its state is advanced by
+		// the outbox worker, never by rerunning the task program.
+		return taskNotificationOutcome{Handled: true}, nil
+	}
+	if notify == nil {
+		notifyErr := core.DefinitelyNotSent(fmt.Errorf("sender unavailable"))
+		_, resolveErr := resolveTaskNotificationAttempt(ctx, journal, attemptID, core.TaskNotificationReceipt{}, notifyErr)
+		return taskNotificationOutcome{Handled: true}, resolveErr
+	}
+
+	// Begin uses the scheduler's short DB budget. Give the one permitted
+	// provider request its own full deadline so a slow reservation query cannot
+	// consume the transport window. WithoutCancel preserves task/user/soul
+	// values while removing the spent parent deadline.
+	transportCtx, transportCancel := context.WithTimeout(context.WithoutCancel(ctx), notificationAttemptTimeout)
+	defer transportCancel()
+	transportCtx = core.ContextWithSingleAttemptNotification(transportCtx)
+	receipt, notifyErr := notify(transportCtx, userID, text)
+	delivered, resolveErr := resolveTaskNotificationAttempt(ctx, journal, attemptID, receipt, notifyErr)
+	return taskNotificationOutcome{Handled: true, Delivered: delivered}, resolveErr
+}
+
+// resolveTaskNotificationAttempt persists the outcome of exactly one provider
+// call. Once Begin/Claim has returned an intent, every outcome is handled by
+// the journal: task-program execution is never used as the retry mechanism.
+func resolveTaskNotificationAttempt(
+	ctx context.Context,
+	journal core.TaskNotificationJournal,
+	attemptID uuid.UUID,
+	receipt core.TaskNotificationReceipt,
+	notifyErr error,
+) (bool, error) {
+	finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notificationAttemptTimeout)
+	defer cancel()
+	if notifyErr == nil {
+		if err := journal.ConfirmNotificationAttempt(finalizeCtx, attemptID, receipt); err != nil {
+			return true, fmt.Errorf("confirm notification attempt: %w", err)
+		}
 		return true, nil
 	}
-	if ledger == nil {
-		return true, fmt.Errorf("mark deliveries: ledger unavailable")
+	if core.IsPermanentlyNotSent(notifyErr) {
+		if err := journal.RejectNotificationAttempt(finalizeCtx, attemptID, notifyErr.Error()); err != nil {
+			return false, fmt.Errorf("notify permanently not sent: %w; reject notification attempt: %v", notifyErr, err)
+		}
+		return false, fmt.Errorf("notify permanently not sent: %w", notifyErr)
 	}
-	if err := ledger.MarkDelivered(ctx, taskID, refs); err != nil {
-		return true, fmt.Errorf("mark deliveries: %w", err)
+	if core.IsDefinitelyNotSent(notifyErr) {
+		delay, ok := core.NotificationRetryDelay(notifyErr)
+		if !ok || delay < defaultNotificationRetryDelay {
+			delay = defaultNotificationRetryDelay
+		}
+		retryAt := time.Now().Add(delay)
+		if err := journal.DeferNotificationAttempt(finalizeCtx, attemptID, notifyErr.Error(), retryAt); err != nil {
+			return false, fmt.Errorf("notify definitely not sent: %w; defer notification attempt: %v", notifyErr, err)
+		}
+		return false, fmt.Errorf("notify definitely not sent: %w", notifyErr)
 	}
-	return true, nil
+	if err := journal.MarkNotificationUncertain(finalizeCtx, attemptID, notifyErr.Error()); err != nil {
+		return false, fmt.Errorf("notify uncertain: %w; mark notification uncertain: %v", notifyErr, err)
+	}
+	return false, fmt.Errorf("notify uncertain: %w", notifyErr)
+}
+
+// drainRetryableNotifications retries immutable journaled text before running
+// any task programs. A single tick is bounded so a large provider backlog
+// cannot starve normal task scheduling.
+func (s *Scheduler) drainRetryableNotifications(ctx context.Context) {
+	if s.notifyJournal == nil {
+		return
+	}
+	claimBefore := time.Now()
+	for i := 0; i < maxNotificationRetriesPerTick; i++ {
+		claimCtx, cancel := context.WithTimeout(ctx, notificationAttemptTimeout)
+		intent, err := s.notifyJournal.ClaimRetryableNotification(claimCtx, claimBefore)
+		cancel()
+		if err != nil {
+			s.logger.WarnContext(ctx, "agent-tasks: claim retryable notification failed", "error", err)
+			return
+		}
+		if intent == nil {
+			return
+		}
+		if err := s.retryTaskNotification(ctx, *intent); err != nil {
+			s.logger.WarnContext(ctx, "agent-tasks: retry notification failed",
+				"attempt_id", intent.ID, "task_id", intent.TaskID, "error", err)
+		}
+	}
+}
+
+func (s *Scheduler) retryTaskNotification(ctx context.Context, intent core.TaskNotificationIntent) error {
+	lookup := s.notifyTask
+	if lookup == nil && s.store != nil {
+		lookup = s.store.Get
+	}
+	if lookup == nil {
+		_, err := resolveTaskNotificationAttempt(ctx, s.notifyJournal, intent.ID, core.TaskNotificationReceipt{},
+			core.DefinitelyNotSent(fmt.Errorf("task lookup unavailable")))
+		return err
+	}
+	lookupCtx, lookupCancel := context.WithTimeout(ctx, notificationAttemptTimeout)
+	task, err := lookup(lookupCtx, intent.TaskID)
+	lookupCancel()
+	if err != nil {
+		_, resolveErr := resolveTaskNotificationAttempt(ctx, s.notifyJournal, intent.ID, core.TaskNotificationReceipt{},
+			core.DefinitelyNotSent(fmt.Errorf("lookup task %s: %w", intent.TaskID, err)))
+		return resolveErr
+	}
+	if task.UserID != intent.UserID {
+		_, resolveErr := resolveTaskNotificationAttempt(core.WithSoulID(ctx, task.SoulID), s.notifyJournal, intent.ID,
+			core.TaskNotificationReceipt{}, core.PermanentlyNotSent(fmt.Errorf(
+				"notification user %s does not match task user %s", intent.UserID, task.UserID)))
+		return resolveErr
+	}
+	if s.notify == nil {
+		baseCtx := core.WithUserID(core.WithSoulID(ctx, task.SoulID), task.UserID)
+		_, err := resolveTaskNotificationAttempt(baseCtx, s.notifyJournal, intent.ID,
+			core.TaskNotificationReceipt{}, core.DefinitelyNotSent(fmt.Errorf("sender unavailable")))
+		return err
+	}
+	transportCtx := core.WithSoulID(context.WithoutCancel(ctx), task.SoulID)
+	transportCtx = core.WithUserID(transportCtx, task.UserID)
+	transportCtx = core.ContextWithSingleAttemptNotification(transportCtx)
+	transportCtx, transportCancel := context.WithTimeout(transportCtx, notificationAttemptTimeout)
+	defer transportCancel()
+	receipt, notifyErr := s.notify(transportCtx, intent.UserID, intent.Text)
+	delivered, resolveErr := resolveTaskNotificationAttempt(transportCtx, s.notifyJournal, intent.ID, receipt, notifyErr)
+	if delivered && resolveErr == nil && s.deps != nil && s.deps.AgentIterationCompletedHook != nil {
+		hookCtx := core.WithUserID(core.WithSoulID(context.Background(), task.SoulID), task.UserID)
+		result := core.IterationResult{Notified: true, PendingDeliveries: intent.Refs}
+		go s.deps.AgentIterationCompletedHook(hookCtx, task, result)
+	}
+	return resolveErr
 }
 
 // taskRequestedTools returns the task-owned side of tool selection. A typed

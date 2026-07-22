@@ -2,9 +2,13 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,7 +32,11 @@ type taskDeliveryRow struct {
 	ItemKey string `db:"item_key"`
 }
 
-// LookupDelivered returns the requested refs already recorded for a task.
+const taskDeliveryInputIDMaxBytes = 64
+
+// LookupDelivered returns refs that are either confirmed delivered or owned by
+// a durable notification attempt in any state. Retryable attempts are drained
+// from their immutable journal text; task programs must never regenerate them.
 func (s *AgentTaskStore) LookupDelivered(ctx context.Context, taskID uuid.UUID, refs []TaskDeliveryRef) (map[TaskDeliveryRef]bool, error) {
 	refs, err := normalizeTaskDeliveryRefs(refs)
 	if err != nil {
@@ -50,7 +58,13 @@ func (s *AgentTaskStore) LookupDelivered(ctx context.Context, taskID uuid.UUID, 
 		FROM agent_task_deliveries AS d
 		JOIN unnest($2::text[], $3::text[]) AS wanted(input_id, item_key)
 		  ON wanted.input_id = d.input_id AND wanted.item_key = d.item_key
-		WHERE d.task_id = $1`, taskID, pq.Array(inputIDs), pq.Array(itemKeys)); err != nil {
+		WHERE d.task_id = $1
+		UNION
+		SELECT i.input_id, i.item_key
+		FROM agent_task_notification_attempt_items AS i
+		JOIN unnest($2::text[], $3::text[]) AS wanted(input_id, item_key)
+		  ON wanted.input_id = i.input_id AND wanted.item_key = i.item_key
+		WHERE i.task_id = $1`, taskID, pq.Array(inputIDs), pq.Array(itemKeys)); err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
@@ -92,6 +106,9 @@ func normalizeTaskDeliveryRefs(refs []TaskDeliveryRef) ([]TaskDeliveryRef, error
 		if ref.InputID == "" || ref.ItemKey == "" {
 			continue
 		}
+		if len(ref.InputID) > taskDeliveryInputIDMaxBytes {
+			return nil, fmt.Errorf("task delivery input_id exceeds %d bytes", taskDeliveryInputIDMaxBytes)
+		}
 		if len(ref.ItemKey) > TaskDeliveryItemKeyMaxBytes {
 			return nil, fmt.Errorf("task delivery item_key exceeds %d bytes", TaskDeliveryItemKeyMaxBytes)
 		}
@@ -102,6 +119,402 @@ func normalizeTaskDeliveryRefs(refs []TaskDeliveryRef) ([]TaskDeliveryRef, error
 		out = append(out, ref)
 	}
 	return out, nil
+}
+
+// BeginNotificationAttempt atomically persists an immutable notification
+// intent and reserves every keyed occurrence before any external transport is
+// called. created=false means this exact occurrence set already exists. A
+// partial overlap is returned as an error after rolling back the whole new
+// attempt, allowing a later scheduled execution to rebuild from unreserved refs.
+func (s *AgentTaskStore) BeginNotificationAttempt(
+	ctx context.Context,
+	taskID, userID uuid.UUID,
+	text string,
+	refs []TaskDeliveryRef,
+) (uuid.UUID, bool, error) {
+	if taskID == uuid.Nil || userID == uuid.Nil {
+		return uuid.Nil, false, fmt.Errorf("begin notification attempt: task_id and user_id are required")
+	}
+	if strings.TrimSpace(text) == "" {
+		return uuid.Nil, false, fmt.Errorf("begin notification attempt: text is required")
+	}
+	refs, err := normalizeTaskDeliveryRefs(refs)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	if len(refs) == 0 {
+		return uuid.Nil, false, fmt.Errorf("begin notification attempt: at least one delivery ref is required")
+	}
+	sortTaskDeliveryRefs(refs)
+	occurrenceKey := taskNotificationOccurrenceKey(refs)
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("begin notification attempt transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	attemptID := uuid.New()
+	var insertedID uuid.UUID
+	err = tx.GetContext(ctx, &insertedID, `
+		INSERT INTO agent_task_notification_attempts (
+			id, task_id, user_id, occurrence_key, message_text
+		)
+		SELECT $1, t.id, t.user_id, $4, $5
+		FROM agent_tasks AS t
+		WHERE t.id = $2 AND t.user_id = $3
+		ON CONFLICT (task_id, occurrence_key) DO NOTHING
+		RETURNING id`, attemptID, taskID, userID, occurrenceKey, text)
+	if err == sql.ErrNoRows {
+		// Either this exact occurrence was already journaled or the supplied
+		// task/user pair does not exist. Only the former is an idempotent hit.
+		if getErr := tx.GetContext(ctx, &attemptID, `
+			SELECT id
+			FROM agent_task_notification_attempts
+			WHERE task_id = $1 AND user_id = $2 AND occurrence_key = $3`,
+			taskID, userID, occurrenceKey); getErr != nil {
+			if getErr == sql.ErrNoRows {
+				return uuid.Nil, false, fmt.Errorf("begin notification attempt: task/user pair not found")
+			}
+			return uuid.Nil, false, fmt.Errorf("lookup existing notification attempt: %w", getErr)
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			return uuid.Nil, false, fmt.Errorf("commit existing notification attempt lookup: %w", commitErr)
+		}
+		return attemptID, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("insert notification attempt: %w", err)
+	}
+	attemptID = insertedID
+
+	inputIDs := make([]string, 0, len(refs))
+	itemKeys := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		inputIDs = append(inputIDs, ref.InputID)
+		itemKeys = append(itemKeys, ref.ItemKey)
+	}
+	var reserved []taskDeliveryRow
+	if err := tx.SelectContext(ctx, &reserved, `
+		INSERT INTO agent_task_notification_attempt_items (
+			attempt_id, task_id, input_id, item_key
+		)
+		SELECT $1, $2, wanted.input_id, wanted.item_key
+		FROM unnest($3::text[], $4::text[]) AS wanted(input_id, item_key)
+		ON CONFLICT (task_id, input_id, item_key) DO NOTHING
+		RETURNING input_id, item_key`,
+		attemptID, taskID, pq.Array(inputIDs), pq.Array(itemKeys)); err != nil {
+		return uuid.Nil, false, fmt.Errorf("reserve notification items: %w", err)
+	}
+	if len(reserved) != len(refs) {
+		// A differently-grouped concurrent attempt already owns at least one
+		// ref. Roll back this whole attempt so no partial reservation survives.
+		// This is deliberately not an idempotent hit: a later scheduled execution
+		// can dual-read the winning reservations and build from the refs left free.
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			return uuid.Nil, false, fmt.Errorf("rollback overlapping notification attempt: %w", rollbackErr)
+		}
+		return uuid.Nil, false, fmt.Errorf(
+			"reserve notification items: partial overlap (%d of %d refs were free)",
+			len(reserved), len(refs),
+		)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return uuid.Nil, false, fmt.Errorf("commit notification attempt: %w", err)
+	}
+	return attemptID, true, nil
+}
+
+// ConfirmNotificationAttempt records a provider receipt and the final delivery
+// ledger rows in one transaction. A repeated confirm after a lost DB response
+// is idempotent; an uncertain attempt can never be promoted to sent.
+func (s *AgentTaskStore) ConfirmNotificationAttempt(ctx context.Context, id uuid.UUID, receipt TaskNotificationReceipt) error {
+	if id == uuid.Nil {
+		return fmt.Errorf("confirm notification attempt: id is required")
+	}
+	if strings.TrimSpace(receipt.Transport) == "" {
+		return fmt.Errorf("confirm notification attempt: receipt transport is required")
+	}
+	receiptJSON, err := json.Marshal(receipt)
+	if err != nil {
+		return fmt.Errorf("confirm notification attempt: marshal receipt: %w", err)
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("confirm notification attempt transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	state, err := notificationAttemptStateForUpdate(ctx, tx, id)
+	if err != nil {
+		return fmt.Errorf("confirm notification attempt: %w", err)
+	}
+	switch state {
+	case "sent":
+		return tx.Commit()
+	case "uncertain":
+		return fmt.Errorf("confirm notification attempt: attempt %s is uncertain", id)
+	case "dispatching":
+	default:
+		return fmt.Errorf("confirm notification attempt: invalid state %q", state)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO agent_task_deliveries (task_id, input_id, item_key)
+		SELECT task_id, input_id, item_key
+		FROM agent_task_notification_attempt_items
+		WHERE attempt_id = $1
+		ON CONFLICT (task_id, input_id, item_key) DO NOTHING`, id); err != nil {
+		return fmt.Errorf("confirm notification attempt: insert deliveries: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `
+		UPDATE agent_task_notification_attempts
+		SET state = 'sent', receipt = $2::jsonb, error_message = NULL,
+		    next_attempt_at = NULL, resolved_at = NOW()
+		WHERE id = $1 AND state = 'dispatching'`, id, string(receiptJSON))
+	if err != nil {
+		return fmt.Errorf("confirm notification attempt: update journal: %w", err)
+	}
+	if affected, err := res.RowsAffected(); err != nil || affected != 1 {
+		if err != nil {
+			return fmt.Errorf("confirm notification attempt: rows affected: %w", err)
+		}
+		return fmt.Errorf("confirm notification attempt: dispatching state lost")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("confirm notification attempt: commit: %w", err)
+	}
+	return nil
+}
+
+// MarkNotificationUncertain tombstones an ambiguous external outcome. It does
+// not release reservation items, so the occurrence remains suppressed forever
+// unless an operator explicitly repairs the journal.
+func (s *AgentTaskStore) MarkNotificationUncertain(ctx context.Context, id uuid.UUID, reason string) error {
+	if id == uuid.Nil {
+		return fmt.Errorf("mark notification uncertain: id is required")
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "notification delivery outcome is uncertain"
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("mark notification uncertain transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	state, err := notificationAttemptStateForUpdate(ctx, tx, id)
+	if err != nil {
+		return fmt.Errorf("mark notification uncertain: %w", err)
+	}
+	switch state {
+	case "uncertain":
+		return tx.Commit()
+	case "sent":
+		return fmt.Errorf("mark notification uncertain: attempt %s is already sent", id)
+	case "dispatching":
+	default:
+		return fmt.Errorf("mark notification uncertain: invalid state %q", state)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_task_notification_attempts
+		SET state = 'uncertain', error_message = $2,
+		    next_attempt_at = NULL, resolved_at = NOW()
+		WHERE id = $1 AND state = 'dispatching'`, id, reason); err != nil {
+		return fmt.Errorf("mark notification uncertain: update journal: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("mark notification uncertain: commit: %w", err)
+	}
+	return nil
+}
+
+// DeferNotificationAttempt schedules the same immutable message for a durable
+// retry after a conclusive, retryable provider rejection. Reservation items
+// remain owned by this attempt, so task integrations and the LLM never rerun.
+func (s *AgentTaskStore) DeferNotificationAttempt(ctx context.Context, id uuid.UUID, reason string, retryAt time.Time) error {
+	if id == uuid.Nil {
+		return fmt.Errorf("defer notification attempt: id is required")
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return fmt.Errorf("defer notification attempt: reason is required")
+	}
+	if retryAt.IsZero() {
+		return fmt.Errorf("defer notification attempt: retry_at is required")
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("defer notification attempt transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	state, err := notificationAttemptStateForUpdate(ctx, tx, id)
+	if err != nil {
+		return fmt.Errorf("defer notification attempt: %w", err)
+	}
+	switch state {
+	case "retryable":
+		// Idempotent replay after an ambiguous DB commit response.
+		return tx.Commit()
+	case "dispatching":
+	case "sent", "uncertain", "rejected":
+		return fmt.Errorf("defer notification attempt: attempt %s is %s", id, state)
+	default:
+		return fmt.Errorf("defer notification attempt: invalid state %q", state)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_task_notification_attempts
+		SET state = 'retryable', error_message = $2, next_attempt_at = $3,
+		    resolved_at = NULL
+		WHERE id = $1 AND state = 'dispatching'`, id, reason, retryAt); err != nil {
+		return fmt.Errorf("defer notification attempt: update journal: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("defer notification attempt: commit: %w", err)
+	}
+	return nil
+}
+
+// RejectNotificationAttempt terminally records a conclusive non-retryable
+// provider rejection. The occurrence reservation remains in place forever.
+func (s *AgentTaskStore) RejectNotificationAttempt(ctx context.Context, id uuid.UUID, reason string) error {
+	if id == uuid.Nil {
+		return fmt.Errorf("reject notification attempt: id is required")
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return fmt.Errorf("reject notification attempt: reason is required")
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("reject notification attempt transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	state, err := notificationAttemptStateForUpdate(ctx, tx, id)
+	if err != nil {
+		return fmt.Errorf("reject notification attempt: %w", err)
+	}
+	switch state {
+	case "rejected":
+		return tx.Commit()
+	case "dispatching":
+	case "retryable", "sent", "uncertain":
+		return fmt.Errorf("reject notification attempt: attempt %s is %s", id, state)
+	default:
+		return fmt.Errorf("reject notification attempt: invalid state %q", state)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_task_notification_attempts
+		SET state = 'rejected', error_message = $2,
+		    next_attempt_at = NULL, resolved_at = NOW()
+		WHERE id = $1 AND state = 'dispatching'`, id, reason); err != nil {
+		return fmt.Errorf("reject notification attempt: update journal: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("reject notification attempt: commit: %w", err)
+	}
+	return nil
+}
+
+// ClaimRetryableNotification atomically claims the oldest due retryable intent.
+// SKIP LOCKED lets concurrent drainers select disjoint rows without waiting.
+// A claimed row returns to dispatching and is never automatically reclaimed if
+// the worker crashes, preserving the journal's at-most-once bias.
+func (s *AgentTaskStore) ClaimRetryableNotification(ctx context.Context, now time.Time) (*TaskNotificationIntent, error) {
+	if now.IsZero() {
+		return nil, fmt.Errorf("claim retryable notification: now is required")
+	}
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("claim retryable notification transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var intent TaskNotificationIntent
+	err = tx.GetContext(ctx, &intent, `
+		WITH candidate AS (
+			SELECT id
+			FROM agent_task_notification_attempts
+			WHERE state = 'retryable' AND next_attempt_at <= $1
+			ORDER BY next_attempt_at, created_at, id
+			FOR UPDATE SKIP LOCKED
+			LIMIT 1
+		)
+		UPDATE agent_task_notification_attempts AS a
+		SET state = 'dispatching', attempt_count = a.attempt_count + 1,
+		    last_attempt_at = $1, next_attempt_at = NULL,
+		    error_message = NULL, resolved_at = NULL
+		FROM candidate
+		WHERE a.id = candidate.id
+		RETURNING a.id, a.task_id, a.user_id, a.message_text AS text`, now)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("claim retryable notification: %w", err)
+	}
+	var rows []taskDeliveryRow
+	if err := tx.SelectContext(ctx, &rows, `
+		SELECT input_id, item_key
+		FROM agent_task_notification_attempt_items
+		WHERE attempt_id = $1
+		ORDER BY input_id, item_key`, intent.ID); err != nil {
+		return nil, fmt.Errorf("claim retryable notification refs: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("claim retryable notification: attempt %s has no reserved refs", intent.ID)
+	}
+	intent.Refs = make([]TaskDeliveryRef, 0, len(rows))
+	for _, row := range rows {
+		intent.Refs = append(intent.Refs, TaskDeliveryRef{InputID: row.InputID, ItemKey: row.ItemKey})
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("claim retryable notification commit: %w", err)
+	}
+	return &intent, nil
+}
+
+func notificationAttemptStateForUpdate(ctx context.Context, tx *sqlx.Tx, id uuid.UUID) (string, error) {
+	var state string
+	if err := tx.GetContext(ctx, &state, `
+		SELECT state
+		FROM agent_task_notification_attempts
+		WHERE id = $1
+		FOR UPDATE`, id); err != nil {
+		return "", err
+	}
+	return state, nil
+}
+
+func sortTaskDeliveryRefs(refs []TaskDeliveryRef) {
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].InputID != refs[j].InputID {
+			return refs[i].InputID < refs[j].InputID
+		}
+		return refs[i].ItemKey < refs[j].ItemKey
+	})
+}
+
+func taskNotificationOccurrenceKey(refs []TaskDeliveryRef) string {
+	refs = append([]TaskDeliveryRef(nil), refs...)
+	sortTaskDeliveryRefs(refs)
+	hash := sha256.New()
+	_, _ = hash.Write([]byte("task-notification-occurrence/v1\x00"))
+	var length [4]byte
+	for _, ref := range refs {
+		binary.BigEndian.PutUint32(length[:], uint32(len(ref.InputID)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write([]byte(ref.InputID))
+		binary.BigEndian.PutUint32(length[:], uint32(len(ref.ItemKey)))
+		_, _ = hash.Write(length[:])
+		_, _ = hash.Write([]byte(ref.ItemKey))
+	}
+	return "refs:v1:" + base64.RawURLEncoding.EncodeToString(hash.Sum(nil))
 }
 
 // PendingTasks returns tasks ready to be picked up by the scheduler.

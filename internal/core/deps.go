@@ -134,6 +134,12 @@ type Deps struct {
 	// deps.Sender.
 	SendToUser func(ctx context.Context, userID uuid.UUID, text string) error
 
+	// SendToUserOnce is the receipt-returning, single-attempt sibling used by
+	// keyed task-program notifications. Implementations must issue at most one
+	// provider request: an ambiguous timeout is returned to the journal instead
+	// of being retried and risking a duplicate reminder.
+	SendToUserOnce func(ctx context.Context, userID uuid.UUID, text string) (TaskNotificationReceipt, error)
+
 	// SendToUserAttachment is the file sibling of SendToUser: it ships a
 	// CDN-resolved attachment (PDF / image / text) out the user's paired
 	// bot. Lets the agent-task notify path deliver `[attached: UUID]`
@@ -193,6 +199,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		ResolveSoul:                 d.ResolveSoul,
 		ResolveTelegramChat:         d.ResolveTelegramChat,
 		SendToUser:                  d.SendToUser,
+		SendToUserOnce:              d.SendToUserOnce,
 		SendToUserAttachment:        d.SendToUserAttachment,
 		BotOnboarding:               d.BotOnboarding,
 		DeeplinkLogin:               d.DeeplinkLogin,
