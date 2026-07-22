@@ -87,29 +87,17 @@ type BotOnboarding interface {
 	// when the user aborts the flow). Idempotent: missing row is not an
 	// error.
 	ClearState(ctx context.Context, tgUserID int64, botID uuid.UUID) error
+}
 
-	// CompleteDeeplinkLogin is the bot's half of the cabinet's
-	// "Approve in bot" deep-link auth flow. The gateway calls it when
-	// /start login_<TOKEN> hits the platform bot: the host atomically
-	// flips the matching tg_login_states row from 'pending' to
-	// 'approved', stamping the approving Telegram user id. Returns the
-	// user-facing message the gateway should reply with — success
-	// confirmation when approved is true, "link expired" otherwise.
-	//
-	// The host MUST NOT create the vaelum.users row inside this
-	// method: the cabinet's poll handler does that so the freshly
-	// minted session cookie can be attached to the HTTP response.
-	// Returning (true, ...) just signals approval; the actual identity
-	// resolution and session mint happen on the next cabinet poll.
+// DeeplinkLoginApprover is independent from BotOnboarding: authenticating a
+// browser through an existing Telegram identity must not enable account
+// creation inside chat. A host may wire either capability, both, or neither.
+type DeeplinkLoginApprover interface {
 	CompleteDeeplinkLogin(ctx context.Context, token string, tgUserID int64) (approved bool, message string, err error)
 }
 
-// DeeplinkLinker is an OPTIONAL extension of the BotOnboarding host hook.
-// A host that supports the cabinet-initiated "link my existing account to
-// this Telegram chat" deep link (https://t.me/<bot>?start=link_<token>)
-// implements it; the gateway type-asserts it off the BotOnboarding value at
-// call time, so hosts that don't implement it keep compiling and the link_
-// deep link simply falls through to the onboarding FSM.
+// DeeplinkLinker connects an existing browser account to a Telegram chat. It
+// is intentionally independent from both login approval and bot onboarding.
 //
 // Unlike CompleteDeeplinkLogin — which only flips an auth nonce and lets the
 // cabinet's poll mint a session keyed on the Telegram id — CompleteDeeplinkLink

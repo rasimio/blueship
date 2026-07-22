@@ -63,6 +63,10 @@ type (
 	AgentDeps            = core.AgentDeps
 	IterationResult      = core.IterationResult
 	SkillMeta            = core.SkillMeta
+	ExecutionKind        = core.ExecutionKind
+	ExecutionRequest     = core.ExecutionRequest
+	ExecutionDecision    = core.ExecutionDecision
+	ExecutionAuthorizer  = core.ExecutionAuthorizer
 )
 
 // --- Providers: LLM + capability ports ---
@@ -118,6 +122,7 @@ type (
 	AttachmentParams      = core.AttachmentParams
 	LinkParams            = core.LinkParams
 	BotOnboarding         = core.BotOnboarding
+	DeeplinkLoginApprover = core.DeeplinkLoginApprover
 	DeeplinkLinker        = core.DeeplinkLinker
 	BotOnboardingAccount  = core.BotOnboardingAccount
 	BotOnboardingComplete = core.BotOnboardingComplete
@@ -155,8 +160,14 @@ const (
 	StrategyDelegate   = core.StrategyDelegate
 )
 
+const (
+	ExecutionInteractive = core.ExecutionInteractive
+	ExecutionBackground  = core.ExecutionBackground
+)
+
 // --- Sentinel errors ---
 var (
 	ErrTelegramChatUnpaired     = core.ErrTelegramChatUnpaired
 	ErrBotOnboardingAlreadyDone = core.ErrBotOnboardingAlreadyDone
+	ErrExecutionDenied          = core.ErrExecutionDenied
 )

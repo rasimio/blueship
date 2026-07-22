@@ -45,6 +45,9 @@ func (s *Ship) Run(ctx context.Context) error {
 	deps.ResolveTelegramChat = s.cfg.Gateway.ResolveTelegramChat
 	deps.AttachmentSink = s.cfg.Gateway.AttachmentSink
 	deps.BotOnboarding = s.cfg.Gateway.BotOnboarding
+	deps.DeeplinkLogin = s.cfg.Gateway.DeeplinkLogin
+	deps.DeeplinkLink = s.cfg.Gateway.DeeplinkLink
+	deps.AuthorizeExecution = s.cfg.AuthorizeExecution
 
 	// 2. Auto-migrate runtime tables
 	shipDB, err := deps.DB("ship")
@@ -425,7 +428,6 @@ func (s *Ship) Run(ctx context.Context) error {
 	s.logger.Info("blueship stopped")
 	return nil
 }
-
 
 // voiceHandoffText renders a delivery-task payload in the soul's chat
 // persona: one short LLM pass with the persona as system prompt. The

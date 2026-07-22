@@ -17,6 +17,9 @@ type UIStrings struct {
 	// NoActiveNotes is injected into reflex/cortex context when the user has
 	// no open notes.
 	NoActiveNotes string
+	// ExecutionDenied is sent by interactive transports when the host's
+	// generic execution policy denies a turn.
+	ExecutionDenied string
 }
 
 func (u *UIStrings) applyDefaults() {
@@ -31,6 +34,9 @@ func (u *UIStrings) applyDefaults() {
 	}
 	if u.NoActiveNotes == "" {
 		u.NoActiveNotes = "(no active notes)"
+	}
+	if u.ExecutionDenied == "" {
+		u.ExecutionDenied = "This assistant is not available right now."
 	}
 }
 

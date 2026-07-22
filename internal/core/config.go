@@ -83,6 +83,11 @@ type Config struct {
 	// just hands over the tool definitions + metadata.
 	PublishToolCatalog func(ctx context.Context, tools []ToolDefinition, meta map[string]ToolMeta) error `yaml:"-" json:"-"`
 
+	// AuthorizeExecution is the host-owned admission seam for interactive
+	// turns and background work. BlueShip supplies identity and execution
+	// context only; the host owns every product/policy decision. Nil = allow.
+	AuthorizeExecution ExecutionAuthorizer `yaml:"-" json:"-"`
+
 	// --- Owner (single-user mode) ---
 	Owner OwnerConfig
 

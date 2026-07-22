@@ -17,11 +17,11 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rasimio/blueship/attachment"
+	pdfint "github.com/rasimio/blueship/integration/pdf"
 	bs "github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/provider/openai"
 	"github.com/rasimio/blueship/internal/transport/telegram"
 	"github.com/rasimio/blueship/internal/webaccess/browser"
-	pdfint "github.com/rasimio/blueship/integration/pdf"
 	"github.com/rasimio/blueship/runtime/session"
 	"github.com/rasimio/blueship/tool"
 )
@@ -799,6 +799,20 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 			return
 		}
 		g.logger.Debug("ignored message", "chat_id", chatID, "error", err)
+		return
+	}
+	decision, err := g.authorizeExecution(ctx, us.UserID, us.SoulID, bs.ExecutionInteractive, "telegram")
+	if err != nil {
+		g.logger.Warn("gateway: execution authorization failed",
+			"chat_id", chatID, "user_id", us.UserID, "error", err)
+		return
+	}
+	if !decision.Allowed {
+		g.logger.Info("gateway: execution denied",
+			"chat_id", chatID, "user_id", us.UserID, "reason", decision.Reason)
+		if bi != nil && bi.client != nil {
+			_, _ = bi.client.SendMessage(ctx, fmt.Sprintf("%d", rawChatID), g.deps.Config.UI.ExecutionDenied)
+		}
 		return
 	}
 

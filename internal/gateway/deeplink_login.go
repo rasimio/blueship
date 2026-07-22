@@ -44,7 +44,7 @@ const deeplinkPayloadPrefix = "login_"
 // Errors from the host are logged and reported as a "link expired" reply
 // so the user gets actionable feedback instead of silence.
 func (g *Gateway) maybeRunDeeplinkLogin(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, text string) bool {
-	if g.deps.BotOnboarding == nil || bi == nil || bi.id == uuid.Nil {
+	if g.deps.DeeplinkLogin == nil || bi == nil || bi.id == uuid.Nil {
 		return false
 	}
 	// Only the platform bot is meant to receive deep-link approvals;
@@ -66,7 +66,7 @@ func (g *Gateway) maybeRunDeeplinkLogin(ctx context.Context, bi *botInstance, tg
 		return false
 	}
 
-	approved, message, err := g.deps.BotOnboarding.CompleteDeeplinkLogin(ctx, token, tgUserID)
+	approved, message, err := g.deps.DeeplinkLogin.CompleteDeeplinkLogin(ctx, token, tgUserID)
 	if err != nil {
 		g.logger.Warn("gateway: CompleteDeeplinkLogin failed",
 			"bot_id", bi.id.String(), "tg_user", tgUserID, "error", err)

@@ -223,6 +223,10 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			continue
 		}
 
+		if !s.executionAllowed(ctx, task) {
+			continue
+		}
+
 		s.taskWg.Add(1)
 		go s.runTask(ctx, task, handler, dispatchTag)
 	}
@@ -308,6 +312,12 @@ func (s *Scheduler) Wait() {
 // recurring tasks return false. The lease + concurrency slot are owned by
 // runTask, not here.
 func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, handler core.AgentHandler, dispatchTag string) (again bool) {
+	// Recheck at the actual execution boundary as well as at scheduler pickup:
+	// a host policy can change after dispatch or between back-to-back steps.
+	if !s.executionAllowed(ctx, task) {
+		return false
+	}
+
 	// Tenant-attribute every write this iteration does. The task row
 	// carries its own soul_id (denormalised in Phase A); thread it
 	// through ctx so the handler, its tools, and the per-call DB ctxes
@@ -678,6 +688,27 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		// immediately (back-to-back); recurring waits for the next tick.
 		return task.Schedule == nil
 	}
+}
+
+func (s *Scheduler) executionAllowed(ctx context.Context, task core.AgentTask) bool {
+	if s.deps.AuthorizeExecution == nil {
+		return true
+	}
+	decision, err := s.deps.AuthorizeExecution(ctx, core.ExecutionRequest{
+		UserID: task.UserID, SoulID: task.SoulID,
+		Kind: core.ExecutionBackground, Transport: "agent_task",
+	})
+	if err != nil {
+		s.logger.WarnContext(ctx, "agent-tasks: execution authorization failed",
+			"task_id", task.ID, "user_id", task.UserID, "error", err)
+		return false
+	}
+	if !decision.Allowed {
+		s.logger.DebugContext(ctx, "agent-tasks: execution denied",
+			"task_id", task.ID, "user_id", task.UserID, "reason", decision.Reason)
+		return false
+	}
+	return true
 }
 
 // resolveHandler picks the right executor for a task, preferring the

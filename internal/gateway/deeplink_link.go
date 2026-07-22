@@ -5,8 +5,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-
-	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // Deep-link "Connect Telegram" account-linking flow. The cabinet's Settings
@@ -37,8 +35,7 @@ const linkPayloadPrefix = "link_"
 // caller continues down the normal onboarding / cortex routing.
 //
 // The detection mirrors maybeRunDeeplinkLogin:
-//   - the host's BotOnboarding hook must additionally implement DeeplinkLinker
-//     (an optional extension), otherwise we can't link anything;
+//   - the host must supply the independent DeeplinkLink hook;
 //   - only platform-kind bots act on these links — a user-owned bot has no
 //     business re-homing a chat onto someone's account;
 //   - only the exact "/start link_<…>" pattern matches; bare "/start" still
@@ -49,11 +46,7 @@ const linkPayloadPrefix = "link_"
 // account) it returns an explanatory line and a nil error. Infrastructure
 // errors are logged and reported as a generic "try again" line.
 func (g *Gateway) maybeRunDeeplinkLink(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, text string) bool {
-	if g.deps.BotOnboarding == nil || bi == nil || bi.id == uuid.Nil {
-		return false
-	}
-	linker, ok := g.deps.BotOnboarding.(bs.DeeplinkLinker)
-	if !ok {
+	if g.deps.DeeplinkLink == nil || bi == nil || bi.id == uuid.Nil {
 		return false
 	}
 	// Only the platform bot is meant to receive link approvals; a
@@ -74,7 +67,7 @@ func (g *Gateway) maybeRunDeeplinkLink(ctx context.Context, bi *botInstance, tgC
 		return false
 	}
 
-	message, err := linker.CompleteDeeplinkLink(ctx, token, bi.id, tgUserID, tgChatID)
+	message, err := g.deps.DeeplinkLink.CompleteDeeplinkLink(ctx, token, bi.id, tgUserID, tgChatID)
 	if err != nil {
 		g.logger.Warn("gateway: CompleteDeeplinkLink failed",
 			"bot_id", bi.id.String(), "tg_user", tgUserID, "error", err)

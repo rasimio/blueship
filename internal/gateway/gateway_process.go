@@ -46,6 +46,13 @@ func (g *Gateway) ProcessInbound(ctx context.Context, chatID string, messages []
 	if err != nil {
 		return fmt.Errorf("resolve user: %w", err)
 	}
+	decision, err := g.authorizeExecution(ctx, us.UserID, us.SoulID, bs.ExecutionInteractive, "legacy")
+	if err != nil {
+		return err
+	}
+	if !decision.Allowed {
+		return bs.ErrExecutionDenied
+	}
 	// Soul is resolved + stashed on us inside getOrInitUser; processMessages
 	// re-attaches it to ctx. Nothing to do here.
 
@@ -98,6 +105,13 @@ func (g *Gateway) ProcessInbound(ctx context.Context, chatID string, messages []
 // Audio in InboundMessage is transcribed via Whisper before dispatch;
 // text-only callers (httpchat) are unaffected — empty Audio = no-op.
 func (g *Gateway) ProcessInboundForUser(ctx context.Context, userID, soulID uuid.UUID, transport string, messages []bs.InboundMessage, sink bs.ResponseSink) error {
+	decision, err := g.authorizeExecution(ctx, userID, soulID, bs.ExecutionInteractive, transport)
+	if err != nil {
+		return err
+	}
+	if !decision.Allowed {
+		return bs.ErrExecutionDenied
+	}
 	us, err := g.getOrInitPlatformUser(ctx, userID, soulID, transport)
 	if err != nil {
 		return fmt.Errorf("init platform user: %w", err)

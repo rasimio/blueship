@@ -103,6 +103,12 @@ type GatewayConfig struct {
 	// turn. Nil falls back to the legacy replyUnpaired greeting.
 	BotOnboarding BotOnboarding `yaml:"-" json:"-"`
 
+	// DeeplinkLogin and DeeplinkLink are Telegram auth/account-linking hooks.
+	// They are separate from BotOnboarding so a paid host can disable chat-side
+	// account creation while preserving browser login and existing-account link.
+	DeeplinkLogin DeeplinkLoginApprover `yaml:"-" json:"-"`
+	DeeplinkLink  DeeplinkLinker        `yaml:"-" json:"-"`
+
 	// Onboarding holds the chat-native onboarding UI copy. Generic English
 	// defaults are filled by ApplyDefaults; a host overrides to brand it.
 	Onboarding OnboardingMessages `yaml:"-" json:"-"`

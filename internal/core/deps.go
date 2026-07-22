@@ -149,6 +149,12 @@ type Deps struct {
 	// replyUnpaired (platform greet / user-bot silence). Mirrors the
 	// Config.Gateway field; ship.go copies it across at InitDeps time.
 	BotOnboarding BotOnboarding
+	DeeplinkLogin DeeplinkLoginApprover
+	DeeplinkLink  DeeplinkLinker
+
+	// AuthorizeExecution mirrors Config.AuthorizeExecution. Gateway and
+	// scheduler call it at execution boundaries, including cached users.
+	AuthorizeExecution ExecutionAuthorizer
 
 	pool *dbPool
 }
@@ -189,6 +195,9 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		SendToUser:                  d.SendToUser,
 		SendToUserAttachment:        d.SendToUserAttachment,
 		BotOnboarding:               d.BotOnboarding,
+		DeeplinkLogin:               d.DeeplinkLogin,
+		DeeplinkLink:                d.DeeplinkLink,
+		AuthorizeExecution:          d.AuthorizeExecution,
 		pool:                        d.pool,
 	}
 }
@@ -351,12 +360,13 @@ func InitDeps(cfg *Config, logger *slog.Logger) (*Deps, error) {
 	}
 
 	return &Deps{
-		Config:   cfg,
-		Logger:   logger,
-		Redis:    rdb,
-		Embedder: cfg.Embedder,
-		LLM:      cfg.LLM,
-		Sender:   cfg.Sender,
+		Config:             cfg,
+		Logger:             logger,
+		Redis:              rdb,
+		Embedder:           cfg.Embedder,
+		LLM:                cfg.LLM,
+		Sender:             cfg.Sender,
+		AuthorizeExecution: cfg.AuthorizeExecution,
 		pool: &dbPool{
 			dbs:     make(map[string]*sqlx.DB),
 			dsn:     cfg.DB,
