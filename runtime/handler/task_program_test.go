@@ -729,18 +729,23 @@ func TestBackgroundRunTaskProgramUsesSelectedDecisionTools(t *testing.T) {
 	}
 }
 
-func TestBackgroundTaskProgramDoesNotEmitUntrackedDeliveryNotification(t *testing.T) {
+func TestBackgroundTaskProgramDeliveryAckFallbackAndFailClosedCases(t *testing.T) {
 	tests := []struct {
 		name          string
 		reply         string
 		maxIterations int
+		itemCount     int
 		wantErr       string
 		wantDone      bool
+		wantNotify    string
+		wantPending   int
 	}{
 		{
-			name:    "missing ack",
-			reply:   "[DONE] Standup starts in ten minutes.",
-			wantErr: "requires a valid [delivered_items:...] acknowledgment",
+			name:        "sole missing ack auto-acks",
+			reply:       "[DONE] Standup starts in ten minutes.",
+			wantDone:    true,
+			wantNotify:  "Standup starts in ten minutes.",
+			wantPending: 1,
 		},
 		{
 			name:    "unknown token",
@@ -748,9 +753,30 @@ func TestBackgroundTaskProgramDoesNotEmitUntrackedDeliveryNotification(t *testin
 			wantErr: "requires a valid [delivered_items:...] acknowledgment",
 		},
 		{
+			name:    "empty explicit ack",
+			reply:   "[DONE] Standup starts in ten minutes.\n[delivered_items:]",
+			wantErr: "requires a valid [delivered_items:...] acknowledgment",
+		},
+		{
+			name:    "malformed unclosed ack",
+			reply:   "[DONE] Standup starts in ten minutes.\n[delivered_items:broken",
+			wantErr: "requires a valid [delivered_items:...] acknowledgment",
+		},
+		{
+			name:    "duplicate ack lines",
+			reply:   "[DONE] Standup starts in ten minutes.\n[delivered_items:none]\n[delivered_items:none]",
+			wantErr: "requires a valid [delivered_items:...] acknowledgment",
+		},
+		{
 			name:    "explicit none with message",
 			reply:   "[DONE] Standup starts in ten minutes.\n[delivered_items:none]",
 			wantErr: "must acknowledge at least one represented item",
+		},
+		{
+			name:      "multiple refs missing ack",
+			reply:     "[DONE] Two events are soon.",
+			itemCount: 2,
+			wantErr:   "requires a valid [delivered_items:...] acknowledgment",
 		},
 		{
 			name:     "no-op needs no ack",
@@ -772,7 +798,18 @@ func TestBackgroundTaskProgramDoesNotEmitUntrackedDeliveryNotification(t *testin
 			deps, _ := backgroundTestDeps(provider, map[string]string{})
 			deps.Deliveries = &fakeTaskDeliveryLedger{}
 			deps.Registry.Register("calendar_upcoming", "", json.RawMessage(`{}`), func(context.Context, json.RawMessage) (any, error) {
-				return []any{map[string]any{"item_key": "event:standup", "title": "Standup"}}, nil
+				itemCount := test.itemCount
+				if itemCount == 0 {
+					itemCount = 1
+				}
+				items := make([]any, 0, itemCount)
+				for i := 1; i <= itemCount; i++ {
+					items = append(items, map[string]any{
+						"item_key": fmt.Sprintf("event:%d", i),
+						"title":    fmt.Sprintf("Event %d", i),
+					})
+				}
+				return items, nil
 			})
 			program := selectedProgram(
 				[]core.TaskProgramInput{programInput("calendar", "calendar_upcoming", `{}`, core.TaskProgramOnErrorFail)},
@@ -806,8 +843,15 @@ func TestBackgroundTaskProgramDoesNotEmitUntrackedDeliveryNotification(t *testin
 				}
 				return
 			}
-			if err != nil || result.Done != test.wantDone || result.Notify != "" || len(result.PendingDeliveries) != 0 {
-				t.Fatalf("safe no-op result=%#v err=%v", result, err)
+			if err != nil || result.Done != test.wantDone || result.Notify != test.wantNotify || len(result.PendingDeliveries) != test.wantPending {
+				t.Fatalf("result=%#v err=%v, want done=%t notify=%q pending=%d",
+					result, err, test.wantDone, test.wantNotify, test.wantPending)
+			}
+			if test.wantPending == 1 {
+				wantRef := core.TaskDeliveryRef{InputID: "calendar", ItemKey: "event:1"}
+				if result.PendingDeliveries[0] != wantRef {
+					t.Fatalf("PendingDeliveries[0] = %#v, want %#v", result.PendingDeliveries[0], wantRef)
+				}
 			}
 		})
 	}

@@ -25,6 +25,7 @@ var scratchpadRE = regexp.MustCompile(`(?is)<scratchpad>.*?</scratchpad>`)
 var backgroundStatusTailRE = regexp.MustCompile(`(?i)^\s*(готово[,.! ]*(напомнила|отметила|записала|сделала|проверила|обновила)?\.?|done[,.! ]*(reminded|noted|saved|updated|checked|sent)?\.?|reminded\.?|noted\.?)\s*$`)
 
 var taskProgramDeliveryAckRE = regexp.MustCompile(`(?m)\n?\[delivered_items:\s*([^\]\r\n]*)\]\s*$`)
+var taskProgramDeliveryAckAttemptRE = regexp.MustCompile(`(?i)\[\s*delivered_items\s*:`)
 
 const maxTaskProgramDeliveryNotificationRunes = 3500
 
@@ -824,6 +825,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	if strings.Contains(reply, "[DONE]") || isLast {
 		hadNotifyMarker := strings.Contains(reply, "[NOTIFY]")
 		deliveryAckValid := len(programDeliveryRefs) == 0
+		deliveryAckAttempted := taskProgramDeliveryAckAttemptRE.MatchString(reply)
 		clean := strings.ReplaceAll(reply, "[DONE]", "")
 		clean = strings.ReplaceAll(clean, "[CONTINUE]", "")
 		clean = strings.ReplaceAll(clean, "[PAUSE]", "")
@@ -851,6 +853,16 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		// Filter no-op and garbage output (e.g. raw UUIDs from tool results).
 		if clean == "" || strings.Contains(clean, "[no-op]") || isGarbageOutput(clean) {
 			return core.IterationResult{Done: true, ToolCallsJSON: toolCallsJSON}, nil
+		}
+		if len(programDeliveryRefs) == 1 && !deliveryAckValid && !deliveryAckAttempted {
+			// Narrow compatibility fallback: with exactly one possible delivery,
+			// a normal non-empty reminder is unambiguous even when the model
+			// omitted the control line entirely. Any explicit control-line attempt
+			// remains fail-closed and never reaches this branch.
+			for _, ref := range programDeliveryRefs {
+				pendingDeliveries = []core.TaskDeliveryRef{ref}
+			}
+			deliveryAckValid = true
 		}
 		if len(programDeliveryRefs) > 0 {
 			if !deliveryAckValid {
