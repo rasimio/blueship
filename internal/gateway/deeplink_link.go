@@ -10,8 +10,8 @@ import (
 // Deep-link "Connect Telegram" account-linking flow. The cabinet's Settings
 // page has a "Connect this Telegram" button that calls
 // POST /api/telegram/link/start; the host mints a token bound to the
-// signed-in user's existing soul and returns
-// https://t.me/<platform_bot>?start=link_<TOKEN>. Telegram delivers that as a
+// signed-in user's existing soul and returns a deep link to either the
+// platform bot or that user's own configured bot. Telegram delivers it as a
 // normal text message "/start link_<TOKEN>". We intercept that exact shape
 // here — before the FSM-based onboarding path — and hand the token to the
 // host's CompleteDeeplinkLink hook, which writes the chat→soul routing row so
@@ -30,31 +30,26 @@ import (
 const linkPayloadPrefix = "link_"
 
 // maybeRunDeeplinkLink intercepts inbound text matching "/start link_<TOKEN>"
-// addressed to the platform bot and runs the host's CompleteDeeplinkLink hook.
+// addressed to a configured bot and runs the host's CompleteDeeplinkLink hook.
 // Returns true when handled (caller must stop processing); false means the
 // caller continues down the normal onboarding / cortex routing.
 //
 // The detection mirrors maybeRunDeeplinkLogin:
 //   - the host must supply the independent DeeplinkLink hook;
-//   - only platform-kind bots act on these links — a user-owned bot has no
-//     business re-homing a chat onto someone's account;
+//   - bot ownership is authorized by the host hook, which owns the tenant and
+//     token data needed to decide whether this receiving bot is valid;
 //   - only the exact "/start link_<…>" pattern matches; bare "/start" still
 //     falls through to onboarding.
 //
 // On success the host returns a confirmation line naming the soul; on a benign
 // failure (expired token, or the Telegram id already belongs to another
-// account) it returns an explanatory line and a nil error. Infrastructure
-// errors are logged and reported as a generic "try again" line.
+// account, or the link arriving through a bot the host does not authorize) it
+// returns an explanatory line and a nil error. Infrastructure errors are
+// logged and reported as a generic "try again" line.
 func (g *Gateway) maybeRunDeeplinkLink(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, text string) bool {
 	if g.deps.DeeplinkLink == nil || bi == nil || bi.id == uuid.Nil {
 		return false
 	}
-	// Only the platform bot is meant to receive link approvals; a
-	// user-owned bot could otherwise re-home arbitrary chats.
-	if bi.kind != "" && bi.kind != "platform" {
-		return false
-	}
-
 	cmd, args, forUs := parseStartCommandArgs(g, bi, text)
 	if !forUs || cmd != "/start" {
 		return false

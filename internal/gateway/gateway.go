@@ -771,7 +771,8 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	}
 
 	// Deep-link "Connect Telegram" account-linking. The cabinet's Settings
-	// button points at https://t.me/<bot>?start=link_<TOKEN>; we bind this
+	// button points at https://t.me/<bot>?start=link_<TOKEN>; the host first
+	// authorizes that receiving platform/user bot, then binds this
 	// chat to the signed-in user's EXISTING soul via the host's
 	// CompleteDeeplinkLink hook and STOP. Must run before maybeRunBotOnboarding
 	// for the same reason as login_ above: the FSM would otherwise treat the

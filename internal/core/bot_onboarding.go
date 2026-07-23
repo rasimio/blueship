@@ -110,14 +110,17 @@ type DeeplinkLoginApprover interface {
 type DeeplinkLinker interface {
 	// CompleteDeeplinkLink consumes a link token minted by the cabinet's
 	// "Connect Telegram" endpoint and binds this Telegram chat to the
-	// initiating user's existing soul. botID is the platform bot that
-	// received /start link_<token>; tgUserID/tgChatID identify the chat.
+	// initiating user's existing soul. botID is the configured platform or
+	// user-owned bot that received /start link_<token>; the host must authorize
+	// that bot against the token's initiating user before consuming the token.
+	// tgUserID/tgChatID identify the chat.
 	//
 	// Returns the message the gateway should reply with. A nil error with
 	// a non-empty message is the normal path for BOTH success and benign
-	// failure (token expired, or the Telegram id already belongs to a
-	// different account); a non-nil error is reserved for infrastructure
-	// faults and surfaces to the user as a generic "try again" line.
+	// failure (token expired, receiving bot rejected, or the Telegram id
+	// already belongs to a different account); a non-nil error is reserved
+	// for infrastructure faults and surfaces to the user as a generic "try
+	// again" line.
 	CompleteDeeplinkLink(ctx context.Context, token string, botID uuid.UUID, tgUserID, tgChatID int64) (message string, err error)
 }
 
