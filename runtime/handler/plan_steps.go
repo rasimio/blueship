@@ -231,10 +231,12 @@ func (e *StructuredGoalExecutor) execDecideStep(ctx context.Context, task core.A
 
 	systemPrompt := decideSystem
 
+	contextWindow := 0
 	messageBudget := 0
 	messageBudgetSource := ""
 	if deps.ModelStore != nil {
 		ref := deps.ModelStore.Get(modelRole)
+		contextWindow = ref.ContextWindow
 		if ref.MessageBudget > 0 {
 			decision := core.ResolveMessageBudget(core.MessageBudgetRequest{
 				Role:     modelRole,
@@ -251,6 +253,7 @@ func (e *StructuredGoalExecutor) execDecideStep(ctx context.Context, task core.A
 		SystemPrompt:        systemPrompt,
 		Model:               model,
 		MaxTokens:           256,
+		ContextWindow:       contextWindow,
 		MessageBudget:       messageBudget,
 		MessageBudgetSource: messageBudgetSource,
 		MaxTurns:            1,

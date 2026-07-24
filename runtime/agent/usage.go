@@ -29,6 +29,10 @@ func (a *Loop) recordLLMUsage(
 		return
 	}
 	provider, modelName := splitProviderModel(model)
+	maxContext := a.cfg.Limits.MaxContext
+	if cfg.ContextWindow > 0 {
+		maxContext = cfg.ContextWindow
+	}
 	record := bs.LLMUsageRecord{
 		SessionID:                   cfg.SessionID,
 		Role:                        cfg.Role,
@@ -51,7 +55,7 @@ func (a *Loop) recordLLMUsage(
 		InjectedContextTokens:       estimateTextTokens(injectedContext),
 		MessageBudget:               tokenBudget,
 		MessageBudgetSource:         tokenBudgetSource,
-		MaxContext:                  a.cfg.Limits.MaxContext,
+		MaxContext:                  maxContext,
 		DeepContext:                 false,
 		LatencyMS:                   int(time.Since(started).Milliseconds()),
 	}

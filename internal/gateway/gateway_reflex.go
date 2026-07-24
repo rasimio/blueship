@@ -899,6 +899,7 @@ func (g *Gateway) runInteraction(
 	if g.deps.ModelStore != nil {
 		ref := g.deps.ModelStore.Get("reflex")
 		reflexCfg.MaxTokens = ref.MaxTokens
+		reflexCfg.ContextWindow = ref.ContextWindow
 		if ref.MessageBudget > 0 {
 			decision := bs.ResolveMessageBudget(bs.MessageBudgetRequest{
 				Role:     "reflex",

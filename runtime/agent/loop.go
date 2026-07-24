@@ -182,6 +182,7 @@ func (a *Loop) effectiveMessageBudget(cfg RunConfig, systemPrompt string, tools 
 		ExplicitBudget: cfg.MessageBudget,
 		ExplicitSource: cfg.MessageBudgetSource,
 		Config:         a.cfg,
+		ContextWindow:  cfg.ContextWindow,
 		SystemPrompt:   systemPrompt,
 		Tools:          tools,
 	})

@@ -461,6 +461,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	routerModel := deps.Config.Models.Primary.ForRouter()
 	displayModel := deps.Config.Models.Primary.Name
 	roleMaxTokens := deps.Config.Limits.MaxOutputTokens
+	roleContextWindow := 0
 	roleMessageBudget := 0
 	roleMessageBudgetSource := ""
 	roleThinkingBudget := 0
@@ -474,6 +475,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			if ref.MaxTokens > 0 {
 				roleMaxTokens = ref.MaxTokens
 			}
+			roleContextWindow = ref.ContextWindow
 			if ref.MessageBudget > 0 {
 				decision := core.ResolveMessageBudget(core.MessageBudgetRequest{
 					Role:     modelRole,
@@ -738,6 +740,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		InjectedContext:     injectedCtx,
 		Model:               routerModel,
 		MaxTokens:           roleMaxTokens,
+		ContextWindow:       roleContextWindow,
 		MessageBudget:       roleMessageBudget,
 		MessageBudgetSource: roleMessageBudgetSource,
 		ThinkingBudget:      roleThinkingBudget,

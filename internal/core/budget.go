@@ -10,6 +10,7 @@ type MessageBudgetRequest struct {
 	ExplicitSource string
 	ModelRef       ModelRef
 	Config         *Config
+	ContextWindow  int
 	SystemPrompt   string
 	Tools          []ToolDefinition
 }
@@ -46,8 +47,8 @@ func ResolveMessageBudget(req MessageBudgetRequest) MessageBudgetDecision {
 }
 
 func calculatedMessageBudget(req MessageBudgetRequest) int {
-	maxContext := 0
-	if req.Config != nil {
+	maxContext := req.ContextWindow
+	if maxContext <= 0 && req.Config != nil {
 		maxContext = req.Config.Limits.MaxContext
 	}
 	if maxContext <= 0 {

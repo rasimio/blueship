@@ -23,6 +23,28 @@ type capturingProvider struct {
 	respond   func(core.CompletionRequest) (*core.CompletionResponse, error)
 }
 
+type contextWindowModelStore struct {
+	refs map[string]core.ModelRef
+}
+
+func (s contextWindowModelStore) Load(context.Context) error { return nil }
+
+func (s contextWindowModelStore) Get(role string) core.ModelRef {
+	return s.refs[role]
+}
+
+func (s contextWindowModelStore) ForRouter(role string) string {
+	return s.refs[role].ForRouter()
+}
+
+func (s contextWindowModelStore) Update(context.Context, string, string, string) error {
+	return nil
+}
+
+func (s contextWindowModelStore) Roles() []string { return nil }
+
+func (s contextWindowModelStore) Refresh(context.Context) error { return nil }
+
 func (p *capturingProvider) Complete(_ context.Context, req core.CompletionRequest) (*core.CompletionResponse, error) {
 	p.requests = append(p.requests, req)
 	if p.respond != nil {
@@ -210,6 +232,38 @@ func TestBackgroundRunIncludePersonaLeadsPromptKeys(t *testing.T) {
 	}
 	if strings.Contains(system, "PLATFORM-PREAMBLE") || strings.Contains(system, "PLATFORM-AGENTS") {
 		t.Fatalf("platform preamble/agents must stay excluded with include_persona:\n%s", system)
+	}
+}
+
+func TestBackgroundRunUsesRoleContextWindow(t *testing.T) {
+	provider := &capturingProvider{}
+	deps, _ := backgroundTestDeps(provider, nil)
+	deps.ModelStore = contextWindowModelStore{refs: map[string]core.ModelRef{
+		"background": {
+			Provider:      "ollama",
+			Name:          "gemma4:26b",
+			ContextWindow: 32768,
+		},
+	}}
+
+	task := core.AgentTask{
+		ID:            uuid.New(),
+		SoulID:        uuid.New(),
+		UserID:        uuid.New(),
+		Title:         "context-window check",
+		Strategy:      core.StrategyDirect,
+		Config:        json.RawMessage(`{"prompt":"finish the check","skip_reflex":true}`),
+		MaxIterations: 3,
+	}
+
+	if _, err := NewBackground(time.UTC, nil, nil, nil).Run(context.Background(), task, deps); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(provider.requests) == 0 {
+		t.Fatal("no LLM call recorded")
+	}
+	if got := provider.requests[0].ContextWindow; got != 32768 {
+		t.Fatalf("completion context window = %d, want role context window 32768", got)
 	}
 }
 
