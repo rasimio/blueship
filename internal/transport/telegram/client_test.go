@@ -111,6 +111,88 @@ func TestSendRichMessageMakesOneRequestForEveryProviderOutcome(t *testing.T) {
 	}
 }
 
+func TestSendDocumentMarksUTF8TextForTelegramPreview(t *testing.T) {
+	tests := []struct {
+		name        string
+		filename    string
+		mime        string
+		data        []byte
+		wantMIME    string
+		wantPayload []byte
+	}{
+		{
+			name:        "cyrillic markdown gets charset and bom",
+			filename:    "report.md",
+			mime:        "text/markdown",
+			data:        []byte("# Моя текущая карта"),
+			wantMIME:    "text/markdown; charset=utf-8",
+			wantPayload: append([]byte{0xEF, 0xBB, 0xBF}, []byte("# Моя текущая карта")...),
+		},
+		{
+			name:        "existing bom is not duplicated",
+			filename:    "notes.txt",
+			mime:        "text/plain; charset=utf-8",
+			data:        append([]byte{0xEF, 0xBB, 0xBF}, []byte("Привет")...),
+			wantMIME:    "text/plain; charset=utf-8",
+			wantPayload: append([]byte{0xEF, 0xBB, 0xBF}, []byte("Привет")...),
+		},
+		{
+			name:        "binary document is unchanged",
+			filename:    "archive.bin",
+			mime:        "application/octet-stream",
+			data:        []byte{0x00, 0xFF, 0x10},
+			wantMIME:    "application/octet-stream",
+			wantPayload: []byte{0x00, 0xFF, 0x10},
+		},
+		{
+			name:        "utf8 source file stays byte exact",
+			filename:    "script.sh",
+			mime:        "text/plain",
+			data:        []byte("#!/bin/sh\nprintf 'Привет\\n'\n"),
+			wantMIME:    "text/plain; charset=utf-8",
+			wantPayload: []byte("#!/bin/sh\nprintf 'Привет\\n'\n"),
+		},
+		{
+			name:        "invalid utf8 text stays unchanged",
+			filename:    "raw.txt",
+			mime:        "text/plain",
+			data:        []byte{0xFF, 0xFE, 0x00},
+			wantMIME:    "text/plain",
+			wantPayload: []byte{0xFF, 0xFE, 0x00},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testClient(func(req *http.Request) (*http.Response, error) {
+				if err := req.ParseMultipartForm(1 << 20); err != nil {
+					t.Fatalf("ParseMultipartForm: %v", err)
+				}
+				file, header, err := req.FormFile("document")
+				if err != nil {
+					t.Fatalf("FormFile: %v", err)
+				}
+				defer file.Close()
+				got, err := io.ReadAll(file)
+				if err != nil {
+					t.Fatalf("ReadAll: %v", err)
+				}
+				if gotMIME := header.Header.Get("Content-Type"); gotMIME != tt.wantMIME {
+					t.Fatalf("Content-Type = %q, want %q", gotMIME, tt.wantMIME)
+				}
+				if !bytes.Equal(got, tt.wantPayload) {
+					t.Fatalf("payload = % X, want % X", got, tt.wantPayload)
+				}
+				return jsonResponse(http.StatusOK, `{"ok":true}`), nil
+			})
+
+			if err := c.SendDocument(context.Background(), "42", tt.filename, tt.mime, tt.data); err != nil {
+				t.Fatalf("SendDocument: %v", err)
+			}
+		})
+	}
+}
+
 func TestSplitMessageUsesRunesAndPreservesText(t *testing.T) {
 	input := strings.Repeat("я", 9000)
 	chunks := splitMessage(input, maxTelegramMessageLength)

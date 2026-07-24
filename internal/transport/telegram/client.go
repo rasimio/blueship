@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Client sends messages via the Telegram Bot API.
@@ -419,7 +422,49 @@ func (c *Client) SendVoice(ctx context.Context, chatID string, audio []byte) err
 // sniffs from the bytes — but setting it correctly lets the
 // recipient client pick the right preview affordance.
 func (c *Client) SendDocument(ctx context.Context, chatID string, filename, mime string, data []byte) error {
+	mime, data = prepareTextDocument(filename, mime, data)
 	return c.sendFile(ctx, chatID, "sendDocument", "document", filename, mime, data, nil)
+}
+
+var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
+
+// prepareTextDocument makes Telegram/iOS document previews decode textual
+// attachments as UTF-8. Telegram preserves the multipart MIME type, but some
+// clients still guess a legacy code page for .md/.txt files without a BOM,
+// turning Cyrillic into mojibake such as "РњРѕ...".
+//
+// Apply this only at the Telegram delivery boundary: stored attachment bytes
+// stay clean UTF-8 for editing, hashing, and other transports. Binary documents
+// and invalid UTF-8 text are left byte-for-byte unchanged.
+func prepareTextDocument(filename, contentType string, data []byte) (string, []byte) {
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.HasPrefix(strings.ToLower(mediaType), "text/") || !utf8.Valid(data) {
+		return contentType, data
+	}
+	if params == nil {
+		params = map[string]string{}
+	}
+	params["charset"] = "utf-8"
+	contentType = mime.FormatMediaType(mediaType, params)
+	if bytes.HasPrefix(data, utf8BOM) || !telegramPreviewNeedsBOM(filename, mediaType) {
+		return contentType, data
+	}
+	out := make([]byte, 0, len(utf8BOM)+len(data))
+	out = append(out, utf8BOM...)
+	out = append(out, data...)
+	return contentType, out
+}
+
+func telegramPreviewNeedsBOM(filename, mediaType string) bool {
+	if strings.EqualFold(mediaType, "text/markdown") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(filename)) {
+	case ".md", ".markdown", ".txt", ".csv", ".log":
+		return true
+	default:
+		return false
+	}
 }
 
 // SendPhoto sends an image as a Telegram photo — gets the inline
