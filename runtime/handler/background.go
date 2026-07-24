@@ -205,11 +205,28 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		json.Unmarshal(task.Progress, &progress)
 	}
 	gw := deps.Config.Gateway
+	hasAcceptanceGate := task.Schedule == nil &&
+		task.AcceptanceCriteria != nil &&
+		strings.TrimSpace(*task.AcceptanceCriteria) != ""
 	isLast := task.MaxIterations > 0 && task.Iteration+1 >= task.MaxIterations
+	// Only the default multi-phase background pipeline knows how to use the
+	// host's synthesis/repair prompts. Custom prompts, input modes, and typed
+	// programs own their own phase semantics and must not be force-completed
+	// one iteration early.
+	reserveAcceptanceRepair := hasAcceptanceGate &&
+		instructionKey == "background-task" &&
+		inputMode == "prompt_key" &&
+		!hasTaskProgram &&
+		task.MaxIterations >= 4
+	// Acceptance-gated one-shots submit their first synthesis one iteration
+	// before the hard cap. If the gate rejects it, the final iteration can make
+	// a targeted repair from the preserved session + reviewer feedback.
+	isSynthesisDeadline := isLast ||
+		(reserveAcceptanceRepair && task.Iteration+2 >= task.MaxIterations)
 
 	// planActive: a multi-iteration research-style task (default background-task
-	// flow, ≥4 iterations so plan + ≥2 exec + synthesis fits) with the skill
-	// hooks wired. Below that we keep the flat phase flow (no plan theatre).
+	// flow, ≥4 iterations so plan + execution + finalization fits) with the
+	// skill hooks wired. Below that we keep the flat phase flow (no plan theatre).
 	planActive := instructionKey == "background-task" && inputMode == "prompt_key" &&
 		task.MaxIterations >= 4 && gw.ResolveSkillCatalog != nil && gw.ResolveSkills != nil &&
 		// Fallback: if planning (iter 0) didn't yield a usable plan, don't
@@ -549,7 +566,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 				if cat, cerr := gw.ResolveSkillCatalog(ctx); cerr == nil {
 					planBlock = "\n\n" + formatSkillCatalog(cat)
 				}
-			case planStep != nil && !isLast:
+			case planStep != nil && !isSynthesisDeadline:
 				// Execution: the current step (its role body is already in the
 				// system prompt) plus the whole plan for context.
 				phaseKey = "background-step"
@@ -567,7 +584,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			phaseKey := "background-execution"
 			if isFirst {
 				phaseKey = "background-planning"
-			} else if isLast {
+			} else if isSynthesisDeadline {
 				phaseKey = "background-synthesis"
 			}
 			phasePrompt, _ := deps.Prompts.Get(ctx, phaseKey)
@@ -754,7 +771,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 						"task_id", task.ID, "steps", len(p.Steps))
 				}
 			}
-		} else if planStep != nil {
+		} else if planStep != nil && !isSynthesisDeadline {
 			summary := extractResultLine(reply)
 			// S2-b: the executor may propose plan edits via PLAN_PATCH_JSON.
 			// Mark the step that just ran done, then validate+apply the patch
@@ -765,7 +782,11 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 					summary = patch.ResultSummary
 				}
 				progress.Plan.completeStep(planStep.ID, summary)
-				remaining := task.MaxIterations - (task.Iteration + 2) // reserve synthesis
+				finalizationReserve := 1
+				if reserveAcceptanceRepair {
+					finalizationReserve = 2 // synthesis + one acceptance repair
+				}
+				remaining := task.MaxIterations - (task.Iteration + 1) - finalizationReserve
 				if remaining < 0 {
 					remaining = 0
 				}
@@ -822,7 +843,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	}
 
 	// 11. Check for [DONE].
-	if strings.Contains(reply, "[DONE]") || isLast {
+	if strings.Contains(reply, "[DONE]") || isSynthesisDeadline {
 		hadNotifyMarker := strings.Contains(reply, "[NOTIFY]")
 		deliveryAckValid := len(programDeliveryRefs) == 0
 		deliveryAckAttempted := taskProgramDeliveryAckAttemptRE.MatchString(reply)
@@ -847,12 +868,11 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		clean = stripBackgroundStatusTails(clean)
 		clean = strings.TrimSpace(clean)
 
-		// Archive session (one-shot, no reuse after task completion).
-		deps.Store.ArchiveSession(ctx, sessID)
+		progressJSON, _ := json.Marshal(progress)
 
 		// Filter no-op and garbage output (e.g. raw UUIDs from tool results).
 		if clean == "" || strings.Contains(clean, "[no-op]") || isGarbageOutput(clean) {
-			return core.IterationResult{Done: true, ToolCallsJSON: toolCallsJSON}, nil
+			return core.IterationResult{Done: true, Progress: progressJSON, ToolCallsJSON: toolCallsJSON}, nil
 		}
 		if len(programDeliveryRefs) == 1 && !deliveryAckValid && !deliveryAckAttempted {
 			// Narrow compatibility fallback: with exactly one possible delivery,
@@ -913,6 +933,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		}
 		return core.IterationResult{
 			Done:          true,
+			Progress:      progressJSON,
 			Output:        clean,
 			Notify:        notify,
 			ToolCallsJSON: toolCallsJSON,

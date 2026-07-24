@@ -619,10 +619,14 @@ func (s *AgentTaskStore) Complete(ctx context.Context, id uuid.UUID, result stri
 // scheduler can alert the owner ONCE per truly-dead task (rather than firing an
 // alert on every retryable per-iteration failure).
 type ExhaustedTask struct {
-	ID     uuid.UUID `db:"id"`
-	Title  string    `db:"title"`
-	UserID uuid.UUID `db:"user_id"`
-	SoulID uuid.UUID `db:"soul_id"`
+	ID                 uuid.UUID `db:"id"`
+	Title              string    `db:"title"`
+	UserID             uuid.UUID `db:"user_id"`
+	SoulID             uuid.UUID `db:"soul_id"`
+	Iteration          int       `db:"iteration"`
+	MaxIterations      int       `db:"max_iterations"`
+	AcceptanceFeedback string    `db:"acceptance_feedback"`
+	SessionID          string    `db:"session_id"`
 	// Output is the best-effort draft salvaged from the last non-empty
 	// iteration — delivered to the owner with a caveat instead of nothing.
 	Output string `db:"output"`
@@ -659,7 +663,10 @@ func (s *AgentTaskStore) CompleteExhausted(ctx context.Context) []ExhaustedTask 
 		  AND t.schedule IS NULL
 		  AND t.max_iterations > 0
 		  AND t.iteration >= t.max_iterations
-		RETURNING id, title, user_id, soul_id, COALESCE(result, '') AS output`); err != nil {
+		RETURNING id, title, user_id, soul_id, iteration, max_iterations,
+		          COALESCE(progress->>'acceptance_feedback', '') AS acceptance_feedback,
+		          COALESCE(progress->>'session_id', '') AS session_id,
+		          COALESCE(result, '') AS output`); err != nil {
 		return nil
 	}
 	return failed

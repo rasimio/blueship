@@ -162,8 +162,13 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	// per-iteration handler error (below) just retries and is logged at WARN,
 	// so transient infra/timeout/quota blips don't page anyone.
 	for _, t := range s.store.CompleteExhausted(ctx) {
-		s.logger.ErrorContext(ctx, "agent-tasks: task failed (exhausted retries)",
-			"task_id", t.ID, "title", t.Title)
+		s.logger.ErrorContext(ctx, "agent-tasks: task failed (iteration budget exhausted without completion)",
+			"task_id", t.ID,
+			"title", t.Title,
+			"iteration", t.Iteration,
+			"max_iterations", t.MaxIterations,
+			"acceptance_feedback", t.AcceptanceFeedback)
+		s.archiveTaskSession(ctx, t.ID, t.SoulID, t.SessionID)
 		// Salvage: rather than leave the owner with nothing, deliver the best
 		// draft with a caveat (a short pointer over the channel; the full
 		// partial report lands as a /artefact page via the Saver hook).
@@ -638,7 +643,8 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		// handler claims done on a non-recurring strategy, ask the LLM
 		// to verify. Recurring jobs (Schedule != nil) always complete on
 		// the handler's word.
-		if task.Schedule == nil && task.AcceptanceCriteria != nil && *task.AcceptanceCriteria != "" {
+		if task.Schedule == nil && task.AcceptanceCriteria != nil &&
+			strings.TrimSpace(*task.AcceptanceCriteria) != "" {
 			verdict := evaluateAcceptance(ctx, agentDeps, task, result.Output, result.ToolCallsJSON)
 			met := verdict.Met
 			iterationAcceptanceMet = &met
@@ -677,7 +683,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 					"recheck_urls", len(recheckURLs))
 				// Encode reason into progress so the next iteration
 				// sees what the reviewer flagged.
-				progressWithReason := injectFeedback(result.Progress, verdict.Reason)
+				progressWithReason := rejectionProgress(task.Progress, result.Progress, verdict.Reason)
 				dbCtx, dbCancel := newDBCtx()
 				defer dbCancel()
 				if err := s.store.UpdateProgressWithRecheck(dbCtx, task.ID, progressWithReason, recheckURLs); err != nil {
@@ -708,7 +714,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 			attribute.Int("agent_task.output_size_bytes", len(result.Output)),
 			attribute.Bool("agent_task.notified", notifyOutcome.Delivered),
 		)
-		if task.AcceptanceCriteria != nil && *task.AcceptanceCriteria != "" {
+		if task.AcceptanceCriteria != nil && strings.TrimSpace(*task.AcceptanceCriteria) != "" {
 			span.SetAttributes(attribute.Bool("agent_task.acceptance_met", true))
 		}
 		s.logger.InfoContext(ctx, "agent-tasks: completed",
@@ -719,10 +725,18 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 			"notified", notifyOutcome.Delivered,
 		)
 		completeCtx, completeCancel := newDBCtx()
-		if err := s.store.Complete(completeCtx, task.ID, result.Output); err != nil {
-			s.logger.ErrorContext(ctx, "agent-tasks: complete update error", "error", err)
+		completeErr := s.store.Complete(completeCtx, task.ID, result.Output)
+		if completeErr != nil {
+			s.logger.ErrorContext(ctx, "agent-tasks: complete update error", "error", completeErr)
 		}
 		completeCancel()
+		if completeErr == nil && task.Schedule == nil {
+			sessionID := sessionIDFromProgress(result.Progress)
+			if sessionID == "" {
+				sessionID = sessionIDFromProgress(task.Progress)
+			}
+			s.archiveTaskSession(ctx, task.ID, task.SoulID, sessionID)
+		}
 		// Recurring tasks: reset for next run.
 		if task.Schedule != nil {
 			resetCtx, resetCancel := newDBCtx()
@@ -1376,4 +1390,34 @@ func extractPeerTaskID(progress []byte) string {
 	}
 	_ = jsonUnmarshal(progress, &p)
 	return p.PeerTaskID
+}
+
+func sessionIDFromProgress(progress []byte) string {
+	if len(progress) == 0 {
+		return ""
+	}
+	var p struct {
+		SessionID string `json:"session_id"`
+	}
+	_ = jsonUnmarshal(progress, &p)
+	return p.SessionID
+}
+
+func (s *Scheduler) archiveTaskSession(
+	logCtx context.Context,
+	taskID, soulID uuid.UUID,
+	sessionID string,
+) {
+	if s.msgStore == nil || sessionID == "" {
+		return
+	}
+	archiveCtx, archiveCancel := context.WithTimeout(
+		core.WithSoulID(context.Background(), soulID),
+		10*time.Second,
+	)
+	defer archiveCancel()
+	if err := s.msgStore.ArchiveSession(archiveCtx, sessionID); err != nil {
+		s.logger.WarnContext(logCtx, "agent-tasks: archive terminal session failed",
+			"task_id", taskID, "session_id", sessionID, "error", err)
+	}
 }

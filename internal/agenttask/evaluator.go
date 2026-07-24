@@ -856,3 +856,18 @@ func injectFeedback(progress json.RawMessage, reason string) json.RawMessage {
 	}
 	return out
 }
+
+// rejectionProgress chooses the handler's latest progress for an acceptance
+// retry, falling back to the task's persisted state when a Done result omitted
+// or returned invalid Progress. Progress is a full replacement snapshot, so a
+// valid object (including {}) must not resurrect fields the handler cleared.
+func rejectionProgress(previous, current json.RawMessage, reason string) json.RawMessage {
+	base := current
+	var object map[string]any
+	if len(strings.TrimSpace(string(base))) == 0 ||
+		json.Unmarshal(base, &object) != nil ||
+		object == nil {
+		base = previous
+	}
+	return injectFeedback(base, reason)
+}

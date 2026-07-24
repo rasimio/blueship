@@ -557,3 +557,40 @@ func TestInjectFeedback(t *testing.T) {
 		})
 	}
 }
+
+func TestRejectionProgressFallsBackToPersistedTaskState(t *testing.T) {
+	previous := json.RawMessage(`{"session_id":"sess-1","phase":"iteration_5","plan":{"steps":[{"id":"step_1"}]}}`)
+	out := rejectionProgress(previous, nil, "missing duration")
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("rejectionProgress returned invalid JSON: %v", err)
+	}
+	if got["session_id"] != "sess-1" || got["phase"] != "iteration_5" {
+		t.Fatalf("persisted progress was lost: %#v", got)
+	}
+	if _, ok := got["plan"]; !ok {
+		t.Fatalf("persisted role plan was lost: %#v", got)
+	}
+	if got["acceptance_feedback"] != "missing duration" {
+		t.Fatalf("acceptance feedback = %#v", got["acceptance_feedback"])
+	}
+
+	out = rejectionProgress(previous, json.RawMessage(`not-json`), "invalid snapshot")
+	got = nil
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("invalid current progress did not fall back: %v", err)
+	}
+	if got["session_id"] != "sess-1" || got["acceptance_feedback"] != "invalid snapshot" {
+		t.Fatalf("invalid current progress lost persisted state: %#v", got)
+	}
+
+	out = rejectionProgress(previous, json.RawMessage(`{}`), "intentional reset")
+	got = nil
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("empty replacement snapshot returned invalid JSON: %v", err)
+	}
+	if _, ok := got["session_id"]; ok {
+		t.Fatalf("valid replacement snapshot resurrected cleared state: %#v", got)
+	}
+}

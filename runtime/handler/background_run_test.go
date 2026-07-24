@@ -43,6 +43,7 @@ func (p *capturingProvider) Complete(_ context.Context, req core.CompletionReque
 // recorded and served back as the dialog window; everything else is a no-op.
 type recordingMessageStore struct {
 	appended []core.Message
+	archived []string
 }
 
 func (s *recordingMessageStore) Append(_ context.Context, _ string, msg core.Message) error {
@@ -83,7 +84,8 @@ func (s *recordingMessageStore) CreateSessionWithSource(context.Context, string,
 	return "sess-test", nil
 }
 
-func (s *recordingMessageStore) ArchiveSession(context.Context, string) error {
+func (s *recordingMessageStore) ArchiveSession(_ context.Context, sessionID string) error {
+	s.archived = append(s.archived, sessionID)
 	return nil
 }
 
@@ -353,5 +355,160 @@ func TestBackgroundRunNoAcceptanceFeedbackBlockWhenAbsent(t *testing.T) {
 	userMsg, _ := store.appended[0].Content.(string)
 	if strings.Contains(userMsg, "[acceptance feedback]") {
 		t.Fatalf("no acceptance feedback block expected without the progress key:\n%s", userMsg)
+	}
+}
+
+func TestBackgroundRunReservesRepairIterationAndPreservesDoneProgress(t *testing.T) {
+	provider := &capturingProvider{responses: []*core.CompletionResponse{{
+		StopReason: "end_turn",
+		Content:    []core.ContentBlock{{Type: "text", Text: "draft report without an explicit done marker"}},
+	}}}
+	deps, store := backgroundTestDeps(provider, map[string]string{
+		"background-task":      "BASE",
+		"background-step":      "STEP-PHASE",
+		"background-synthesis": "SYNTHESIS-PHASE",
+	})
+	deps.Config.Gateway.ResolveSkillCatalog = func(context.Context) ([]core.SkillMeta, error) {
+		return []core.SkillMeta{{Slug: "analyst", Title: "Analyst"}}, nil
+	}
+	deps.Config.Gateway.ResolveSkills = func(context.Context, []string) ([]string, error) {
+		return []string{"ANALYST-ROLE"}, nil
+	}
+
+	criteria := "The final report includes time and question count for every test."
+	task := core.AgentTask{
+		ID:                 uuid.New(),
+		UserID:             uuid.New(),
+		Title:              "research task",
+		Strategy:           core.StrategyDirect,
+		Config:             json.RawMessage(`{"skip_reflex":true}`),
+		Progress:           json.RawMessage(`{"session_id":"sess-existing","phase":"iteration_4","summary":"prior findings","plan":{"plan_rev":1,"current_step_id":"step_005","steps":[{"id":"step_005","goal":"finish evidence","skills":["analyst"],"status":"pending"}]}}`),
+		Iteration:          4, // current run is 5/6: synthesis, leaving 6/6 for repair
+		MaxIterations:      6,
+		AcceptanceCriteria: &criteria,
+	}
+
+	result, err := NewBackground(time.UTC, nil, nil, nil).Run(context.Background(), task, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !result.Done {
+		t.Fatal("penultimate acceptance-gated synthesis must submit even without [DONE]")
+	}
+	if len(store.appended) == 0 {
+		t.Fatal("no user message appended")
+	}
+	userMsg, _ := store.appended[0].Content.(string)
+	if !strings.Contains(userMsg, "SYNTHESIS-PHASE") || strings.Contains(userMsg, "STEP-PHASE") {
+		t.Fatalf("iteration 5/6 must synthesize and reserve 6/6 for repair:\n%s", userMsg)
+	}
+	if len(store.archived) != 0 {
+		t.Fatalf("session archived before acceptance verdict: %v", store.archived)
+	}
+
+	var progress bgProgress
+	if err := json.Unmarshal(result.Progress, &progress); err != nil {
+		t.Fatalf("result progress is not valid JSON: %v\n%s", err, result.Progress)
+	}
+	if progress.SessionID != "sess-existing" {
+		t.Fatalf("session_id = %q, want existing session", progress.SessionID)
+	}
+	if progress.Plan == nil || progress.Plan.CurrentStepID != "step_005" || len(progress.Plan.Steps) != 1 {
+		t.Fatalf("role plan was lost or mutated by synthesis: %#v", progress.Plan)
+	}
+}
+
+func TestBackgroundRunDoesNotReserveRepairOutsideDefaultPipeline(t *testing.T) {
+	criteria := "Return a complete result."
+	tests := []struct {
+		name          string
+		config        json.RawMessage
+		iteration     int
+		maxIterations int
+		prompts       map[string]string
+	}{
+		{
+			name:          "custom prompt owns its phases",
+			config:        json.RawMessage(`{"prompt":"custom-task","skip_reflex":true}`),
+			iteration:     4,
+			maxIterations: 6,
+			prompts:       map[string]string{"custom-task": "CUSTOM-TASK"},
+		},
+		{
+			name:          "two iteration default flow has no spare repair slot",
+			config:        json.RawMessage(`{"skip_reflex":true}`),
+			iteration:     0,
+			maxIterations: 2,
+			prompts:       map[string]string{"background-task": "BASE", "background-planning": "PLANNING"},
+		},
+		{
+			name:          "three iteration default flow has no spare repair slot",
+			config:        json.RawMessage(`{"skip_reflex":true}`),
+			iteration:     1,
+			maxIterations: 3,
+			prompts:       map[string]string{"background-task": "BASE", "background-execution": "EXECUTION"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &capturingProvider{responses: []*core.CompletionResponse{{
+				StopReason: "end_turn",
+				Content:    []core.ContentBlock{{Type: "text", Text: "work is still in progress"}},
+			}}}
+			deps, _ := backgroundTestDeps(provider, tt.prompts)
+			task := core.AgentTask{
+				ID:                 uuid.New(),
+				UserID:             uuid.New(),
+				Title:              "bounded task",
+				Strategy:           core.StrategyDirect,
+				Config:             tt.config,
+				Iteration:          tt.iteration,
+				MaxIterations:      tt.maxIterations,
+				AcceptanceCriteria: &criteria,
+			}
+
+			result, err := NewBackground(time.UTC, nil, nil, nil).Run(context.Background(), task, deps)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if result.Done {
+				t.Fatal("flow without a supported repair slot was force-completed on N-1")
+			}
+		})
+	}
+}
+
+func TestBackgroundRunLeavesHardFinalSessionForScheduler(t *testing.T) {
+	provider := &capturingProvider{responses: []*core.CompletionResponse{{
+		StopReason: "end_turn",
+		Content:    []core.ContentBlock{{Type: "text", Text: "[DONE] repaired report"}},
+	}}}
+	deps, store := backgroundTestDeps(provider, map[string]string{
+		"background-task":      "BASE",
+		"background-synthesis": "SYNTHESIS",
+	})
+	criteria := "Return a complete result."
+	task := core.AgentTask{
+		ID:                 uuid.New(),
+		UserID:             uuid.New(),
+		Title:              "research task",
+		Strategy:           core.StrategyDirect,
+		Config:             json.RawMessage(`{"skip_reflex":true}`),
+		Progress:           json.RawMessage(`{"session_id":"sess-existing","acceptance_feedback":"repair this"}`),
+		Iteration:          5,
+		MaxIterations:      6,
+		AcceptanceCriteria: &criteria,
+	}
+
+	result, err := NewBackground(time.UTC, nil, nil, nil).Run(context.Background(), task, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !result.Done {
+		t.Fatal("hard-final iteration must submit to the scheduler")
+	}
+	if len(store.archived) != 0 {
+		t.Fatalf("handler archived before terminal DB transition: %v", store.archived)
 	}
 }
