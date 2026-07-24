@@ -13,7 +13,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -23,10 +25,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rasimio/blueship/attachment"
+	pdfint "github.com/rasimio/blueship/integration/pdf"
 	bs "github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/gateway"
 	"github.com/rasimio/blueship/internal/webaccess/browser"
-	pdfint "github.com/rasimio/blueship/integration/pdf"
 )
 
 // Server is the HTTP/SSE chat transport.
@@ -38,6 +40,8 @@ type Server struct {
 	validateUserSoul func(ctx context.Context, userID, soulID uuid.UUID) error
 	extras           func(*http.ServeMux)
 	reset            func(ctx context.Context, userID string) (string, string, error)
+	invokeTool       func(context.Context, uuid.UUID, uuid.UUID, string, json.RawMessage) (gateway.ToolInvocation, error)
+	refreshMCP       func(context.Context, uuid.UUID, uuid.UUID) (int, error)
 	logger           *slog.Logger
 }
 
@@ -54,13 +58,20 @@ func NewServer(gw *gateway.Gateway, port int, token, transportName string, valid
 	if transportName == "" {
 		transportName = "http"
 	}
-	return &Server{gw: gw, port: port, token: token, transportName: transportName, validateUserSoul: validateUserSoul, extras: extras, reset: reset, logger: logger}
+	return &Server{
+		gw: gw, port: port, token: token, transportName: transportName,
+		validateUserSoul: validateUserSoul, extras: extras, reset: reset,
+		invokeTool: gw.InvokeToolForUser, refreshMCP: gw.RefreshMCPForUser,
+		logger: logger,
+	}
 }
 
 // Run starts the HTTP server. Blocks until ctx is done.
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /chat", s.handleChat)
+	mux.HandleFunc("POST /api/internal/tools/invoke", s.handleInvokeTool)
+	mux.HandleFunc("POST /api/internal/mcp/refresh", s.handleRefreshMCP)
 	if s.reset != nil {
 		mux.HandleFunc("POST /api/internal/chat/reset", s.handleReset)
 	}
@@ -152,6 +163,147 @@ type resetRequest struct {
 type resetResponse struct {
 	OldSessionID string `json:"old_session_id"`
 	NewSessionID string `json:"new_session_id"`
+}
+
+const (
+	maxToolInvokeBodyBytes = 64 << 10
+	directToolTimeout      = 30 * time.Second
+)
+
+type toolInvokeRequest struct {
+	UserID string          `json:"user_id"`
+	SoulID string          `json:"soul_id"`
+	Name   string          `json:"name"`
+	Input  json.RawMessage `json:"input"`
+}
+
+type toolInvocationView struct {
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
+	Output    string          `json:"output"`
+	IsError   bool            `json:"is_error"`
+	LatencyMS int64           `json:"latency_ms"`
+}
+
+type mcpRefreshRequest struct {
+	UserID string `json:"user_id"`
+	SoulID string `json:"soul_id"`
+}
+
+func (s *Server) handleInvokeTool(w http.ResponseWriter, r *http.Request) {
+	if s.invokeTool == nil {
+		http.Error(w, "tool invocation unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxToolInvokeBodyBytes)
+	var req toolInvokeRequest
+	if err := decodeOneJSON(r.Body, &req); err != nil || !jsonObject(req.Input) {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	userID, soulID, ok := s.authorizeUserSoul(w, r, req.UserID, req.SoulID)
+	if !ok {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), directToolTimeout)
+	defer cancel()
+	invocation, err := s.invokeTool(ctx, userID, soulID, req.Name, req.Input)
+	if err != nil {
+		s.writeDirectToolError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"invocation": toolInvocationView{
+		Name: invocation.Name, Input: invocation.Input, Output: invocation.Output,
+		IsError: invocation.IsError, LatencyMS: invocation.LatencyMS,
+	}})
+}
+
+func (s *Server) handleRefreshMCP(w http.ResponseWriter, r *http.Request) {
+	if s.refreshMCP == nil {
+		http.Error(w, "MCP refresh unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxToolInvokeBodyBytes)
+	var req mcpRefreshRequest
+	if err := decodeOneJSON(r.Body, &req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	userID, soulID, ok := s.authorizeUserSoul(w, r, req.UserID, req.SoulID)
+	if !ok {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), directToolTimeout)
+	defer cancel()
+	count, err := s.refreshMCP(ctx, userID, soulID)
+	if err != nil {
+		s.writeDirectToolError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"tool_count": count})
+}
+
+func (s *Server) authorizeUserSoul(w http.ResponseWriter, r *http.Request, rawUserID, rawSoulID string) (uuid.UUID, uuid.UUID, bool) {
+	userID, err := uuid.Parse(rawUserID)
+	if err != nil {
+		http.Error(w, "invalid user_id", http.StatusBadRequest)
+		return uuid.Nil, uuid.Nil, false
+	}
+	soulID, err := uuid.Parse(rawSoulID)
+	if err != nil {
+		http.Error(w, "invalid soul_id", http.StatusBadRequest)
+		return uuid.Nil, uuid.Nil, false
+	}
+	if s.validateUserSoul != nil {
+		if err := s.validateUserSoul(r.Context(), userID, soulID); err != nil {
+			s.logger.Warn("httpchat: user/soul validation failed", "user_id", userID, "soul_id", soulID, "err", err)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return uuid.Nil, uuid.Nil, false
+		}
+	}
+	return userID, soulID, true
+}
+
+func (s *Server) writeDirectToolError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, bs.ErrExecutionDenied):
+		http.Error(w, "forbidden", http.StatusForbidden)
+	case errors.Is(err, gateway.ErrToolNotFound):
+		http.Error(w, "tool not found", http.StatusNotFound)
+	case errors.Is(err, gateway.ErrToolDisabled):
+		http.Error(w, "tool disabled", http.StatusConflict)
+	case errors.Is(err, context.DeadlineExceeded):
+		http.Error(w, "tool execution timed out", http.StatusGatewayTimeout)
+	default:
+		s.logger.Warn("httpchat: direct tool request failed", "err", err)
+		http.Error(w, "tool execution failed", http.StatusBadGateway)
+	}
+}
+
+func decodeOneJSON(r io.Reader, dst any) error {
+	decoder := json.NewDecoder(r)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("multiple JSON values")
+	}
+	return nil
+}
+
+func jsonObject(raw json.RawMessage) bool {
+	var value map[string]any
+	return len(raw) > 0 && json.Unmarshal(raw, &value) == nil && value != nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 // handleReset archives the active (user, soul) chat session and creates

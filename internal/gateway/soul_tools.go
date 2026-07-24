@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/google/uuid"
 
@@ -21,18 +22,30 @@ import (
 // consumers outside a platform model), and on any policy error (a config-store
 // blip must never strand the soul).
 func (g *Gateway) allowedToolsForSoul(ctx context.Context, soulID uuid.UUID, registry *bs.ToolRegistry) []string {
-	if soulID == uuid.Nil || registry == nil {
-		return nil
-	}
-	policy := g.deps.Config.Gateway.ResolveSoulToolPolicy
-	if policy == nil {
-		return nil
-	}
-	override, providers, err := policy(ctx, soulID)
+	allowed, err := g.resolveAllowedToolsForSoul(ctx, soulID, registry)
 	if err != nil {
 		g.logger.Warn("soul tools: policy lookup failed, allowing all tools",
 			"soul_id", soulID.String(), "error", err)
 		return nil
+	}
+	return allowed
+}
+
+// resolveAllowedToolsForSoul is the strict counterpart used by direct tool
+// invocation. Chat keeps its historical fail-open behavior through
+// allowedToolsForSoul, while an explicit API call must fail closed when the
+// host's policy store is unavailable.
+func (g *Gateway) resolveAllowedToolsForSoul(ctx context.Context, soulID uuid.UUID, registry *bs.ToolRegistry) ([]string, error) {
+	if soulID == uuid.Nil || registry == nil {
+		return nil, nil
+	}
+	policy := g.deps.Config.Gateway.ResolveSoulToolPolicy
+	if policy == nil {
+		return nil, nil
+	}
+	override, providers, err := policy(ctx, soulID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve soul tool policy: %w", err)
 	}
 	connected := make(map[string]bool, len(providers))
 	for _, p := range providers {
@@ -40,7 +53,9 @@ func (g *Gateway) allowedToolsForSoul(ctx context.Context, soulID uuid.UUID, reg
 	}
 
 	meta := g.deps.Config.ToolMeta
-	var allowed []string
+	// A configured policy that allows zero tools must remain distinguishable
+	// from nil ("no policy configured").
+	allowed := make([]string, 0, len(registry.Definitions()))
 	for _, def := range registry.Definitions() {
 		name := def.Name
 		m := meta[name]
@@ -60,5 +75,5 @@ func (g *Gateway) allowedToolsForSoul(ctx context.Context, soulID uuid.UUID, reg
 		}
 		allowed = append(allowed, name) // no explicit choice — default on
 	}
-	return allowed
+	return allowed, nil
 }
