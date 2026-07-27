@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -21,15 +22,38 @@ import (
 // Client sends messages via the Telegram Bot API.
 type Client struct {
 	token      string
+	apiBaseURL string
 	httpClient *http.Client
 }
 
 // NewClient creates a new Telegram client.
 func NewClient(token string, timeout time.Duration) *Client {
+	return NewClientWithAPIURL(token, "", timeout)
+}
+
+// NewClientWithAPIURL creates a Telegram client backed by either the public
+// Bot API or a self-hosted Bot API server.
+func NewClientWithAPIURL(token, apiBaseURL string, timeout time.Duration) *Client {
 	return &Client{
 		token:      token,
+		apiBaseURL: strings.TrimRight(strings.TrimSpace(apiBaseURL), "/"),
 		httpClient: &http.Client{Timeout: timeout},
 	}
+}
+
+func (c *Client) baseURL() string {
+	if c.apiBaseURL != "" {
+		return c.apiBaseURL
+	}
+	return "https://api.telegram.org"
+}
+
+func (c *Client) methodURL(method string) string {
+	return fmt.Sprintf("%s/bot%s/%s", c.baseURL(), c.token, method)
+}
+
+func (c *Client) fileURL(path string) string {
+	return fmt.Sprintf("%s/file/bot%s/%s", c.baseURL(), c.token, strings.TrimLeft(path, "/"))
 }
 
 // IsConfigured returns true if the client has a bot token.
@@ -52,7 +76,7 @@ func (c *Client) GetMe(ctx context.Context) (BotIdentity, error) {
 	if !c.IsConfigured() {
 		return BotIdentity{}, fmt.Errorf("telegram bot not configured")
 	}
-	u := fmt.Sprintf("https://api.telegram.org/bot%s/getMe", c.token)
+	u := c.methodURL("getMe")
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return BotIdentity{}, err
@@ -228,7 +252,7 @@ func (c *Client) postJSON(ctx context.Context, method string, payload map[string
 	if err != nil {
 		return nil, fmt.Errorf("telegram %s marshal request: %w", method, err)
 	}
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/%s", c.token, method)
+	apiURL := c.methodURL(method)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
@@ -297,7 +321,7 @@ func (c *Client) SetReaction(ctx context.Context, chatID int64, messageID int, e
 	}
 	body, _ := json.Marshal(payload)
 
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/setMessageReaction", c.token)
+	apiURL := c.methodURL("setMessageReaction")
 	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -318,7 +342,7 @@ func (c *Client) SendChatAction(ctx context.Context, chatID int64, action string
 	if !c.IsConfigured() {
 		return nil
 	}
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendChatAction", c.token)
+	apiURL := c.methodURL("sendChatAction")
 	_, err := c.httpClient.PostForm(apiURL, url.Values{
 		"chat_id": {fmt.Sprintf("%d", chatID)},
 		"action":  {action},
@@ -328,21 +352,43 @@ func (c *Client) SendChatAction(ctx context.Context, chatID int64, action string
 
 // DownloadFile downloads a file by file_id and returns its content.
 func (c *Client) DownloadFile(ctx context.Context, fileID string, maxBytes int64) ([]byte, error) {
+	path, cleanup, err := c.DownloadFilePath(ctx, fileID, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read telegram file: %w", err)
+	}
+	return data, nil
+}
+
+// DownloadFilePath resolves a Telegram file to a local path. A self-hosted
+// Bot API server in --local mode returns the already-downloaded absolute path,
+// so large videos never need to be copied into the daemon's memory. Public Bot
+// API files are streamed into a temporary file and removed by cleanup.
+func (c *Client) DownloadFilePath(ctx context.Context, fileID string, maxBytes int64) (path string, cleanup func(), err error) {
 	if !c.IsConfigured() {
-		return nil, fmt.Errorf("telegram bot not configured")
+		return "", func() {}, fmt.Errorf("telegram bot not configured")
 	}
 	if maxBytes <= 0 {
 		maxBytes = 1 << 20
 	}
 
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/getFile?file_id=%s", c.token, url.QueryEscape(fileID))
+	apiURL := c.methodURL("getFile") + "?file_id=" + url.QueryEscape(fileID)
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
-		return nil, err
+		return "", func() {}, err
 	}
-	resp, err := c.httpClient.Do(req)
+	fileClient := *c.httpClient
+	if fileClient.Timeout < 15*time.Minute {
+		fileClient.Timeout = 15 * time.Minute
+	}
+	resp, err := fileClient.Do(req)
 	if err != nil {
-		return nil, err
+		return "", func() {}, err
 	}
 	defer resp.Body.Close()
 
@@ -354,27 +400,58 @@ func (c *Client) DownloadFile(ctx context.Context, fileID string, maxBytes int64
 		} `json:"result"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+		return "", func() {}, err
 	}
 	if !result.OK || result.Result.FilePath == "" {
-		return nil, fmt.Errorf("getFile failed for %s", fileID)
+		return "", func() {}, fmt.Errorf("getFile failed for %s", fileID)
 	}
 	if result.Result.FileSize > maxBytes {
-		return nil, fmt.Errorf("file too large: %d bytes (max %d)", result.Result.FileSize, maxBytes)
+		return "", func() {}, fmt.Errorf("file too large: %d bytes (max %d)", result.Result.FileSize, maxBytes)
 	}
 
-	dlURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", c.token, result.Result.FilePath)
+	if filepath.IsAbs(result.Result.FilePath) {
+		info, statErr := os.Stat(result.Result.FilePath)
+		if statErr != nil {
+			return "", func() {}, fmt.Errorf("stat telegram local file: %w", statErr)
+		}
+		if info.Size() > maxBytes {
+			return "", func() {}, fmt.Errorf("file too large: %d bytes (max %d)", info.Size(), maxBytes)
+		}
+		return result.Result.FilePath, func() {}, nil
+	}
+
+	dlURL := c.fileURL(result.Result.FilePath)
 	dlReq, err := http.NewRequestWithContext(ctx, "GET", dlURL, nil)
 	if err != nil {
-		return nil, err
+		return "", func() {}, err
 	}
-	dlResp, err := c.httpClient.Do(dlReq)
+	dlResp, err := fileClient.Do(dlReq)
 	if err != nil {
-		return nil, err
+		return "", func() {}, err
 	}
 	defer dlResp.Body.Close()
 
-	return io.ReadAll(io.LimitReader(dlResp.Body, maxBytes))
+	tmp, err := os.CreateTemp("", "blueship-telegram-*")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("create telegram temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	remove := func() { _ = os.Remove(tmpPath) }
+	written, copyErr := io.Copy(tmp, io.LimitReader(dlResp.Body, maxBytes+1))
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		remove()
+		return "", func() {}, fmt.Errorf("download telegram file: %w", copyErr)
+	}
+	if closeErr != nil {
+		remove()
+		return "", func() {}, fmt.Errorf("close telegram temp file: %w", closeErr)
+	}
+	if written > maxBytes {
+		remove()
+		return "", func() {}, fmt.Errorf("file too large: more than %d bytes", maxBytes)
+	}
+	return tmpPath, remove, nil
 }
 
 // SendVoice sends an OGG Opus voice message to a chat.
@@ -395,7 +472,7 @@ func (c *Client) SendVoice(ctx context.Context, chatID string, audio []byte) err
 	}
 	w.Close()
 
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendVoice", c.token)
+	apiURL := c.methodURL("sendVoice")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, &body)
 	if err != nil {
 		return err
@@ -516,7 +593,7 @@ func (c *Client) sendFile(ctx context.Context, chatID, method, field, filename, 
 	}
 	w.Close()
 
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/%s", c.token, method)
+	apiURL := c.methodURL(method)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, &body)
 	if err != nil {
 		return err

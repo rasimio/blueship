@@ -146,6 +146,11 @@ func TelegramSender(botToken string, timeout time.Duration) MessageSender {
 	return &telegramSenderAdapter{client: telegram.NewClient(botToken, timeout)}
 }
 
+// TelegramSenderWithAPIURL creates a MessageSender backed by a custom Bot API endpoint.
+func TelegramSenderWithAPIURL(botToken, apiURL string, timeout time.Duration) MessageSender {
+	return &telegramSenderAdapter{client: telegram.NewClientWithAPIURL(botToken, apiURL, timeout)}
+}
+
 // telegramSenderAdapter wraps telegram.Client to satisfy MessageSender.
 type telegramSenderAdapter struct {
 	client *telegram.Client

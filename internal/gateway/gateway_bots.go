@@ -155,8 +155,9 @@ func (g *Gateway) loadDesiredBots(ctx context.Context) ([]bs.BotConfig, error) {
 // fetches the bot's identity via getMe, and spawns the polling goroutine
 // that fans into g.updatesChan.
 func (g *Gateway) registerBot(parentCtx context.Context, cfg bs.BotConfig) error {
-	client := telegram.NewClient(cfg.Token, g.deps.Config.Timeouts.TelegramClient)
-	poller := telegram.NewPoller(cfg.Token, g.deps.Config.Timeouts.TelegramPoll)
+	apiURL := g.deps.Config.Transport.Telegram.APIURL
+	client := telegram.NewClientWithAPIURL(cfg.Token, apiURL, g.deps.Config.Timeouts.TelegramClient)
+	poller := telegram.NewPollerWithAPIURL(cfg.Token, apiURL, g.deps.Config.Timeouts.TelegramPoll)
 
 	meCtx, meCancel := context.WithTimeout(parentCtx, 10*time.Second)
 	me, err := client.GetMe(meCtx)

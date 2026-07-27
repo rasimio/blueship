@@ -22,6 +22,7 @@ import (
 type Alerter struct {
 	botToken    string
 	chatID      string
+	apiBaseURL  string
 	client      *http.Client
 	throttle    time.Duration
 	serviceName string
@@ -48,6 +49,7 @@ func NewAlerter(cfg Config) *Alerter {
 	a := &Alerter{
 		botToken:    tg.Token,
 		chatID:      tg.ChatID,
+		apiBaseURL:  strings.TrimRight(strings.TrimSpace(tg.APIURL), "/"),
 		client:      &http.Client{Timeout: 5 * time.Second},
 		throttle:    throttle,
 		serviceName: cfg.ServiceName,
@@ -109,7 +111,11 @@ func (a *Alerter) format(level slog.Level, msg string, attrs []slog.Attr) string
 }
 
 func (a *Alerter) post(text string) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", a.botToken)
+	baseURL := a.apiBaseURL
+	if baseURL == "" {
+		baseURL = "https://api.telegram.org"
+	}
+	url := fmt.Sprintf("%s/bot%s/sendMessage", baseURL, a.botToken)
 	body, _ := json.Marshal(map[string]any{
 		"chat_id":    a.chatID,
 		"text":       text,

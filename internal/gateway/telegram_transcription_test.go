@@ -132,24 +132,26 @@ func TestPrepareVideoForTranscriptionExtractsMOVAudio(t *testing.T) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("create MOV fixture: %v: %s", err, output)
 	}
+	parts, cleanup, err := extractVideoAudioParts(context.Background(), movPath)
+	if err != nil {
+		t.Fatalf("extractVideoAudioParts() error = %v", err)
+	}
+	defer cleanup()
+	if len(parts) != 1 {
+		t.Fatalf("parts = %d, want 1", len(parts))
+	}
+	audio, err := os.ReadFile(parts[0])
+	if err != nil {
+		t.Fatalf("read audio part: %v", err)
+	}
 	mov, err := os.ReadFile(movPath)
 	if err != nil {
 		t.Fatalf("read MOV fixture: %v", err)
 	}
-
-	audio, filename, err := prepareVideoForTranscription(
-		context.Background(), mov, "iphone.mov", "video/quicktime",
-	)
-	if err != nil {
-		t.Fatalf("prepareVideoForTranscription() error = %v", err)
-	}
-	if filename != "video.m4a" {
-		t.Fatalf("filename = %q, want video.m4a", filename)
-	}
 	if len(audio) == 0 {
-		t.Fatal("prepareVideoForTranscription() returned empty audio")
+		t.Fatal("extractVideoAudioParts() returned empty audio")
 	}
 	if bytes.Equal(audio, mov) {
-		t.Fatal("prepareVideoForTranscription() returned original MOV bytes")
+		t.Fatal("extractVideoAudioParts() returned original MOV bytes")
 	}
 }

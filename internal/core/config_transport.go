@@ -41,6 +41,10 @@ type TransportConfig struct {
 // list of (id, kind, owner, plaintext token) tuples and runs a polling
 // goroutine per row.
 type TelegramConfig struct {
+	// APIURL points at a self-hosted Bot API server. Empty uses Telegram's
+	// public endpoint.
+	APIURL string
+
 	// ListBots is called at startup and on every reload to enumerate the
 	// bots the gateway should poll. The host is responsible for decrypting
 	// tokens before returning them; blueship never sees ciphertext.

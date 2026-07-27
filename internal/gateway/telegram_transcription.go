@@ -7,12 +7,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/rasimio/blueship/internal/transport/telegram"
 )
 
-const maxTelegramTranscriptionBytes int64 = 20 << 20
+const (
+	maxTelegramVideoSourceBytes int64 = 2000 << 20
+	maxTranscriptionChunkBytes  int64 = 24 << 20
+)
 
 type telegramTranscriptionInput struct {
 	fileID   string
@@ -96,70 +100,100 @@ func videoDocumentTranscriptionFilename(name, mimeType string) string {
 	}
 }
 
-func prepareVideoForTranscription(
+func (g *Gateway) transcribeTelegramVideo(
 	ctx context.Context,
-	video []byte,
-	filename, mimeType string,
-) ([]byte, string, error) {
-	if !isMOVVideo(filename, mimeType) {
-		return video, filename, nil
-	}
-
-	audio, err := extractMOVAudio(ctx, video)
+	client *telegram.Client,
+	fileID string,
+) (string, error) {
+	sourcePath, cleanup, err := client.DownloadFilePath(ctx, fileID, maxTelegramVideoSourceBytes)
 	if err != nil {
-		return nil, "", err
+		return "", err
 	}
-	return audio, "video.m4a", nil
+	defer cleanup()
+	return g.transcribeVideoFile(ctx, sourcePath)
 }
 
-func isMOVVideo(filename, mimeType string) bool {
-	return strings.EqualFold(strings.TrimSpace(mimeType), "video/quicktime") ||
-		strings.EqualFold(filepath.Ext(strings.TrimSpace(filename)), ".mov")
+func (g *Gateway) transcribeVideoFile(ctx context.Context, sourcePath string) (string, error) {
+	audioParts, cleanup, err := extractVideoAudioParts(ctx, sourcePath)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+
+	transcripts := make([]string, 0, len(audioParts))
+	for _, partPath := range audioParts {
+		info, statErr := os.Stat(partPath)
+		if statErr != nil {
+			return "", fmt.Errorf("stat extracted audio: %w", statErr)
+		}
+		if info.Size() > maxTranscriptionChunkBytes {
+			return "", fmt.Errorf("extracted audio chunk too large: %d bytes", info.Size())
+		}
+		audio, readErr := os.ReadFile(partPath)
+		if readErr != nil {
+			return "", fmt.Errorf("read extracted audio: %w", readErr)
+		}
+		transcript, transcribeErr := g.whisper.Transcribe(ctx, audio, filepath.Base(partPath))
+		if transcribeErr != nil {
+			return "", transcribeErr
+		}
+		if transcript = strings.TrimSpace(transcript); transcript != "" {
+			transcripts = append(transcripts, transcript)
+		}
+	}
+	return strings.Join(transcripts, "\n"), nil
 }
 
-func extractMOVAudio(ctx context.Context, video []byte) ([]byte, error) {
+// extractVideoAudioParts compresses only the first audio stream and segments
+// long recordings before the transcription API sees them. At 48 kbps a
+// 40-minute chunk is about 14.4 MB, comfortably below the 25 MB API limit.
+func extractVideoAudioParts(ctx context.Context, sourcePath string) ([]string, func(), error) {
 	ffmpeg, err := findFFmpeg()
 	if err != nil {
-		return nil, err
+		return nil, func() {}, err
 	}
 
 	dir, err := os.MkdirTemp("", "blueship-video-*")
 	if err != nil {
-		return nil, fmt.Errorf("create video temp dir: %w", err)
+		return nil, func() {}, fmt.Errorf("create video temp dir: %w", err)
 	}
-	defer os.RemoveAll(dir)
-
-	inputPath := filepath.Join(dir, "input.mov")
-	outputPath := filepath.Join(dir, "audio.m4a")
-	if err := os.WriteFile(inputPath, video, 0o600); err != nil {
-		return nil, fmt.Errorf("write video temp file: %w", err)
-	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	outputPattern := filepath.Join(dir, "audio-%03d.m4a")
 
 	var stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, ffmpeg,
 		"-hide_banner",
 		"-loglevel", "error",
 		"-y",
-		"-i", inputPath,
+		"-i", sourcePath,
 		"-map", "0:a:0",
 		"-vn",
+		"-ac", "1",
+		"-ar", "16000",
 		"-c:a", "aac",
-		"-b:a", "96k",
-		outputPath,
+		"-b:a", "48k",
+		"-f", "segment",
+		"-segment_time", "2400",
+		"-reset_timestamps", "1",
+		outputPattern,
 	)
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("extract mov audio: %w: %s", err, strings.TrimSpace(stderr.String()))
+		cleanup()
+		return nil, func() {}, fmt.Errorf("extract video audio: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 
-	audio, err := os.ReadFile(outputPath)
+	parts, err := filepath.Glob(filepath.Join(dir, "audio-*.m4a"))
 	if err != nil {
-		return nil, fmt.Errorf("read extracted audio: %w", err)
+		cleanup()
+		return nil, func() {}, fmt.Errorf("list extracted audio: %w", err)
 	}
-	if len(audio) == 0 {
-		return nil, fmt.Errorf("extract mov audio: empty output")
+	sort.Strings(parts)
+	if len(parts) == 0 {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("extract video audio: empty output")
 	}
-	return audio, nil
+	return parts, cleanup, nil
 }
 
 func findFFmpeg() (string, error) {

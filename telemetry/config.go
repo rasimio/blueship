@@ -50,6 +50,7 @@ type TelegramAlertConfig struct {
 	Enabled  bool
 	Token    string
 	ChatID   string
+	APIURL   string
 	MinLevel string // "warn" | "error" — defaults to "error"
 	Throttle time.Duration
 }

@@ -882,7 +882,22 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	// show up as chips in the cabinet on reload.
 	var docImages []bs.ContentBlock
 	var rawAttachments []rawAttachment
-	if msg.Document != nil {
+	if msg.Document != nil && isTranscribableVideoDocument(msg.Document.FileName, msg.Document.MimeType) {
+		if g.whisper == nil || !g.whisper.IsConfigured() {
+			text = appendDocInline(text, "[video: audio transcription unavailable]")
+		} else {
+			transcript, err := g.transcribeTelegramVideo(ctx, bi.client, msg.Document.FileID)
+			if err != nil {
+				g.logger.Warn("failed to transcribe video document", "error", err, "file", msg.Document.FileName)
+				text = appendDocInline(text, "[video: audio transcription failed]")
+			} else if strings.TrimSpace(transcript) == "" {
+				text = appendDocInline(text, "[video: no speech detected]")
+			} else {
+				text = appendVideoTranscript(text, transcript)
+			}
+		}
+	}
+	if msg.Document != nil && !isTranscribableVideoDocument(msg.Document.FileName, msg.Document.MimeType) {
 		data, err := bi.client.DownloadFile(ctx, msg.Document.FileID, attachment.MaxAnyBytes)
 		if err != nil {
 			g.logger.Warn("failed to download document", "error", err, "file", msg.Document.FileName)
@@ -989,31 +1004,6 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 						name: msg.Document.FileName, mime: mime, kind: "text", data: data,
 					})
 				default:
-					if isTranscribableVideoDocument(msg.Document.FileName, msg.Document.MimeType) {
-						if g.whisper == nil || !g.whisper.IsConfigured() {
-							text = appendDocInline(text, "[video: audio transcription unavailable]")
-						} else {
-							filename := videoDocumentTranscriptionFilename(msg.Document.FileName, msg.Document.MimeType)
-							transcriptionData, filename, prepareErr := prepareVideoForTranscription(
-								ctx, data, filename, msg.Document.MimeType,
-							)
-							if prepareErr != nil {
-								g.logger.Warn("failed to prepare video document for transcription", "error", prepareErr, "file", msg.Document.FileName)
-								text = appendDocInline(text, "[video: audio transcription failed]")
-								break
-							}
-							transcript, transcribeErr := g.whisper.Transcribe(ctx, transcriptionData, filename)
-							if transcribeErr != nil {
-								g.logger.Warn("failed to transcribe video document", "error", transcribeErr, "file", msg.Document.FileName)
-								text = appendDocInline(text, "[video: audio transcription failed]")
-							} else if strings.TrimSpace(transcript) == "" {
-								text = appendDocInline(text, "[video: no speech detected]")
-							} else {
-								text = appendVideoTranscript(text, transcript)
-							}
-						}
-						break
-					}
 					// Unsupported format (xlsx / pptx / legacy .doc / archive /
 					// arbitrary binary). Inline a short notice rather than
 					// dropping it silently — a document-only message would
@@ -1030,28 +1020,14 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		if g.whisper == nil || !g.whisper.IsConfigured() {
 			text = appendDocInline(text, "[video: audio transcription unavailable]")
 		} else {
-			video, err := bi.client.DownloadFile(ctx, input.fileID, maxTelegramTranscriptionBytes)
+			transcript, err := g.transcribeTelegramVideo(ctx, bi.client, input.fileID)
 			if err != nil {
-				g.logger.Warn("failed to download video for transcription", "error", err, "kind", input.kind)
+				g.logger.Warn("failed to transcribe video", "error", err, "kind", input.kind)
 				text = appendDocInline(text, "[video: audio transcription failed]")
+			} else if strings.TrimSpace(transcript) == "" {
+				text = appendDocInline(text, "[video: no speech detected]")
 			} else {
-				transcriptionData, filename, prepareErr := prepareVideoForTranscription(
-					ctx, video, input.filename, input.mimeType,
-				)
-				if prepareErr != nil {
-					g.logger.Warn("failed to prepare video for transcription", "error", prepareErr, "kind", input.kind)
-					text = appendDocInline(text, "[video: audio transcription failed]")
-				} else {
-					transcript, err := g.whisper.Transcribe(ctx, transcriptionData, filename)
-					if err != nil {
-						g.logger.Warn("failed to transcribe video", "error", err, "kind", input.kind)
-						text = appendDocInline(text, "[video: audio transcription failed]")
-					} else if strings.TrimSpace(transcript) == "" {
-						text = appendDocInline(text, "[video: no speech detected]")
-					} else {
-						text = appendVideoTranscript(text, transcript)
-					}
-				}
+				text = appendVideoTranscript(text, transcript)
 			}
 		}
 	}

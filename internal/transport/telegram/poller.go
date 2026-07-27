@@ -6,24 +6,39 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // Poller fetches updates from the Telegram Bot API using long polling.
 type Poller struct {
 	token      string
+	apiBaseURL string
 	httpClient *http.Client
 	offset     int
 }
 
 // NewPoller creates a new long-polling Telegram update fetcher.
 func NewPoller(token string, pollTimeout time.Duration) *Poller {
+	return NewPollerWithAPIURL(token, "", pollTimeout)
+}
+
+// NewPollerWithAPIURL creates a poller backed by a custom Bot API endpoint.
+func NewPollerWithAPIURL(token, apiBaseURL string, pollTimeout time.Duration) *Poller {
 	return &Poller{
-		token: token,
+		token:      token,
+		apiBaseURL: strings.TrimRight(strings.TrimSpace(apiBaseURL), "/"),
 		httpClient: &http.Client{
 			Timeout: pollTimeout,
 		},
 	}
+}
+
+func (p *Poller) baseURL() string {
+	if p.apiBaseURL != "" {
+		return p.apiBaseURL
+	}
+	return "https://api.telegram.org"
 }
 
 type getUpdatesResponse struct {
@@ -34,8 +49,8 @@ type getUpdatesResponse struct {
 // Poll makes a single getUpdates call and returns updates.
 func (p *Poller) Poll(ctx context.Context) ([]Update, error) {
 	url := fmt.Sprintf(
-		"https://api.telegram.org/bot%s/getUpdates?offset=%d&timeout=30&allowed_updates=[\"message\",\"callback_query\"]",
-		p.token, p.offset,
+		"%s/bot%s/getUpdates?offset=%d&timeout=30&allowed_updates=[\"message\",\"callback_query\"]",
+		p.baseURL(), p.token, p.offset,
 	)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
