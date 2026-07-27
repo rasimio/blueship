@@ -16,6 +16,7 @@ import (
 const (
 	maxTelegramVideoSourceBytes int64 = 2000 << 20
 	maxTranscriptionChunkBytes  int64 = 24 << 20
+	videoAudioSegmentSeconds          = 8 * 60
 )
 
 type telegramTranscriptionInput struct {
@@ -145,8 +146,9 @@ func (g *Gateway) transcribeVideoFile(ctx context.Context, sourcePath string) (s
 }
 
 // extractVideoAudioParts compresses only the first audio stream and segments
-// long recordings before the transcription API sees them. At 48 kbps a
-// 40-minute chunk is about 14.4 MB, comfortably below the 25 MB API limit.
+// long recordings before the transcription API sees them. Eight minutes
+// stays comfortably inside gpt-4o-mini-transcribe's audio-token context and,
+// at 48 kbps, produces chunks of only about 2.9 MB.
 func extractVideoAudioParts(ctx context.Context, sourcePath string) ([]string, func(), error) {
 	ffmpeg, err := findFFmpeg()
 	if err != nil {
@@ -173,7 +175,7 @@ func extractVideoAudioParts(ctx context.Context, sourcePath string) ([]string, f
 		"-c:a", "aac",
 		"-b:a", "48k",
 		"-f", "segment",
-		"-segment_time", "2400",
+		"-segment_time", fmt.Sprintf("%d", videoAudioSegmentSeconds),
 		"-reset_timestamps", "1",
 		outputPattern,
 	)
