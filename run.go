@@ -24,6 +24,8 @@ import (
 	"github.com/rasimio/blueship/tool"
 )
 
+type coordinatedTaskNotificationContextKey struct{}
+
 // Run starts BlueShip: connects to DB, initializes providers, starts transport, runs jobs.
 // Blocks until ctx is done.
 func (s *Ship) Run(ctx context.Context) error {
@@ -187,6 +189,8 @@ func (s *Ship) Run(ctx context.Context) error {
 	// 4b. Start agent task scheduler (if handlers registered).
 	var agentSched *agenttask.Scheduler
 	var agentTaskTrigger <-chan string
+	var taskStore *core.AgentTaskStore
+	var gw *gateway.Gateway
 	// Start the agent-task scheduler if EITHER recurring handlers OR
 	// strategy executors are registered. An agent that exposes only
 	// strategy executors (no recurring jobs) still needs the scheduler
@@ -209,7 +213,7 @@ func (s *Ship) Run(ctx context.Context) error {
 		// delegation flows like agent_task_accept.
 		reg.AddTargetRegistry(globalRegistry)
 
-		taskStore := core.NewAgentTaskStore(shipDB)
+		taskStore = core.NewAgentTaskStore(shipDB)
 		msgStore := session.NewStore(shipDB) // MessageStore for agent loops
 
 		// Notification callback: append to chat session (so cortex sees it) + send to Telegram.
@@ -217,6 +221,36 @@ func (s *Ship) Run(ctx context.Context) error {
 		if deps.Users != nil {
 			notifyFn = func(ctx context.Context, userID uuid.UUID, text string) (core.TaskNotificationReceipt, error) {
 				var receipt core.TaskNotificationReceipt
+
+				if commit, matched, parseErr := core.ParseAutonomousTurnNotification(text); matched {
+					if parseErr != nil {
+						return receipt, core.PermanentlyNotSent(parseErr)
+					}
+					if !core.SingleAttemptNotificationFromContext(ctx) {
+						return receipt, core.PermanentlyNotSent(fmt.Errorf("autonomous turn requires keyed single-attempt delivery"))
+					}
+					if commit.UserID != userID {
+						return receipt, core.PermanentlyNotSent(fmt.Errorf("autonomous turn user mismatch"))
+					}
+					if gw == nil {
+						return receipt, core.DefinitelyNotSent(fmt.Errorf("autonomous turn gateway unavailable"))
+					}
+					return gw.CommitAutonomousTurn(ctx, commit)
+				}
+				coordinated, _ := ctx.Value(coordinatedTaskNotificationContextKey{}).(bool)
+				if !coordinated && gw != nil {
+					if soulID, ok := core.SoulIDFromContextOK(ctx); ok && soulID != uuid.Nil {
+						coordinatedCtx := context.WithValue(
+							ctx, coordinatedTaskNotificationContextKey{}, true,
+						)
+						return gw.CoordinateTaskNotification(
+							coordinatedCtx, userID, soulID,
+							func(lockedCtx context.Context, _ string) (core.TaskNotificationReceipt, error) {
+								return notifyFn(lockedCtx, userID, text)
+							},
+						)
+					}
+				}
 
 				// Keyed task-program notifications are admitted by a durable
 				// at-most-once journal before this callback. Keep the transport
@@ -414,11 +448,26 @@ func (s *Ship) Run(ctx context.Context) error {
 	// the gateway is built as long as ANY transport is configured because
 	// HTTPChat / WebSocket sit on top of the same gateway, and ReloadBots
 	// then decides whether a Telegram fan-in actually runs.
-	var gw *gateway.Gateway
 	telegramConfigured := s.cfg.Transport.Telegram.ListBots != nil || s.cfg.Transport.BotToken != ""
 	wsConfigured := s.cfg.Transport.WebSocket.Port > 0
 	hcConfigured := s.cfg.Transport.HTTPChat.Port > 0
 	if telegramConfigured || wsConfigured || hcConfigured {
+		if taskStore != nil {
+			// The gateway owns pair-local turn ordering. Finalize a provider-
+			// acknowledged autonomous message, and repair any prior confirmed
+			// message, only while that gateway lock is held.
+			deps.FinalizeAutonomousNotification = func(
+				finalizeCtx context.Context,
+				attemptID uuid.UUID,
+				receipt core.TaskNotificationReceipt,
+			) error {
+				if err := taskStore.ConfirmNotificationAttempt(finalizeCtx, attemptID, receipt); err != nil {
+					return err
+				}
+				return taskStore.ProjectAutonomousHistoryAttempt(finalizeCtx, attemptID)
+			}
+			deps.EnsureAutonomousHistory = taskStore.EnsureAutonomousHistoryForSession
+		}
 		var err error
 		gw, err = gateway.NewGateway(deps, reg, s.logger)
 		if err != nil {
@@ -429,7 +478,9 @@ func (s *Ship) Run(ctx context.Context) error {
 		// with, instead of the legacy single-bot Transport.BotToken.
 		deps.SendToUser = gw.SendToUser
 		deps.SendToUserOnce = gw.SendToUserOnce
+		deps.SendConversationMessage = gw.SendConversationMessage
 		deps.SendToUserAttachment = gw.SendToUserAttachment
+		deps.DraftAutonomousTurn = gw.DraftAutonomousTurn
 	}
 
 	// 5a. Telegram fan-in — populated by ReloadBots from the host's

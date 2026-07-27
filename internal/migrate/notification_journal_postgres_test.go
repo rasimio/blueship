@@ -207,6 +207,92 @@ func TestNotificationJournalPostgresConcurrency(t *testing.T) {
 		}
 	})
 
+	t.Run("confirmed autonomous turn is projected exactly once", func(t *testing.T) {
+		taskID, userID := insertNotificationTestTask(t, ctx, db)
+		soulID, sessionID := uuid.New(), uuid.New()
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO chat_sessions
+			    (id, user_id, soul_id, source, token_count, message_count)
+			VALUES ($1, $2, $3, 'chat', 0, 0)`,
+			sessionID, userID, soulID); err != nil {
+			t.Fatal(err)
+		}
+		request := core.AutonomousTurnRequest{
+			UserID:          userID,
+			SoulID:          soulID,
+			AnchorMessageID: uuid.NewString(),
+			Prompt:          "provider-only",
+		}
+		draft := core.AutonomousTurnDraft{
+			Text:            "I thought of you.",
+			SessionID:       sessionID.String(),
+			DialogMessageID: uuid.NewString(),
+			ActivityToken:   uuid.NewString() + ":0",
+		}
+		marker, err := core.FormatAutonomousTurnNotification(request, draft)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref := core.TaskDeliveryRef{InputID: "relational-pulse", ItemKey: "anchor:24h"}
+		attemptID, created, err := store.BeginNotificationAttempt(
+			ctx, taskID, userID, marker, []core.TaskDeliveryRef{ref},
+		)
+		if err != nil || !created {
+			t.Fatalf("begin autonomous attempt: created=%t err=%v", created, err)
+		}
+		receipt := core.TaskNotificationReceipt{
+			Transport: "telegram",
+			BotID:     uuid.NewString(),
+			ChatID:    "42",
+			MessageID: "777",
+		}
+		if err := store.ConfirmNotificationAttempt(ctx, attemptID, receipt); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.EnsureAutonomousHistoryForSession(
+			ctx, userID, soulID, sessionID.String(),
+		); err != nil {
+			t.Fatalf("ensure projection: %v", err)
+		}
+		if err := store.EnsureAutonomousHistoryForSession(
+			ctx, userID, soulID, sessionID.String(),
+		); err != nil {
+			t.Fatalf("idempotent ensure projection: %v", err)
+		}
+
+		var projectedAt *time.Time
+		if err := db.GetContext(ctx, &projectedAt, `
+			SELECT autonomous_history_projected_at
+			FROM agent_task_notification_attempts
+			WHERE id = $1`, attemptID); err != nil {
+			t.Fatal(err)
+		}
+		if projectedAt == nil {
+			t.Fatal("autonomous history projection was not marked complete")
+		}
+		var row struct {
+			MessageCount int `db:"message_count"`
+			TokenCount   int `db:"token_count"`
+		}
+		if err := db.GetContext(ctx, &row, `
+			SELECT message_count, token_count
+			FROM chat_sessions WHERE id = $1`, sessionID); err != nil {
+			t.Fatal(err)
+		}
+		if row.MessageCount != 2 || row.TokenCount <= 0 {
+			t.Fatalf("session counters = %#v, want one boundary plus one assistant", row)
+		}
+		var roles []string
+		if err := db.SelectContext(ctx, &roles, `
+			SELECT role FROM chat_messages
+			WHERE session_id = $1 ORDER BY created_at, id`, sessionID); err != nil {
+			t.Fatal(err)
+		}
+		if len(roles) != 2 || roles[0] != "turn_boundary" || roles[1] != "assistant" {
+			t.Fatalf("projected roles = %#v", roles)
+		}
+	})
+
 	t.Run("confirm and uncertain race has one irreversible winner", func(t *testing.T) {
 		taskID, userID := insertNotificationTestTask(t, ctx, db)
 		ref := core.TaskDeliveryRef{InputID: "calendar", ItemKey: "event:race"}
@@ -297,6 +383,25 @@ func newNotificationJournalPostgresStore(t *testing.T, dsn string) (*core.AgentT
 			id UUID PRIMARY KEY,
 			user_id UUID NOT NULL
 		);
+		CREATE TABLE chat_sessions (
+			id UUID PRIMARY KEY,
+			user_id UUID NOT NULL,
+			soul_id UUID NOT NULL,
+			source TEXT NOT NULL DEFAULT 'chat',
+			token_count INT NOT NULL DEFAULT 0,
+			message_count INT NOT NULL DEFAULT 0,
+			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
+		CREATE TABLE chat_messages (
+			id UUID PRIMARY KEY,
+			soul_id UUID NOT NULL,
+			session_id UUID NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+			role TEXT NOT NULL,
+			content JSONB NOT NULL,
+			token_estimate INT NOT NULL DEFAULT 0,
+			tg_message_id BIGINT,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		);
 		CREATE TABLE agent_task_deliveries (
 			task_id UUID NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
 			input_id TEXT NOT NULL,
@@ -312,6 +417,13 @@ func newNotificationJournalPostgresStore(t *testing.T, dsn string) (*core.AgentT
 	}
 	if _, err := db.Exec(string(migration)); err != nil {
 		t.Fatalf("apply notification journal migration: %v", err)
+	}
+	projectionMigration, err := migrations.ReadFile("sql/019_autonomous_history_projection.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(projectionMigration)); err != nil {
+		t.Fatalf("apply autonomous history projection migration: %v", err)
 	}
 	return core.NewAgentTaskStore(db), db
 }

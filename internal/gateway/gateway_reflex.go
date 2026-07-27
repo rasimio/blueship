@@ -1097,12 +1097,20 @@ func (g *Gateway) PersistInterrupted(_ context.Context, chatID, partial string) 
 	}
 	ctx = bs.WithSoulID(ctx, us.SoulID)
 
+	turnMu := g.turnMutex(us.UserID, us.SoulID)
+	turnMu.Lock()
+	defer turnMu.Unlock()
+
 	us.Mu.Lock()
 	defer us.Mu.Unlock()
 
 	sess, err := g.GetOrCreateSession(ctx, us)
 	if err != nil {
 		g.logger.Warn("persist interrupted: session failed", "error", err)
+		return
+	}
+	if err := g.ensureAutonomousHistoryLocked(ctx, us.UserID, us.SoulID, sess.ID); err != nil {
+		g.logger.Warn("persist interrupted: autonomous history barrier failed", "error", err)
 		return
 	}
 

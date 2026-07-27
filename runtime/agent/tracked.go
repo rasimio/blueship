@@ -31,8 +31,9 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		cfg.Model = a.cfg.Models.Primary.Name
 	}
 
-	// 1. Append user message (unless the caller already persisted it).
-	if !cfg.SkipUserAppend {
+	// 1. Append user message (unless the caller already persisted it or it is
+	// prompt-only).
+	if !cfg.SkipUserAppend && !cfg.PromptOnlyInput {
 		started := time.Now()
 		err := a.store.Append(ctx, cfg.SessionID, bs.Message{
 			Role:             "user",
@@ -93,10 +94,13 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 	if loadErr != nil {
 		return nil, fmt.Errorf("load dialog messages: %w", loadErr)
 	}
-	feltTime := feltTimeContext(dialogMessages, cfg.TurnNow)
+	feltTime := feltTimeContext(dialogMessages, cfg.TurnNow, !cfg.PromptOnlyInput)
 	dialogMessages = annotateDialogDays(dialogMessages, cfg.TurnNow)
 	dialogTokens := estimateMessagesTokens(dialogMessages)
 	convo := cloneMessages(dialogMessages)
+	if cfg.PromptOnlyInput {
+		convo = append(convo, bs.Message{Role: "user", Content: userMessage})
+	}
 
 	// Accumulate text and tool traces across all turns.
 	var accumulated strings.Builder
@@ -188,7 +192,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		a.logger.Info("LLM response", responseAttrs...)
 		usedEmptyVisibleFallback := false
 		if !hasVisibleOutput(resp.Content) && (resp.StopReason == "end_turn" || resp.StopReason == "max_tokens") {
-			text := a.emptyVisibleFallback()
+			text := a.emptyVisibleFallback(cfg)
 			a.logger.Warn("LLM returned terminal response with no visible output; using fallback",
 				"model", cfg.Model,
 				"role", cfg.Role,
@@ -264,7 +268,12 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			// it explicitly so the user gets feedback and can rephrase.
 			a.logger.Warn("LLM refused to respond", "model", cfg.Model, "turn", turn+1)
 			text := accumulated.String()
-			if text == "" {
+			if cfg.PromptOnlyInput && cfg.Ephemeral &&
+				strings.TrimSpace(cfg.EmptyVisibleFallback) != "" {
+				// Autonomous provider refusal means silence, never a
+				// framework-generated relationship message.
+				text = a.emptyVisibleFallback(cfg)
+			} else if text == "" {
 				text = a.cfg.UI.ModelRefused
 			}
 			return &RunResult{Text: text, ToolTraces: traces}, nil

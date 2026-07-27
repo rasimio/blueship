@@ -87,6 +87,14 @@ type RunConfig struct {
 	// because the caller already persisted it. Used so the background tier
 	// can continue a turn the interaction tier already opened.
 	SkipUserAppend bool
+	// PromptOnlyInput, when true, appends userMessage only to the in-memory
+	// conversation sent to the provider. It is never written to MessageStore.
+	// Assistant and tool-result persistence still follows Ephemeral.
+	PromptOnlyInput bool
+	// EmptyVisibleFallback overrides the user-facing text emitted when a
+	// provider ends the turn without visible output. Autonomous callers set
+	// this to their no-op sentinel so an empty model response stays silent.
+	EmptyVisibleFallback string
 	// MessageBudget, when > 0, overrides the default message-window token
 	// budget.
 	MessageBudget int
@@ -287,14 +295,19 @@ func annotateDialogDays(msgs []bs.Message, now time.Time) []bs.Message {
 // and how long ago the previous message landed. Empty when annotation is off,
 // when there is no prior message, or when the previous message is recent and
 // same-day (nothing to correct).
-func feltTimeContext(msgs []bs.Message, now time.Time) string {
+func feltTimeContext(msgs []bs.Message, now time.Time, currentInputPersisted bool) string {
 	if now.IsZero() {
 		return ""
 	}
-	// The last stored message is this turn's own user message; the temporal
-	// anchor that matters is the one before it.
+	// Interactive runs already persisted this turn's user input, so their
+	// temporal anchor is one row earlier. Prompt-only runs persist no faux
+	// user: their anchor is the latest stored dialogue message itself.
+	start := len(msgs) - 1
+	if currentInputPersisted {
+		start--
+	}
 	var prev time.Time
-	for i := len(msgs) - 2; i >= 0; i-- {
+	for i := start; i >= 0; i-- {
 		if !msgs[i].CreatedAt.IsZero() {
 			prev = msgs[i].CreatedAt
 			break
@@ -546,7 +559,10 @@ func withoutReasoning(req bs.CompletionRequest) bs.CompletionRequest {
 	return req
 }
 
-func (a *Loop) emptyVisibleFallback() string {
+func (a *Loop) emptyVisibleFallback(cfg RunConfig) string {
+	if fallback := strings.TrimSpace(cfg.EmptyVisibleFallback); fallback != "" {
+		return fallback
+	}
 	if a != nil && a.cfg != nil && strings.TrimSpace(a.cfg.UI.ModelRefused) != "" {
 		return a.cfg.UI.ModelRefused
 	}

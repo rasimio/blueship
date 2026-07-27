@@ -134,7 +134,7 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 	// otherwise. Save the DB roundtrip and only intercept /start so
 	// the welcome-back line fires.
 	g.mu.Lock()
-	us := g.users[chatID]
+	us := g.users[telegramUserCacheKey(bi.id, chatID)]
 	g.mu.Unlock()
 	if us != nil && us.UserID != uuid.Nil {
 		if cmd, forUs := g.parseCommand(bi, text); cmd == "/start" && forUs {

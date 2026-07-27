@@ -12,6 +12,255 @@ import (
 	bs "github.com/rasimio/blueship/internal/core"
 )
 
+func TestRunTrackedPromptOnlyInputIsSentButNotPersisted(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "assistant", Content: "previous reply"}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{{
+		Content:    []bs.ContentBlock{{Type: "text", Text: "new reply"}},
+		StopReason: "end_turn",
+	}}}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, bs.NewToolRegistry(), nil, &bs.Config{}, logger)
+	result, err := loop.RunTracked(context.Background(), RunConfig{
+		SessionID:       "s1",
+		SystemPrompt:    "base system",
+		Model:           "test-model",
+		MaxTokens:       64,
+		MaxTurns:        1,
+		MessageBudget:   6000,
+		PromptOnlyInput: true,
+	}, "internal turn trigger")
+	if err != nil {
+		t.Fatalf("RunTracked failed: %v", err)
+	}
+	if result.Text != "new reply" {
+		t.Fatalf("want final text, got %q", result.Text)
+	}
+	assertPromptOnlyRequest(t, provider.requests, "internal turn trigger")
+	assertOnlyAssistantPersisted(t, store.appended, "new reply")
+}
+
+func TestRunStreamPromptOnlyInputIsSentButNotPersisted(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "assistant", Content: "previous reply"}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{{
+		Content:    []bs.ContentBlock{{Type: "text", Text: "streamed reply"}},
+		StopReason: "end_turn",
+	}}}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, bs.NewToolRegistry(), nil, &bs.Config{}, logger)
+	text, _, err := loop.RunStream(context.Background(), RunConfig{
+		SessionID:       "s1",
+		SystemPrompt:    "base system",
+		Model:           "test-model",
+		MaxTokens:       64,
+		MaxTurns:        1,
+		MessageBudget:   6000,
+		PromptOnlyInput: true,
+	}, "internal stream trigger", nil)
+	if err != nil {
+		t.Fatalf("RunStream failed: %v", err)
+	}
+	if text != "streamed reply" {
+		t.Fatalf("want final text, got %q", text)
+	}
+	assertPromptOnlyRequest(t, provider.requests, "internal stream trigger")
+	assertOnlyAssistantPersisted(t, store.appended, "streamed reply")
+}
+
+func TestRunStreamFallbackPromptOnlyInputIsSentButNotPersisted(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "assistant", Content: "previous reply"}},
+	}
+	provider := &batchOnlyProvider{response: &bs.CompletionResponse{
+		Content:    []bs.ContentBlock{{Type: "text", Text: "fallback reply"}},
+		StopReason: "end_turn",
+	}}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, bs.NewToolRegistry(), nil, &bs.Config{}, logger)
+	text, _, err := loop.RunStream(context.Background(), RunConfig{
+		SessionID:       "s1",
+		SystemPrompt:    "base system",
+		Model:           "test-model",
+		MaxTokens:       64,
+		MaxTurns:        1,
+		MessageBudget:   6000,
+		PromptOnlyInput: true,
+	}, "internal fallback trigger", nil)
+	if err != nil {
+		t.Fatalf("RunStream fallback failed: %v", err)
+	}
+	if text != "fallback reply" {
+		t.Fatalf("want final text, got %q", text)
+	}
+	assertPromptOnlyRequest(t, provider.requests, "internal fallback trigger")
+	assertOnlyAssistantPersisted(t, store.appended, "fallback reply")
+}
+
+func TestRunStreamPromptOnlyEphemeralPersistsNothing(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "assistant", Content: "previous reply"}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{{
+		Content:    []bs.ContentBlock{{Type: "text", Text: "draft reply"}},
+		StopReason: "end_turn",
+	}}}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, bs.NewToolRegistry(), nil, &bs.Config{}, logger)
+	text, _, err := loop.RunStream(context.Background(), RunConfig{
+		SessionID:       "s1",
+		SystemPrompt:    "base system",
+		Model:           "test-model",
+		MaxTokens:       64,
+		MaxTurns:        1,
+		MessageBudget:   6000,
+		PromptOnlyInput: true,
+		Ephemeral:       true,
+	}, "internal draft trigger", nil)
+	if err != nil {
+		t.Fatalf("RunStream failed: %v", err)
+	}
+	if text != "draft reply" {
+		t.Fatalf("want draft text, got %q", text)
+	}
+	assertPromptOnlyRequest(t, provider.requests, "internal draft trigger")
+	if len(store.appended) != 0 {
+		t.Fatalf("ephemeral draft persisted messages: %#v", store.appended)
+	}
+}
+
+func TestRunStreamPromptOnlyCanMapEmptyVisibleOutputToNoOp(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "assistant", Content: "previous reply"}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{{
+		StopReason: "end_turn",
+	}}}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, bs.NewToolRegistry(), nil, &bs.Config{}, logger)
+	text, _, err := loop.RunStream(context.Background(), RunConfig{
+		SessionID:            "s1",
+		SystemPrompt:         "base system",
+		Model:                "test-model",
+		MaxTokens:            64,
+		MaxTurns:             1,
+		MessageBudget:        6000,
+		PromptOnlyInput:      true,
+		Ephemeral:            true,
+		EmptyVisibleFallback: "[no-op]",
+	}, "internal draft trigger", nil)
+	if err != nil {
+		t.Fatalf("RunStream failed: %v", err)
+	}
+	if text != "[no-op]" {
+		t.Fatalf("empty autonomous output = %q, want no-op", text)
+	}
+	if len(store.appended) != 0 {
+		t.Fatalf("empty autonomous draft persisted messages: %#v", store.appended)
+	}
+}
+
+func TestRunStreamPromptOnlyMapsRefusalToNoOp(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "user", Content: "previous turn"}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{{
+		Content:    []bs.ContentBlock{{Type: "text", Text: "provider refusal copy"}},
+		StopReason: "refusal",
+	}}}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, bs.NewToolRegistry(), nil, &bs.Config{}, logger)
+	text, _, err := loop.RunStream(context.Background(), RunConfig{
+		SessionID:            "s1",
+		SystemPrompt:         "base system",
+		Model:                "test-model",
+		MaxTokens:            64,
+		MaxTurns:             1,
+		MessageBudget:        6000,
+		PromptOnlyInput:      true,
+		Ephemeral:            true,
+		EmptyVisibleFallback: "[no-op]",
+	}, "internal draft trigger", nil)
+	if err != nil {
+		t.Fatalf("RunStream failed: %v", err)
+	}
+	if text != "[no-op]" {
+		t.Fatalf("autonomous refusal = %q, want no-op", text)
+	}
+	if len(store.appended) != 0 {
+		t.Fatalf("autonomous refusal persisted messages: %#v", store.appended)
+	}
+}
+
+func TestRunTrackedPromptOnlyMapsRefusalToNoOp(t *testing.T) {
+	store := &fakeMessageStore{
+		dialog: []bs.Message{{Role: "user", Content: "previous turn"}},
+	}
+	provider := &scriptedProvider{responses: []*bs.CompletionResponse{{
+		Content:    []bs.ContentBlock{{Type: "text", Text: "provider refusal copy"}},
+		StopReason: "refusal",
+	}}}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	loop := NewLoop(provider, store, bs.NewToolRegistry(), nil, &bs.Config{}, logger)
+	result, err := loop.RunTracked(context.Background(), RunConfig{
+		SessionID:            "s1",
+		SystemPrompt:         "base system",
+		Model:                "test-model",
+		MaxTokens:            64,
+		MaxTurns:             1,
+		MessageBudget:        6000,
+		PromptOnlyInput:      true,
+		Ephemeral:            true,
+		EmptyVisibleFallback: "[no-op]",
+	}, "internal draft trigger")
+	if err != nil {
+		t.Fatalf("RunTracked failed: %v", err)
+	}
+	if result.Text != "[no-op]" {
+		t.Fatalf("autonomous refusal = %q, want no-op", result.Text)
+	}
+	if len(store.appended) != 0 {
+		t.Fatalf("autonomous refusal persisted messages: %#v", store.appended)
+	}
+}
+
+func assertPromptOnlyRequest(t *testing.T, requests []bs.CompletionRequest, wantInput string) {
+	t.Helper()
+	if len(requests) != 1 {
+		t.Fatalf("want one provider request, got %d", len(requests))
+	}
+	messages := requests[0].Messages
+	if len(messages) != 2 {
+		t.Fatalf("want persisted dialog plus prompt-only input, got %#v", messages)
+	}
+	got := messages[1]
+	if got.Role != "user" || got.Content != wantInput {
+		t.Fatalf("prompt-only input = %#v, want role=user content=%q", got, wantInput)
+	}
+}
+
+func assertOnlyAssistantPersisted(t *testing.T, appended []bs.Message, wantText string) {
+	t.Helper()
+	if len(appended) != 1 {
+		t.Fatalf("want only assistant append, got %#v", appended)
+	}
+	if appended[0].Role != "assistant" {
+		t.Fatalf("persisted message role = %q, want assistant", appended[0].Role)
+	}
+	if got := bs.ExtractText(bs.NormalizeContent(appended[0].Content)); got != wantText {
+		t.Fatalf("persisted assistant text = %q, want %q", got, wantText)
+	}
+}
+
 func TestRunTrackedUsesVisibleDialogAndCurrentToolScratchpad(t *testing.T) {
 	store := &fakeMessageStore{
 		dialog: []bs.Message{{Role: "user", Content: "hello"}},
@@ -614,6 +863,16 @@ func TestRunTrackedTurnContextSaysNoToolsWhenOverrideEmpty(t *testing.T) {
 type scriptedProvider struct {
 	requests  []bs.CompletionRequest
 	responses []*bs.CompletionResponse
+}
+
+type batchOnlyProvider struct {
+	requests []bs.CompletionRequest
+	response *bs.CompletionResponse
+}
+
+func (p *batchOnlyProvider) Complete(_ context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
+	p.requests = append(p.requests, req)
+	return p.response, nil
 }
 
 func (p *scriptedProvider) Complete(_ context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {

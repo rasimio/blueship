@@ -27,7 +27,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		cfg.Model = a.cfg.Models.Primary.Name
 	}
 
-	if !cfg.SkipUserAppend {
+	if !cfg.SkipUserAppend && !cfg.PromptOnlyInput {
 		started := time.Now()
 		err := a.store.Append(ctx, cfg.SessionID, bs.Message{
 			Role:             "user",
@@ -56,7 +56,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	if loadErr != nil {
 		return "", nil, fmt.Errorf("load dialog messages: %w", loadErr)
 	}
-	feltTime := feltTimeContext(dialogMessages, cfg.TurnNow)
+	feltTime := feltTimeContext(dialogMessages, cfg.TurnNow, !cfg.PromptOnlyInput)
 	dialogMessages = annotateDialogDays(dialogMessages, cfg.TurnNow)
 	dialogTokens := estimateMessagesTokens(dialogMessages)
 
@@ -72,6 +72,9 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	// the next LLM call through this in-memory transcript instead of consuming
 	// the next turn's dialogue budget.
 	convo := cloneMessages(dialogMessages)
+	if cfg.PromptOnlyInput {
+		convo = append(convo, bs.Message{Role: "user", Content: userMessage})
+	}
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		baseSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, "")
@@ -173,7 +176,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		a.logger.Info("LLM response", responseAttrs...)
 		usedEmptyVisibleFallback := false
 		if !hasVisibleOutput(resp.Content) && (resp.StopReason == "end_turn" || resp.StopReason == "max_tokens") {
-			text := a.emptyVisibleFallback()
+			text := a.emptyVisibleFallback(cfg)
 			a.logger.Warn("LLM returned terminal response with no visible output; using fallback",
 				"model", cfg.Model,
 				"role", cfg.Role,
@@ -243,7 +246,12 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			// Same as Run() — surface explicitly so the user gets feedback.
 			a.logger.Warn("LLM refused to respond (stream)", "model", cfg.Model, "turn", turn+1)
 			text := accumulated.String()
-			if text == "" {
+			if cfg.PromptOnlyInput && cfg.Ephemeral &&
+				strings.TrimSpace(cfg.EmptyVisibleFallback) != "" {
+				// A private autonomous draft must never turn provider safety
+				// copy into a user-facing attempt at contact.
+				text = a.emptyVisibleFallback(cfg)
+			} else if text == "" {
 				text = a.cfg.UI.ModelRefused
 				if cb != nil && cb.OnText != nil {
 					cb.OnText(text)

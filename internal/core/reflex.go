@@ -82,13 +82,14 @@ type CandidateRule struct {
 
 // RuleContext carries the current situation for rule engine evaluation.
 type RuleContext struct {
-	UserID   string  // user identifier
-	Intent   string  // from reflex (optional, for intent-scoped rules)
-	Strategy string  // from AME: warm, neutral, empathetic, etc.
-	Energy   float64 // user energy level (0-1)
-	Stress   float64 // user stress level (0-1)
-	Hour     int     // current hour (0-23)
-	Message  string  // user message text
+	UserID        string   // user identifier
+	Intent        string   // from reflex (optional, for intent-scoped rules)
+	Strategy      string   // from AME: warm, neutral, empathetic, etc.
+	Energy        float64  // user energy level (0-1)
+	Stress        float64  // user stress level (0-1)
+	Hour          int      // current hour (0-23)
+	Message       string   // user message text
+	AllowedScopes []string // nil/empty means all rule scopes are eligible
 }
 
 // ActiveRule is a rule matched by the rule engine.

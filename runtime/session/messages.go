@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 
 	bs "github.com/rasimio/blueship/internal/core"
@@ -33,6 +34,150 @@ func (s *Store) AppendReturning(ctx context.Context, sessionID string, msg bs.Me
 	blocks := bs.NormalizeContent(msg.Content)
 	tokens := bs.EstimateTokens(blocks)
 	return s.appendInternal(ctx, sessionID, msg, blocks, nil, tokens)
+}
+
+// UserMessageAnchor identifies the latest real human message and when it
+// became durable. The timestamp lets the gateway distinguish a persisted
+// message from newer transport ingress still waiting in a debounce queue.
+type UserMessageAnchor struct {
+	ID        string
+	CreatedAt time.Time
+}
+
+// LatestUserMessageAnchor returns the latest real user-message anchor in a
+// session. Prompt-only autonomous inputs, tool results, and turn boundaries
+// cannot advance it.
+func (s *Store) LatestUserMessageAnchor(ctx context.Context, sessionID string) (UserMessageAnchor, error) {
+	var anchor UserMessageAnchor
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id::text, created_at FROM chat_messages
+		  WHERE session_id = $1 AND role = 'user' AND tool_use_id IS NULL
+		  ORDER BY created_at DESC, id DESC LIMIT 1`,
+		sessionID,
+	).Scan(&anchor.ID, &anchor.CreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return UserMessageAnchor{}, nil
+		}
+		return UserMessageAnchor{}, fmt.Errorf("latest user message anchor: %w", err)
+	}
+	return anchor, nil
+}
+
+// LatestUserMessageID is retained for callers that need only the stable id.
+func (s *Store) LatestUserMessageID(ctx context.Context, sessionID string) (string, error) {
+	anchor, err := s.LatestUserMessageAnchor(ctx, sessionID)
+	return anchor.ID, err
+}
+
+// LatestDialogMessageID returns the newest provider-visible dialogue row. It
+// is a second optimistic-concurrency token for autonomous turns: an assistant
+// notification appended after drafting must invalidate the old draft even
+// when the latest human anchor itself did not change.
+func (s *Store) LatestDialogMessageID(ctx context.Context, sessionID string) (string, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id::text FROM chat_messages
+		  WHERE session_id = $1 AND role IN ('user', 'assistant')
+		  ORDER BY created_at DESC, id DESC LIMIT 1`,
+		sessionID,
+	).Scan(&id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", fmt.Errorf("latest dialog message id: %w", err)
+	}
+	return id, nil
+}
+
+// AppendAutonomousAssistant atomically inserts an invisible turn boundary and
+// its assistant message. The boundary prevents write-time consumers from
+// treating an assistant-initiated message as the answer to the previous user
+// turn, while visible-dialog readers already ignore non-user/assistant roles.
+func (s *Store) AppendAutonomousAssistant(
+	ctx context.Context,
+	attemptID uuid.UUID,
+	sessionID, text string,
+	tgMessageID int64,
+	deliveredAt time.Time,
+) error {
+	text = strings.TrimSpace(text)
+	if attemptID == uuid.Nil || sessionID == "" || text == "" {
+		return fmt.Errorf("append autonomous assistant: attempt, session, and text are required")
+	}
+	if deliveredAt.IsZero() {
+		deliveredAt = time.Now()
+	}
+	boundaryID, assistantID := bs.AutonomousTurnMessageIDs(attemptID)
+	boundaryJSON, err := json.Marshal([]bs.ContentBlock{})
+	if err != nil {
+		return fmt.Errorf("append autonomous assistant: marshal boundary: %w", err)
+	}
+	assistantBlocks := []bs.ContentBlock{{Type: "text", Text: text}}
+	assistantJSON, err := json.Marshal(assistantBlocks)
+	if err != nil {
+		return fmt.Errorf("append autonomous assistant: marshal message: %w", err)
+	}
+	tokens := bs.EstimateTokens(assistantBlocks)
+	var tgMID any
+	if tgMessageID != 0 {
+		tgMID = tgMessageID
+	}
+
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("append autonomous assistant: begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// transaction_timestamp() is stable inside a PostgreSQL transaction.
+	// Offset the invisible boundary explicitly so every created_at-only reader
+	// observes boundary before assistant rather than relying on random UUIDs.
+	boundaryResult, err := tx.ExecContext(ctx,
+		`INSERT INTO chat_messages
+		    (id, soul_id, session_id, role, content, token_estimate, created_at)
+		 VALUES ($1, $4::uuid, $2, 'turn_boundary', $3, 0,
+		         $5 - interval '1 microsecond')
+		 ON CONFLICT (id) DO NOTHING`,
+		boundaryID, sessionID, boundaryJSON, bs.SoulIDFromContext(ctx), deliveredAt,
+	)
+	if err != nil {
+		return fmt.Errorf("append autonomous assistant: insert boundary: %w", err)
+	}
+	assistantResult, err := tx.ExecContext(ctx,
+		`INSERT INTO chat_messages
+		    (id, soul_id, session_id, role, content, token_estimate, tg_message_id, created_at)
+		 VALUES ($1, $6::uuid, $2, 'assistant', $3, $4, $5,
+		         $7)
+		 ON CONFLICT (id) DO NOTHING`,
+		assistantID, sessionID, assistantJSON, tokens, tgMID, bs.SoulIDFromContext(ctx), deliveredAt,
+	)
+	if err != nil {
+		return fmt.Errorf("append autonomous assistant: insert message: %w", err)
+	}
+	boundaryInserted, err := boundaryResult.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("append autonomous assistant: boundary rows affected: %w", err)
+	}
+	assistantInserted, err := assistantResult.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("append autonomous assistant: message rows affected: %w", err)
+	}
+	if _, err = tx.ExecContext(ctx,
+		`UPDATE chat_sessions
+		 SET token_count = token_count + $2,
+		     message_count = message_count + $3,
+		     updated_at = NOW()
+		 WHERE id = $1`,
+		sessionID, tokens*int(assistantInserted), boundaryInserted+assistantInserted,
+	); err != nil {
+		return fmt.Errorf("append autonomous assistant: update session counters: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("append autonomous assistant: commit: %w", err)
+	}
+	return nil
 }
 
 // LookupByTGMessageID finds the chat_messages row id for a Telegram
@@ -156,6 +301,7 @@ func (s *Store) MessagesForAPI(ctx context.Context, sessionID string, maxTokens 
 		`SELECT id, session_id, role, content, tool_use_id, token_estimate, created_at
 		 FROM chat_messages
 		 WHERE session_id = $1
+		   AND role IN ('user', 'assistant')
 		 ORDER BY created_at DESC
 		 LIMIT 200`,
 		sessionID,
@@ -306,6 +452,7 @@ func toolContentString(content any) string {
 }
 
 func messagesForAPIFromRows(msgs []Message, maxTokens int) []bs.Message {
+	msgs = providerMessageRows(msgs)
 	if len(msgs) == 0 {
 		return nil
 	}
@@ -328,6 +475,16 @@ func messagesForAPIFromRows(msgs []Message, maxTokens int) []bs.Message {
 	result = trimOrphanedLeading(result)
 	result = sanitizeOrphanedToolUse(result)
 
+	return result
+}
+
+func providerMessageRows(msgs []Message) []Message {
+	result := make([]Message, 0, len(msgs))
+	for _, msg := range msgs {
+		if msg.Role == "user" || msg.Role == "assistant" {
+			result = append(result, msg)
+		}
+	}
 	return result
 }
 
@@ -617,6 +774,7 @@ func (s *Store) AllMessagesForAPI(ctx context.Context, sessionID string) ([]bs.M
 		`SELECT id, session_id, role, content, tool_use_id, token_estimate, created_at
 		 FROM chat_messages
 		 WHERE session_id = $1
+		   AND role IN ('user', 'assistant')
 		 ORDER BY created_at ASC`,
 		sessionID,
 	)

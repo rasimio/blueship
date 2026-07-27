@@ -140,6 +140,39 @@ type Deps struct {
 	// of being retried and risking a duplicate reminder.
 	SendToUserOnce func(ctx context.Context, userID uuid.UUID, text string) (TaskNotificationReceipt, error)
 
+	// SendConversationMessage is the dialogue-aware path for a background tool
+	// that speaks directly to the current user. Unlike raw SendToUser, the
+	// implementation serializes with chat turns and persists the assistant
+	// message into the shared conversation. Nil falls back to SendToUser for
+	// framework hosts without a gateway coordinator.
+	SendConversationMessage func(ctx context.Context, userID uuid.UUID, text string) error
+
+	// DraftAutonomousTurn asks the live chat cortex for an optional,
+	// prompt-only assistant turn. It is wired after Gateway construction, so
+	// agent handlers must read it from AgentDeps at execution time.
+	DraftAutonomousTurn AutonomousTurnDrafter
+
+	// FinalizeAutonomousNotification durably confirms a provider-acknowledged
+	// autonomous turn and projects it into the shared dialogue. Gateway calls
+	// it while holding the pair-scoped turn lock, before any later Cortex turn
+	// may read that dialogue. Nil leaves confirmation to the task scheduler.
+	FinalizeAutonomousNotification func(
+		ctx context.Context,
+		attemptID uuid.UUID,
+		receipt TaskNotificationReceipt,
+	) error
+
+	// EnsureAutonomousHistory repairs every confirmed, unprojected autonomous
+	// turn for one exact live conversation. Gateway calls it under the same
+	// pair-scoped turn lock before building Cortex context. This is deliberately
+	// a Deps-only runtime seam: it coordinates framework stores and is not host
+	// configuration.
+	EnsureAutonomousHistory func(
+		ctx context.Context,
+		userID, soulID uuid.UUID,
+		sessionID string,
+	) error
+
 	// SendToUserAttachment is the file sibling of SendToUser: it ships a
 	// CDN-resolved attachment (PDF / image / text) out the user's paired
 	// bot. Lets the agent-task notify path deliver `[attached: UUID]`
@@ -175,37 +208,41 @@ func (d *Deps) DB(module string) (*sqlx.DB, error) {
 // The DB pool and Redis are shared (goroutine-safe).
 func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 	return &Deps{
-		Config:                      d.Config,
-		Logger:                      d.Logger,
-		Redis:                       d.Redis,
-		UserID:                      userID,
-		ChatID:                      chatID,
-		IsOwner:                     isOwner,
-		Embedder:                    d.Embedder,
-		LLM:                         d.LLM,
-		Sender:                      d.Sender,
-		ModelStore:                  d.ModelStore,
-		RoleTools:                   d.RoleTools,
-		Prompts:                     d.Prompts,
-		Users:                       d.Users,
-		Sessions:                    d.Sessions,
-		UsageRecorder:               d.UsageRecorder,
-		ContextInjector:             d.ContextInjector,
-		ReflexPreparer:              d.ReflexPreparer,
-		RuleEngine:                  d.RuleEngine,
-		MessageEncoder:              d.MessageEncoder,
-		TurnCompletedHook:           d.TurnCompletedHook,
-		AgentIterationCompletedHook: d.AgentIterationCompletedHook,
-		ResolveSoul:                 d.ResolveSoul,
-		ResolveTelegramChat:         d.ResolveTelegramChat,
-		SendToUser:                  d.SendToUser,
-		SendToUserOnce:              d.SendToUserOnce,
-		SendToUserAttachment:        d.SendToUserAttachment,
-		BotOnboarding:               d.BotOnboarding,
-		DeeplinkLogin:               d.DeeplinkLogin,
-		DeeplinkLink:                d.DeeplinkLink,
-		AuthorizeExecution:          d.AuthorizeExecution,
-		pool:                        d.pool,
+		Config:                         d.Config,
+		Logger:                         d.Logger,
+		Redis:                          d.Redis,
+		UserID:                         userID,
+		ChatID:                         chatID,
+		IsOwner:                        isOwner,
+		Embedder:                       d.Embedder,
+		LLM:                            d.LLM,
+		Sender:                         d.Sender,
+		ModelStore:                     d.ModelStore,
+		RoleTools:                      d.RoleTools,
+		Prompts:                        d.Prompts,
+		Users:                          d.Users,
+		Sessions:                       d.Sessions,
+		UsageRecorder:                  d.UsageRecorder,
+		ContextInjector:                d.ContextInjector,
+		ReflexPreparer:                 d.ReflexPreparer,
+		RuleEngine:                     d.RuleEngine,
+		MessageEncoder:                 d.MessageEncoder,
+		TurnCompletedHook:              d.TurnCompletedHook,
+		AgentIterationCompletedHook:    d.AgentIterationCompletedHook,
+		ResolveSoul:                    d.ResolveSoul,
+		ResolveTelegramChat:            d.ResolveTelegramChat,
+		SendToUser:                     d.SendToUser,
+		SendToUserOnce:                 d.SendToUserOnce,
+		SendConversationMessage:        d.SendConversationMessage,
+		DraftAutonomousTurn:            d.DraftAutonomousTurn,
+		FinalizeAutonomousNotification: d.FinalizeAutonomousNotification,
+		EnsureAutonomousHistory:        d.EnsureAutonomousHistory,
+		SendToUserAttachment:           d.SendToUserAttachment,
+		BotOnboarding:                  d.BotOnboarding,
+		DeeplinkLogin:                  d.DeeplinkLogin,
+		DeeplinkLink:                   d.DeeplinkLink,
+		AuthorizeExecution:             d.AuthorizeExecution,
+		pool:                           d.pool,
 	}
 }
 

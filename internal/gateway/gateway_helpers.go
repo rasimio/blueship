@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	bs "github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/runtime/session"
 )
@@ -246,6 +248,18 @@ func (g *Gateway) GetOrCreateSession(ctx context.Context, us *UserState) (*sessi
 // Caller MUST pin the soul on ctx via bs.WithSoulID; without it
 // GetOrCreate cross-pollinates sessions across souls.
 func (g *Gateway) ResetSession(ctx context.Context, userID string) (oldID, newID string, err error) {
+	parsedUserID, parseErr := uuid.Parse(userID)
+	if parseErr != nil {
+		return "", "", fmt.Errorf("reset: invalid user id %q: %w", userID, parseErr)
+	}
+	soulID, ok := bs.SoulIDFromContextOK(ctx)
+	if !ok || soulID == uuid.Nil {
+		return "", "", fmt.Errorf("reset: soul id is required")
+	}
+	turnMu := g.turnMutex(parsedUserID, soulID)
+	turnMu.Lock()
+	defer turnMu.Unlock()
+
 	if g.deps.ModelStore != nil {
 		_ = g.deps.ModelStore.Refresh(ctx)
 	}
@@ -255,6 +269,9 @@ func (g *Gateway) ResetSession(ctx context.Context, userID string) (oldID, newID
 	}
 	if sess == nil {
 		return "", "", fmt.Errorf("reset: no session for user %s", userID)
+	}
+	if err := g.ensureAutonomousHistoryLocked(ctx, parsedUserID, soulID, sess.ID); err != nil {
+		return "", "", fmt.Errorf("reset: %w", err)
 	}
 	oldID = sess.ID
 	if err := g.store.Archive(ctx, sess.ID); err != nil {
@@ -406,6 +423,14 @@ type pendingMsg struct {
 	text      string
 	images    []bs.ContentBlock
 	messageID int
+	// activityTracked means transport ingress has already advanced the
+	// pair-scoped activity fence. processMessages clears the pending count
+	// only after the turn has finished while preserving the monotonic version.
+	activityTracked bool
+	// activityVersion is the fence generation assigned at transport ingress.
+	// It lets processMessages distinguish a durable batch from a newer
+	// preprocessing attempt that failed while this batch was running.
+	activityVersion uint64
 	// rawAttachments is the per-turn list of files we want to push
 	// into the host's CDN (vaelum.chat_attachments + disk store) once
 	// the session id is known. We keep the bytes here, not in the

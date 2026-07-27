@@ -77,8 +77,270 @@ type Gateway struct {
 	extractInsightPrompt     string   // system prompt for insight extraction
 	selfReflectionMarkers    []string // optional self_reflection_markers.md (JSON array)
 
-	mu    sync.Mutex
-	users map[string]*UserState // keyed by canonical chatID ("telegram:123", "voice:owner")
+	mu sync.Mutex
+	// Entries are keyed by transport identity. Telegram keys include bot id:
+	// private-chat ids are global user ids and repeat across every bot the
+	// same person talks to. Platform keys also include soul id.
+	users map[string]*UserState
+
+	// turnLocks serializes every chat turn for one (user, soul), regardless
+	// of transport. A web message, a Telegram message, and an autonomous
+	// draft/commit must never observe or mutate the same live session
+	// concurrently.
+	turnLocks sync.Map // map[string]*sync.Mutex
+
+	// conversationActivity closes the gap between transport ingress and
+	// chat_messages persistence. In particular, a Telegram message spends a
+	// short time in the debouncer before processMessages can append it. An
+	// autonomous turn must already treat that message as fresh human activity.
+	activityStates   sync.Map // map[string]*conversationActivityState
+	activityBootOnce sync.Once
+	activityBootID   uuid.UUID
+}
+
+func (g *Gateway) turnMutex(userID, soulID uuid.UUID) *sync.Mutex {
+	key := conversationKey(userID, soulID)
+	lock, _ := g.turnLocks.LoadOrStore(key, &sync.Mutex{})
+	return lock.(*sync.Mutex)
+}
+
+func conversationKey(userID, soulID uuid.UUID) string {
+	return userID.String() + ":" + soulID.String()
+}
+
+type conversationActivityState struct {
+	mu            sync.Mutex
+	Version       uint64
+	Pending       int
+	LastInboundAt time.Time
+	// UnfinalizedAutonomous keeps the provider receipt alive across the small
+	// ACK→journal window. A later turn retries these entries under turnMu and
+	// fails closed until the shared dialogue contains the sent pulse.
+	UnfinalizedAutonomous map[uuid.UUID]bs.TaskNotificationReceipt
+}
+
+type conversationActivitySnapshot struct {
+	Token         string
+	Version       uint64
+	Pending       int
+	LastInboundAt time.Time
+}
+
+func (g *Gateway) activityState(userID, soulID uuid.UUID) *conversationActivityState {
+	key := conversationKey(userID, soulID)
+	state, _ := g.activityStates.LoadOrStore(key, &conversationActivityState{})
+	return state.(*conversationActivityState)
+}
+
+func (g *Gateway) activityBoot() uuid.UUID {
+	g.activityBootOnce.Do(func() {
+		g.activityBootID = uuid.New()
+	})
+	return g.activityBootID
+}
+
+func (g *Gateway) activitySnapshotLocked(state *conversationActivityState) conversationActivitySnapshot {
+	return conversationActivitySnapshot{
+		Token:         fmt.Sprintf("%s:%d", g.activityBoot(), state.Version),
+		Version:       state.Version,
+		Pending:       state.Pending,
+		LastInboundAt: state.LastInboundAt,
+	}
+}
+
+func (g *Gateway) lockActivity(userID, soulID uuid.UUID) (conversationActivitySnapshot, func()) {
+	state := g.activityState(userID, soulID)
+	state.mu.Lock()
+	return g.activitySnapshotLocked(state), state.mu.Unlock
+}
+
+func (g *Gateway) admitInboundActivity(us *UserState) uint64 {
+	if us == nil {
+		return 0
+	}
+	state := g.activityState(us.UserID, us.SoulID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.Version++
+	state.Pending++
+	state.LastInboundAt = time.Now()
+	return state.Version
+}
+
+func (g *Gateway) trackInboundActivity(us *UserState, msgs []pendingMsg) {
+	if us == nil {
+		return
+	}
+	var trackedIndexes []int
+	for i := range msgs {
+		if msgs[i].activityTracked || msgs[i].ephemeral {
+			continue
+		}
+		msgs[i].activityTracked = true
+		trackedIndexes = append(trackedIndexes, i)
+	}
+	if len(trackedIndexes) == 0 {
+		return
+	}
+
+	state := g.activityState(us.UserID, us.SoulID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.Version++
+	for _, i := range trackedIndexes {
+		msgs[i].activityVersion = state.Version
+	}
+	state.Pending += len(trackedIndexes)
+	state.LastInboundAt = time.Now()
+}
+
+func (g *Gateway) clearInboundActivity(us *UserState, msgs []pendingMsg) {
+	if us == nil {
+		return
+	}
+	tracked := 0
+	for _, msg := range msgs {
+		if msg.activityTracked {
+			tracked++
+		}
+	}
+	if tracked == 0 {
+		return
+	}
+	g.clearInboundActivityCount(us, tracked)
+}
+
+// completeInboundActivity retires a batch admitted at transport ingress.
+// durable is true only when processMessages observed a new persisted user
+// anchor. Failed/silent preflight must roll LastInboundAt back once no other
+// admitted batch remains, while Version stays monotonic so every older
+// autonomous draft remains stale.
+func (g *Gateway) completeInboundActivity(us *UserState, msgs []pendingMsg, durable bool) {
+	if us == nil {
+		return
+	}
+	tracked := 0
+	var latestBatchVersion uint64
+	for _, msg := range msgs {
+		if !msg.activityTracked {
+			continue
+		}
+		tracked++
+		if msg.activityVersion > latestBatchVersion {
+			latestBatchVersion = msg.activityVersion
+		}
+	}
+	if tracked == 0 {
+		return
+	}
+
+	state := g.activityState(us.UserID, us.SoulID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.Pending -= tracked
+	if state.Pending < 0 {
+		state.Pending = 0
+	}
+	if state.Pending != 0 {
+		return
+	}
+	if !durable || state.Version > latestBatchVersion {
+		state.LastInboundAt = time.Time{}
+	}
+}
+
+func (g *Gateway) clearInboundActivityCount(us *UserState, tracked int) {
+	if us == nil || tracked <= 0 {
+		return
+	}
+	state := g.activityState(us.UserID, us.SoulID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.Pending -= tracked
+	if state.Pending < 0 {
+		state.Pending = 0
+	}
+}
+
+func (g *Gateway) rollbackInboundActivity(us *UserState, version uint64) {
+	if us == nil || version == 0 {
+		return
+	}
+	state := g.activityState(us.UserID, us.SoulID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.Pending > 0 {
+		state.Pending--
+	}
+	// Keep the rotated version so every older autonomous draft stays stale,
+	// but do not let an unsupported/failed preprocessing attempt suppress all
+	// future pulses forever.
+	if state.Version == version && state.Pending == 0 {
+		state.LastInboundAt = time.Time{}
+	}
+}
+
+func (g *Gateway) rememberAutonomousFinalization(
+	userID, soulID, attemptID uuid.UUID,
+	receipt bs.TaskNotificationReceipt,
+) {
+	if attemptID == uuid.Nil || g.deps.FinalizeAutonomousNotification == nil {
+		return
+	}
+	state := g.activityState(userID, soulID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.UnfinalizedAutonomous == nil {
+		state.UnfinalizedAutonomous = make(map[uuid.UUID]bs.TaskNotificationReceipt)
+	}
+	state.UnfinalizedAutonomous[attemptID] = receipt
+}
+
+// ensureAutonomousHistoryLocked is called only while the pair-scoped turnMu is
+// held. It first closes any in-process ACK→confirm window, then drains durable
+// sent rows for this exact session. A failure is intentionally returned to the
+// caller: running Cortex on a dialogue that omits its own visible message would
+// break conversational continuity.
+func (g *Gateway) ensureAutonomousHistoryLocked(
+	ctx context.Context,
+	userID, soulID uuid.UUID,
+	sessionID string,
+) error {
+	state := g.activityState(userID, soulID)
+	state.mu.Lock()
+	pending := make(map[uuid.UUID]bs.TaskNotificationReceipt, len(state.UnfinalizedAutonomous))
+	for id, receipt := range state.UnfinalizedAutonomous {
+		pending[id] = receipt
+	}
+	state.mu.Unlock()
+
+	if len(pending) > 0 && g.deps.FinalizeAutonomousNotification == nil {
+		return fmt.Errorf("autonomous notification finalizer unavailable")
+	}
+	for id, receipt := range pending {
+		if err := g.deps.FinalizeAutonomousNotification(ctx, id, receipt); err != nil {
+			return fmt.Errorf("finalize autonomous notification %s: %w", id, err)
+		}
+		state.mu.Lock()
+		delete(state.UnfinalizedAutonomous, id)
+		state.mu.Unlock()
+	}
+	if g.deps.EnsureAutonomousHistory != nil {
+		if err := g.deps.EnsureAutonomousHistory(ctx, userID, soulID, sessionID); err != nil {
+			return fmt.Errorf("ensure autonomous history: %w", err)
+		}
+	}
+	return nil
+}
+
+func (g *Gateway) activitySnapshot(userID, soulID uuid.UUID) conversationActivitySnapshot {
+	snapshot, unlock := g.lockActivity(userID, soulID)
+	defer unlock()
+	return snapshot
+}
+
+func telegramUserCacheKey(botID uuid.UUID, chatID string) string {
+	return "telegram-bot:" + botID.String() + ":" + chatID
 }
 
 // parseCommand extracts the bare command from a Telegram slash command,
@@ -463,6 +725,106 @@ func (g *Gateway) Run(ctx context.Context) {
 	}
 }
 
+// prepareTelegramInbound performs only the cheap routing/policy work needed to
+// identify a conversation, then admits the message to its pair-scoped activity
+// fence before any document download, PDF rendering, or transcription starts.
+// false means the update was fully handled or intentionally ignored.
+func (g *Gateway) prepareTelegramInbound(
+	ctx context.Context,
+	bi *botInstance,
+	msg *telegram.Message,
+	text string,
+) (*UserState, uint64, bool) {
+	rawChatID := msg.Chat.ID
+	chatID := tgCanonical(rawChatID)
+	tgUserID := msg.From.ID
+
+	// Group chats are admitted only when this bot was actually addressed.
+	if msg.Chat.Type != "private" && !strings.HasPrefix(text, "/") {
+		if !g.shouldProcessGroupMessage(bi, msg, text) {
+			g.logger.Debug("gateway: group message not addressed, skipping",
+				"chat_id", chatID,
+				"chat_type", msg.Chat.Type,
+			)
+			return nil, 0, false
+		}
+	}
+
+	if strings.HasPrefix(strings.TrimLeft(text, " \n\t\r"), "[a2a-trace]") {
+		g.logger.Debug("gateway: a2a trace message, visibility only — skipping cortex turn",
+			"chat_id", chatID)
+		return nil, 0, false
+	}
+	if g.maybeRunDeeplinkLogin(ctx, bi, rawChatID, tgUserID, text) {
+		return nil, 0, false
+	}
+	if g.maybeRunDeeplinkLink(ctx, bi, rawChatID, tgUserID, text) {
+		return nil, 0, false
+	}
+	if g.maybeRunBotOnboarding(ctx, bi, chatID, rawChatID, tgUserID, text) {
+		return nil, 0, false
+	}
+
+	us, err := g.getOrInitTelegramUser(ctx, bi, chatID, rawChatID, tgUserID)
+	if err != nil {
+		if errors.Is(err, bs.ErrTelegramChatUnpaired) {
+			g.replyUnpaired(ctx, bi, chatID)
+			return nil, 0, false
+		}
+		g.logger.Debug("ignored message", "chat_id", chatID, "error", err)
+		return nil, 0, false
+	}
+	decision, err := g.authorizeExecution(ctx, us.UserID, us.SoulID, bs.ExecutionInteractive, "telegram")
+	if err != nil {
+		g.logger.Warn("gateway: execution authorization failed",
+			"chat_id", chatID, "user_id", us.UserID, "error", err)
+		return nil, 0, false
+	}
+	if !decision.Allowed {
+		g.logger.Info("gateway: execution denied",
+			"chat_id", chatID, "user_id", us.UserID, "reason", decision.Reason)
+		if bi != nil && bi.client != nil {
+			_, _ = bi.client.SendMessage(ctx, fmt.Sprintf("%d", rawChatID), g.deps.Config.UI.ExecutionDenied)
+		}
+		return nil, 0, false
+	}
+
+	if cmd, forUs := g.parseCommand(bi, text); cmd == "/reset" && forUs {
+		admissionVersion := g.admitInboundActivity(us)
+		go func() {
+			resetSucceeded := false
+			defer func() {
+				if resetSucceeded {
+					g.clearInboundActivityCount(us, 1)
+				} else {
+					g.rollbackInboundActivity(us, admissionVersion)
+				}
+			}()
+			rctx := bs.WithSoulID(context.Background(), us.SoulID)
+			oldID, newID, resetErr := g.ResetSession(rctx, us.UserID.String())
+			if resetErr != nil {
+				g.logger.Warn("telegram /reset failed",
+					"chat_id", us.ChatID, "user_id", us.UserID, "error", resetErr)
+				if bi != nil && bi.client != nil {
+					_, _ = bi.client.SendMessage(rctx, fmt.Sprintf("%d", rawChatID), "Reset failed.")
+				}
+				return
+			}
+			resetSucceeded = true
+			g.logger.Info("telegram /reset done",
+				"chat_id", us.ChatID, "user_id", us.UserID,
+				"old_session_id", oldID, "new_session_id", newID)
+			if bi != nil && bi.client != nil {
+				_, _ = bi.client.SendMessage(rctx, fmt.Sprintf("%d", rawChatID), "Session reset. New thread.")
+			}
+		}()
+		return nil, 0, false
+	}
+
+	admissionVersion := g.admitInboundActivity(us)
+	return us, admissionVersion, true
+}
+
 func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update telegram.Update) {
 	// Handle callback queries (inline button presses).
 	// LEGACY: the /model command's inline-keyboard callbacks land here; the
@@ -493,6 +855,19 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	if text == "" {
 		text = msg.Caption
 	}
+	if strings.TrimSpace(text) == "" && msg.Document == nil && msg.Voice == nil && msg.Video == nil && msg.VideoNote == nil && len(msg.Photo) == 0 {
+		return
+	}
+	us, admissionVersion, admitted := g.prepareTelegramInbound(ctx, bi, msg, text)
+	if !admitted {
+		return
+	}
+	handoffAdmission := false
+	defer func() {
+		if !handoffAdmission {
+			g.rollbackInboundActivity(us, admissionVersion)
+		}
+	}()
 
 	// Document attachments — single ingest path through the shared
 	// content-based classifier (blueship/attachment.Kind). Downloads
@@ -614,6 +989,31 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 						name: msg.Document.FileName, mime: mime, kind: "text", data: data,
 					})
 				default:
+					if isTranscribableVideoDocument(msg.Document.FileName, msg.Document.MimeType) {
+						if g.whisper == nil || !g.whisper.IsConfigured() {
+							text = appendDocInline(text, "[video: audio transcription unavailable]")
+						} else {
+							filename := videoDocumentTranscriptionFilename(msg.Document.FileName, msg.Document.MimeType)
+							transcriptionData, filename, prepareErr := prepareVideoForTranscription(
+								ctx, data, filename, msg.Document.MimeType,
+							)
+							if prepareErr != nil {
+								g.logger.Warn("failed to prepare video document for transcription", "error", prepareErr, "file", msg.Document.FileName)
+								text = appendDocInline(text, "[video: audio transcription failed]")
+								break
+							}
+							transcript, transcribeErr := g.whisper.Transcribe(ctx, transcriptionData, filename)
+							if transcribeErr != nil {
+								g.logger.Warn("failed to transcribe video document", "error", transcribeErr, "file", msg.Document.FileName)
+								text = appendDocInline(text, "[video: audio transcription failed]")
+							} else if strings.TrimSpace(transcript) == "" {
+								text = appendDocInline(text, "[video: no speech detected]")
+							} else {
+								text = appendVideoTranscript(text, transcript)
+							}
+						}
+						break
+					}
 					// Unsupported format (xlsx / pptx / legacy .doc / archive /
 					// arbitrary binary). Inline a short notice rather than
 					// dropping it silently — a document-only message would
@@ -621,6 +1021,36 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 					// images` guard below, and the bot would never reply at all.
 					g.logger.Info("unsupported document — inlining notice", "file", msg.Document.FileName, "mime", msg.Document.MimeType)
 					text = appendDocInline(text, fmt.Sprintf("[file: %s — I can't read this format yet; send a PDF, a .docx, or a text file]", msg.Document.FileName))
+				}
+			}
+		}
+	}
+
+	if input, ok := telegramTranscriptionInputFor(msg); ok {
+		if g.whisper == nil || !g.whisper.IsConfigured() {
+			text = appendDocInline(text, "[video: audio transcription unavailable]")
+		} else {
+			video, err := bi.client.DownloadFile(ctx, input.fileID, maxTelegramTranscriptionBytes)
+			if err != nil {
+				g.logger.Warn("failed to download video for transcription", "error", err, "kind", input.kind)
+				text = appendDocInline(text, "[video: audio transcription failed]")
+			} else {
+				transcriptionData, filename, prepareErr := prepareVideoForTranscription(
+					ctx, video, input.filename, input.mimeType,
+				)
+				if prepareErr != nil {
+					g.logger.Warn("failed to prepare video for transcription", "error", prepareErr, "kind", input.kind)
+					text = appendDocInline(text, "[video: audio transcription failed]")
+				} else {
+					transcript, err := g.whisper.Transcribe(ctx, transcriptionData, filename)
+					if err != nil {
+						g.logger.Warn("failed to transcribe video", "error", err, "kind", input.kind)
+						text = appendDocInline(text, "[video: audio transcription failed]")
+					} else if strings.TrimSpace(transcript) == "" {
+						text = appendDocInline(text, "[video: no speech detected]")
+					} else {
+						text = appendVideoTranscript(text, transcript)
+					}
 				}
 			}
 		}
@@ -706,156 +1136,21 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		return
 	}
 
-	rawChatID := msg.Chat.ID
-	chatID := tgCanonical(rawChatID)
-	tgUserID := msg.From.ID
-
-	// Group-chat routing: in a chat with more than one participant the bot
-	// only reacts to messages that are explicitly addressed to it. Private
-	// (1:1) chats bypass this filter because the human has nobody else to
-	// talk to. Slash commands are handled below via parseCommand regardless
-	// of this filter — commands are their own addressing mechanism.
-	if msg.Chat.Type != "private" && !strings.HasPrefix(text, "/") {
-		if !g.shouldProcessGroupMessage(bi, msg, text) {
-			g.logger.Debug("gateway: group message not addressed, skipping",
-				"chat_id", chatID,
-				"chat_type", msg.Chat.Type,
-			)
-			return
-		}
-	}
-
-	_ = bi // keep `bi` referenced even when the broader command dispatch is off
-	// A2A trace messages are informational broadcasts posted by bots into
-	// a shared visibility chat (e.g. rasim lab). They are never addressed
-	// to anyone — the [a2a-trace] sentinel is the cue. Gateways MUST drop
-	// them before any cortex turn is triggered, otherwise bots would react
-	// to each other's status lines and spin a feedback loop.
-	if strings.HasPrefix(strings.TrimLeft(text, " \n\t\r"), "[a2a-trace]") {
-		g.logger.Debug("gateway: a2a trace message, visibility only — skipping cortex turn",
-			"chat_id", chatID)
-		return
-	}
-
-	// LEGACY: /debug toggle. Same rationale as the other commands above —
-	// the cabinet is the right place for per-soul debug visibility, not
-	// a shared bot. Restoration: uncomment along with the sendDebugDump
-	// invocations in the response path (see `// LEGACY: sendDebugDump`).
-	//
-	// if text == "/debug" {
-	// 	us, err := g.getOrInitTelegramUser(ctx, bi, chatID, rawChatID, tgUserID)
-	// 	if err == nil {
-	// 		us.Mu.Lock()
-	// 		us.DebugMode = !us.DebugMode
-	// 		mode := "OFF"
-	// 		if us.DebugMode {
-	// 			mode = "ON"
-	// 		}
-	// 		us.Mu.Unlock()
-	// 		bi.client.SendMessage(ctx, fmt.Sprintf("%d", rawChatID), fmt.Sprintf("Debug mode: %s", mode))
-	// 	}
-	// 	return
-	// }
-
-	// Deep-link "Approve in bot" auth. The cabinet's "Login via
-	// Telegram App" button points at https://t.me/<bot>?start=login_<TOKEN>
-	// which Telegram delivers to us as /start login_<TOKEN>. We hand the
-	// token to the host's CompleteDeeplinkLogin, send the resulting
-	// confirmation/error line, and STOP — the cabinet's poll will pick
-	// up the approval next tick. Must run before maybeRunBotOnboarding
-	// because the FSM treats every /start as either welcome-back or the
-	// start of in-chat onboarding, neither of which makes sense for an
-	// auth-approval click.
-	if g.maybeRunDeeplinkLogin(ctx, bi, rawChatID, tgUserID, text) {
-		return
-	}
-
-	// Deep-link "Connect Telegram" account-linking. The cabinet's Settings
-	// button points at https://t.me/<bot>?start=link_<TOKEN>; the host first
-	// authorizes that receiving platform/user bot, then binds this
-	// chat to the signed-in user's EXISTING soul via the host's
-	// CompleteDeeplinkLink hook and STOP. Must run before maybeRunBotOnboarding
-	// for the same reason as login_ above: the FSM would otherwise treat the
-	// /start as the start of new-account onboarding instead of a link.
-	if g.maybeRunDeeplinkLink(ctx, bi, rawChatID, tgUserID, text) {
-		return
-	}
-
-	// Inline bot onboarding: when the host has wired Deps.BotOnboarding,
-	// intercept messages from chats with no vaelum.user_identities row
-	// and run the in-chat account-creation FSM. The hook checks pairing
-	// itself so a paired user's /start lands in the welcome-back path
-	// and any other inbound from a paired user falls through to the
-	// normal getOrInitTelegramUser routing. Unpaired non-/start inbound
-	// continues to replyUnpaired below — onboarding only starts when
-	// the user explicitly types /start.
-	if g.maybeRunBotOnboarding(ctx, bi, chatID, rawChatID, tgUserID, text) {
-		return
-	}
-
-	us, err := g.getOrInitTelegramUser(ctx, bi, chatID, rawChatID, tgUserID)
-	if err != nil {
-		if errors.Is(err, bs.ErrTelegramChatUnpaired) {
-			g.replyUnpaired(ctx, bi, chatID)
-			return
-		}
-		g.logger.Debug("ignored message", "chat_id", chatID, "error", err)
-		return
-	}
-	decision, err := g.authorizeExecution(ctx, us.UserID, us.SoulID, bs.ExecutionInteractive, "telegram")
-	if err != nil {
-		g.logger.Warn("gateway: execution authorization failed",
-			"chat_id", chatID, "user_id", us.UserID, "error", err)
-		return
-	}
-	if !decision.Allowed {
-		g.logger.Info("gateway: execution denied",
-			"chat_id", chatID, "user_id", us.UserID, "reason", decision.Reason)
-		if bi != nil && bi.client != nil {
-			_, _ = bi.client.SendMessage(ctx, fmt.Sprintf("%d", rawChatID), g.deps.Config.UI.ExecutionDenied)
-		}
-		return
-	}
-
-	// /reset — multi-tenant: archive the active (user, soul) chat session
-	// and open a fresh one via the same gateway method the cabinet's web
-	// reset button uses, so Telegram and HTTP/SSE stay behaviourally
-	// identical. Other legacy single-user slash commands (/session,
-	// /model, /voice) remain parked behind the `legacy_commands` build
-	// tag — those don't fit the multi-bot Vaelum world.
-	if cmd, forUs := g.parseCommand(bi, text); cmd == "/reset" && forUs {
-		go func() {
-			rctx := bs.WithSoulID(context.Background(), us.SoulID)
-			oldID, newID, rerr := g.ResetSession(rctx, us.UserID.String())
-			if rerr != nil {
-				g.logger.Warn("telegram /reset failed",
-					"chat_id", us.ChatID, "user_id", us.UserID, "error", rerr)
-				if bi != nil && bi.client != nil {
-					_, _ = bi.client.SendMessage(rctx, fmt.Sprintf("%d", rawChatID), "Reset failed.")
-				}
-				return
-			}
-			g.logger.Info("telegram /reset done",
-				"chat_id", us.ChatID, "user_id", us.UserID,
-				"old_session_id", oldID, "new_session_id", newID)
-			if bi != nil && bi.client != nil {
-				_, _ = bi.client.SendMessage(rctx, fmt.Sprintf("%d", rawChatID), "Session reset. New thread.")
-			}
-		}()
-		return
-	}
-
 	var replyToTGID int
 	if msg.ReplyToMessage != nil {
 		replyToTGID = msg.ReplyToMessage.MessageID
 	}
-	us.debounce.Add(pendingMsg{
+	pending := []pendingMsg{{
 		text:               text,
 		images:             images,
 		messageID:          msg.MessageID,
 		rawAttachments:     rawAttachments,
 		replyToTGMessageID: replyToTGID,
-	})
+		activityVersion:    admissionVersion,
+	}}
+	pending[0].activityTracked = true
+	handoffAdmission = true
+	us.debounce.Add(pending[0])
 }
 
 // uuidInTextRE matches any plausible attachment UUID inside user
@@ -954,18 +1249,18 @@ func (g *Gateway) buildUserState(chatID string, userID, soulID uuid.UUID, isOwne
 // whose Is-chain reaches it) when the chat has not been paired yet — the
 // caller runs the unpaired-chat policy via replyUnpaired.
 func (g *Gateway) getOrInitTelegramUser(ctx context.Context, bi *botInstance, chatID string, tgChatID, tgUserID int64) (*UserState, error) {
+	if bi == nil || bi.id == uuid.Nil {
+		return nil, fmt.Errorf("gateway: telegram bot identity is required")
+	}
+	cacheKey := telegramUserCacheKey(bi.id, chatID)
+
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if us, ok := g.users[chatID]; ok {
-		// Cached UserState retains its original bot binding even if a
-		// later message arrives on a different bot — same chat_id across
-		// bots should never happen in practice (Telegram chat IDs are
-		// globally unique), but rebind defensively so outbound sends use
-		// the bot the user most recently pinged.
-		if bi != nil {
-			us.bot = bi
-		}
+	if us, ok := g.users[cacheKey]; ok {
+		// A bot reload can replace the client instance while preserving its
+		// database id. Keep the pair-scoped state but refresh that transport.
+		us.bot = bi
 		return us, nil
 	}
 
@@ -985,13 +1280,9 @@ func (g *Gateway) getOrInitTelegramUser(ctx context.Context, bi *botInstance, ch
 
 	us := g.buildUserState(chatID, userID, soulID, false, bi, tgChatID)
 	us.debounce = newDebouncer(g.deps.Config.Gateway.DebounceWindow, g.deps.Config.Gateway.DebounceCap, func(msgs []pendingMsg) {
-		// Resolve the bot at flush time, not capture time: a private
-		// chat has the SAME Telegram chat id on every bot (it is the
-		// user's id), so a user talking to her own bot rides the
-		// UserState first built for the platform bot. The cache-hit
-		// path above rebinds us.bot to the bot she most recently
-		// pinged — replying through anything else means the answer
-		// arrives from the wrong bot.
+		// Each bot/chat pair owns a separate debounce queue and UserState, even
+		// though Telegram gives all of a person's private chats the same id.
+		// Resolve the client at flush time so bot-token reloads take effect.
 		g.mu.Lock()
 		flushBot := us.bot
 		g.mu.Unlock()
@@ -1002,7 +1293,7 @@ func (g *Gateway) getOrInitTelegramUser(ctx context.Context, bi *botInstance, ch
 		go g.processMessages(ctx, us, msgs, sink)
 	})
 
-	g.users[chatID] = us
+	g.users[cacheKey] = us
 	g.logger.Info("initialized telegram user",
 		"chat_id", chatID,
 		"bot_id", bi.id.String(),

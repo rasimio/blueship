@@ -24,6 +24,8 @@ type Message struct {
 	Caption        string      `json:"caption,omitempty"`
 	Document       *Document   `json:"document,omitempty"`
 	Voice          *Voice      `json:"voice,omitempty"`
+	Video          *Video      `json:"video,omitempty"`
+	VideoNote      *VideoNote  `json:"video_note,omitempty"`
 	Photo          []PhotoSize `json:"photo,omitempty"`
 	ReplyToMessage *Message    `json:"reply_to_message,omitempty"`
 }
@@ -49,6 +51,21 @@ type Voice struct {
 	FileID   string `json:"file_id"`
 	Duration int    `json:"duration"`
 	MimeType string `json:"mime_type,omitempty"`
+	FileSize int64  `json:"file_size,omitempty"`
+}
+
+// Video represents a Telegram video message.
+type Video struct {
+	FileID   string `json:"file_id"`
+	Duration int    `json:"duration"`
+	MimeType string `json:"mime_type,omitempty"`
+	FileSize int64  `json:"file_size,omitempty"`
+}
+
+// VideoNote represents a Telegram round video message.
+type VideoNote struct {
+	FileID   string `json:"file_id"`
+	Duration int    `json:"duration"`
 	FileSize int64  `json:"file_size,omitempty"`
 }
 

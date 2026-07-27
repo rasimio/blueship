@@ -99,6 +99,7 @@ func SoulIDFromContextOK(ctx context.Context) (uuid.UUID, bool) {
 // turn-completed hook. It must never appear in the chat thread. Default (unset)
 // is a normal, fully-persisted turn.
 type ephemeralCtxKey struct{}
+type autonomousTurnCtxKey struct{}
 
 // singleAttemptNotificationCtxKey marks an outbound notification whose
 // durable journal has already reserved its occurrence keys. Transports must
@@ -106,6 +107,7 @@ type ephemeralCtxKey struct{}
 // ambiguous timeout/EOF can duplicate a reminder even though the scheduler
 // itself will never call the transport a second time.
 type singleAttemptNotificationCtxKey struct{}
+type notificationAttemptIDCtxKey struct{}
 
 // WithEphemeral tags ctx as an ephemeral (read-only, non-persisting) turn.
 func WithEphemeral(ctx context.Context, ephemeral bool) context.Context {
@@ -121,6 +123,19 @@ func EphemeralFromContext(ctx context.Context) bool {
 	return v
 }
 
+// ContextWithAutonomousTurn marks context preparation as originating from an
+// assistant-initiated chat turn rather than a fresh user message.
+func ContextWithAutonomousTurn(ctx context.Context) context.Context {
+	return context.WithValue(ctx, autonomousTurnCtxKey{}, true)
+}
+
+// IsAutonomousTurn reports whether the current context belongs to an
+// assistant-initiated chat turn.
+func IsAutonomousTurn(ctx context.Context) bool {
+	v, _ := ctx.Value(autonomousTurnCtxKey{}).(bool)
+	return v
+}
+
 // ContextWithSingleAttemptNotification marks ctx as an at-most-once outbound
 // delivery. The marker is deliberately boolean and one-way: callers create a
 // child context for the transport call and never need to unset it.
@@ -133,4 +148,25 @@ func ContextWithSingleAttemptNotification(ctx context.Context) context.Context {
 func SingleAttemptNotificationFromContext(ctx context.Context) bool {
 	v, _ := ctx.Value(singleAttemptNotificationCtxKey{}).(bool)
 	return v
+}
+
+// ContextWithNotificationAttemptID attaches the durable journal identity to
+// the one permitted transport call. Autonomous history projection derives
+// deterministic message ids from it, so gateway append and journal confirm
+// are idempotent views of the same delivery.
+func ContextWithNotificationAttemptID(ctx context.Context, id uuid.UUID) context.Context {
+	if id == uuid.Nil {
+		return ctx
+	}
+	return context.WithValue(ctx, notificationAttemptIDCtxKey{}, id)
+}
+
+// NotificationAttemptIDFromContext returns the durable notification attempt
+// id carried by a scheduler-owned single-attempt delivery.
+func NotificationAttemptIDFromContext(ctx context.Context) (uuid.UUID, bool) {
+	id, ok := ctx.Value(notificationAttemptIDCtxKey{}).(uuid.UUID)
+	if !ok || id == uuid.Nil {
+		return uuid.Nil, false
+	}
+	return id, true
 }

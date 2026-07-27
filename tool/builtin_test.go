@@ -60,6 +60,43 @@ func TestMessageSendSymbolicRecipientUsesInvocationUser(t *testing.T) {
 	}
 }
 
+func TestMessageSendPrefersDialogueAwareSender(t *testing.T) {
+	t.Parallel()
+
+	wantUserID := uuid.New()
+	conversationCalls := 0
+	rawCalls := 0
+	deps := &bs.Deps{
+		Config: &bs.Config{},
+		UserID: wantUserID,
+		SendConversationMessage: func(_ context.Context, userID uuid.UUID, text string) error {
+			conversationCalls++
+			if userID != wantUserID || text != "remember this" {
+				t.Fatalf("conversation send user=%s text=%q", userID, text)
+			}
+			return nil
+		},
+		SendToUser: func(context.Context, uuid.UUID, string) error {
+			rawCalls++
+			return nil
+		},
+	}
+
+	registry := bs.NewToolRegistry()
+	RegisterBuiltinTools(registry, deps)
+	result, isError := registry.Execute(
+		context.Background(),
+		ToolMessageSend,
+		json.RawMessage(`{"to":"owner","text":"remember this"}`),
+	)
+	if isError {
+		t.Fatalf("message_send returned an error: %s", result)
+	}
+	if conversationCalls != 1 || rawCalls != 0 {
+		t.Fatalf("conversation calls=%d raw calls=%d", conversationCalls, rawCalls)
+	}
+}
+
 func TestMessageSendTenantRecipientFailsClosedWithoutScopedSender(t *testing.T) {
 	t.Parallel()
 

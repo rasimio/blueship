@@ -17,6 +17,30 @@ import (
 
 const telegramPreviewMaxRunes = 3500
 
+func hasTrackableInbound(messages []bs.InboundMessage) bool {
+	for _, message := range messages {
+		if message.Ephemeral {
+			continue
+		}
+		if strings.TrimSpace(message.Text) != "" || len(message.Audio) > 0 || len(message.Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func carryInboundAdmission(messages []pendingMsg, version uint64) bool {
+	for i := range messages {
+		if messages[i].ephemeral {
+			continue
+		}
+		messages[i].activityTracked = true
+		messages[i].activityVersion = version
+		return true
+	}
+	return false
+}
+
 func telegramPreviewText(text, toolStatus string) string {
 	text = strings.TrimSpace(text)
 	suffix := ""
@@ -53,6 +77,17 @@ func (g *Gateway) ProcessInbound(ctx context.Context, chatID string, messages []
 	if !decision.Allowed {
 		return bs.ErrExecutionDenied
 	}
+	admitted := hasTrackableInbound(messages)
+	handoffAdmission := false
+	var admissionVersion uint64
+	if admitted {
+		admissionVersion = g.admitInboundActivity(us)
+		defer func() {
+			if !handoffAdmission {
+				g.rollbackInboundActivity(us, admissionVersion)
+			}
+		}()
+	}
 	// Soul is resolved + stashed on us inside getOrInitUser; processMessages
 	// re-attaches it to ctx. Nothing to do here.
 
@@ -86,6 +121,7 @@ func (g *Gateway) ProcessInbound(ctx context.Context, chatID string, messages []
 		return nil
 	}
 
+	handoffAdmission = carryInboundAdmission(pending, admissionVersion)
 	g.processMessages(ctx, us, pending, sink)
 	return nil
 }
@@ -115,6 +151,17 @@ func (g *Gateway) ProcessInboundForUser(ctx context.Context, userID, soulID uuid
 	us, err := g.getOrInitPlatformUser(ctx, userID, soulID, transport)
 	if err != nil {
 		return fmt.Errorf("init platform user: %w", err)
+	}
+	admitted := hasTrackableInbound(messages)
+	handoffAdmission := false
+	var admissionVersion uint64
+	if admitted {
+		admissionVersion = g.admitInboundActivity(us)
+		defer func() {
+			if !handoffAdmission {
+				g.rollbackInboundActivity(us, admissionVersion)
+			}
+		}()
 	}
 
 	// Transcribe audio if present (same loop as the legacy ProcessInbound).
@@ -149,6 +196,7 @@ func (g *Gateway) ProcessInboundForUser(ctx context.Context, userID, soulID uuid
 		return nil
 	}
 
+	handoffAdmission = carryInboundAdmission(pending, admissionVersion)
 	g.processMessages(ctx, us, pending, sink)
 	return nil
 }
@@ -168,12 +216,20 @@ func (g *Gateway) PersistInterruptedForUser(_ context.Context, userID, soulID uu
 	}
 	ctx = bs.WithSoulID(ctx, us.SoulID)
 
+	turnMu := g.turnMutex(us.UserID, us.SoulID)
+	turnMu.Lock()
+	defer turnMu.Unlock()
+
 	us.Mu.Lock()
 	defer us.Mu.Unlock()
 
 	sess, err := g.GetOrCreateSession(ctx, us)
 	if err != nil {
 		g.logger.Warn("persist interrupted: session failed", "error", err)
+		return
+	}
+	if err := g.ensureAutonomousHistoryLocked(ctx, us.UserID, us.SoulID, sess.ID); err != nil {
+		g.logger.Warn("persist interrupted: autonomous history barrier failed", "error", err)
 		return
 	}
 
@@ -197,6 +253,10 @@ func (g *Gateway) getOrInitWebUser(ctx context.Context, userID, soulID uuid.UUID
 	return g.getOrInitPlatformUser(ctx, userID, soulID, "vaelum")
 }
 
+func platformUserCacheKey(transport string, userID, soulID uuid.UUID) string {
+	return transport + ":" + userID.String() + ":" + soulID.String()
+}
+
 // getOrInitPlatformUser builds (or reuses) a UserState for an
 // authenticated platform user. Unlike getOrInitUser it does not consult
 // user_profiles and does not apply the owner gate — Vaelum is the
@@ -211,11 +271,12 @@ func (g *Gateway) getOrInitPlatformUser(ctx context.Context, userID, soulID uuid
 		transport = "vaelum"
 	}
 	chatID := transport + ":" + userID.String()
+	cacheKey := platformUserCacheKey(transport, userID, soulID)
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
-	if us, ok := g.users[chatID]; ok {
+	if us, ok := g.users[cacheKey]; ok {
 		return us, nil
 	}
 
@@ -238,7 +299,7 @@ func (g *Gateway) getOrInitPlatformUser(ctx context.Context, userID, soulID uuid
 		Registry: registry,
 		Deps:     userDeps,
 	}
-	g.users[chatID] = us
+	g.users[cacheKey] = us
 	g.logger.Info("initialized web user",
 		"chat_id", chatID,
 		"user_id", userID.String(),
@@ -257,6 +318,31 @@ func (g *Gateway) appendUnlessEphemeral(ctx context.Context, sessionID string, m
 }
 
 func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pendingMsg, sink bs.ResponseSink) {
+	turnMu := g.turnMutex(us.UserID, us.SoulID)
+	turnMu.Lock()
+	defer turnMu.Unlock()
+	ctx = contextWithConversationTurn(ctx)
+	var (
+		activitySessionID      string
+		activityBaselineAnchor string
+		activityBaselineKnown  bool
+	)
+	defer func() {
+		durable := false
+		if activityBaselineKnown && activitySessionID != "" {
+			checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			latest, err := g.store.LatestUserMessageAnchor(checkCtx, activitySessionID)
+			cancel()
+			if err != nil {
+				g.logger.Warn("inbound activity: durable anchor check failed",
+					"session_id", activitySessionID, "error", err)
+			} else {
+				durable = latest.ID != "" && latest.ID != activityBaselineAnchor
+			}
+		}
+		g.completeInboundActivity(us, msgs, durable)
+	}()
+
 	us.Mu.Lock()
 	defer us.Mu.Unlock()
 	us.LoopBusy = true
@@ -367,6 +453,20 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		g.logger.Error("session error", "error", err)
 		g.sendDebugError(ctx, sink, "session", err)
 		return
+	}
+	if err := g.ensureAutonomousHistoryLocked(ctx, us.UserID, us.SoulID, sess.ID); err != nil {
+		g.logger.Error("autonomous history barrier failed",
+			"chat_id", us.ChatID, "session_id", sess.ID, "error", err)
+		g.sendDebugError(ctx, sink, "autonomous history", err)
+		return
+	}
+	if baseline, err := g.store.LatestUserMessageAnchor(ctx, sess.ID); err != nil {
+		g.logger.Warn("inbound activity: baseline anchor lookup failed",
+			"session_id", sess.ID, "error", err)
+	} else {
+		activitySessionID = sess.ID
+		activityBaselineAnchor = baseline.ID
+		activityBaselineKnown = true
 	}
 
 	g.logger.Info("processing message",
@@ -568,43 +668,16 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		})
 	}
 
-	// Per-turn tool registry: the soul's native tools plus a fresh
-	// snapshot of its connected MCP-server tools. The cached native
-	// registry is cloned only when there are MCP tools to add — the
-	// common no-MCP case reuses it untouched.
-	turnRegistry := us.Registry
-	if g.deps.Config.MCPSource != nil {
-		if mcpTools := g.deps.Config.MCPSource.ToolsForSoul(ctx, us.SoulID); len(mcpTools) > 0 {
-			turnRegistry = us.Registry.Clone()
-			for _, t := range mcpTools {
-				turnRegistry.RegisterRemote(t.Name, t.Description, t.Schema, bs.ToolModeSync, "mcp", t.Handler)
-			}
-		}
-	}
-
-	// The chat loop runs without a compactor: compaction deletes messages,
-	// and chat history is permanent. The loop windows the context itself
-	// (MessagesForAPI); older turns are recalled associatively by AME, not
-	// by a linear summary.
-	loop := agent.NewLoop(g.provider, g.store, turnRegistry, g.deps.RoleTools, g.deps.Config, g.logger)
-
-	// Resolve the soul's full system prompt from the database (platform
-	// preamble + persona + agents) and stamp the current datetime so the
-	// model always knows "today". A soul with no persona row is a
-	// misconfiguration — abort the turn loudly rather than answer with the
-	// wrong identity.
-	// [current_datetime] in the USER's timezone (server tz is only a fallback).
-	now := time.Now().In(g.deps.Config.Gateway.TimezoneFor(bs.WithSoulID(ctx, us.SoulID), g.tz))
-	promptStarted := time.Now()
-	soulPrompt, err := g.systemPromptForSoul(ctx, us.SoulID)
-	timings.RecordSince("gateway.system_prompt", promptStarted, "")
+	prepared, err := g.prepareCortexTurn(ctx, us, sess, injectedCtx, reflexGuidance, timings, false)
 	if err != nil {
 		g.logger.Error("cortex: cannot resolve system prompt, aborting turn",
 			"soul_id", us.SoulID.String(), "chat_id", us.ChatID, "error", err)
 		return
 	}
-	systemWithTime := fmt.Sprintf("[current_datetime: %s]\n\n%s",
-		now.Format("2006-01-02 15:04 MST (Monday)"), soulPrompt)
+	turnRegistry := prepared.registry
+	loop := prepared.loop
+	now := prepared.now
+	runCfg := prepared.config
 
 	// Interaction tier needs a focused system prompt (preamble + persona, no
 	// cortex agents layer) AND a registry subset so the fast tier cannot
@@ -626,21 +699,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		reflexRegistry := turnRegistry.SubsetForNames([]string{tool.ToolEscalate})
 		reflexLoop = agent.NewLoop(g.provider, g.store, reflexRegistry, g.deps.RoleTools, g.deps.Config, g.logger)
 	}
-
-	var cortexRef bs.ModelRef
-	if g.deps.ModelStore != nil {
-		cortexRef = g.deps.ModelStore.Get("cortex")
-	}
-	cortexTemp := cortexRef.Temperature
-	// Per-role max_tokens wins when configured. Adaptive thinking at high/xhigh
-	// effort counts thinking toward max_tokens, so cortex needs a larger cap
-	// than the global default or replies truncate (stop_reason=max_tokens).
-	cortexMaxTokens := g.deps.Config.Limits.MaxOutputTokens
-	if cortexRef.MaxTokens > 0 {
-		cortexMaxTokens = cortexRef.MaxTokens
-	}
-	cortexThinkingBudget := bs.ThinkingBudgetForModelRef(cortexRef)
-	turnMessageBudget := g.messageBudgetForRole("cortex", cortexRef)
 
 	// Reply metadata: the first pendingMsg in the batch carries
 	// the user-visible reply target. Cabinet-originated replies set
@@ -669,29 +727,8 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		}
 	}
 
-	runCfg := agent.RunConfig{
-		SessionID:           sess.ID,
-		SystemPrompt:        systemWithTime,
-		CompactSummary:      derefString(sess.CompactSummary),
-		Model:               g.cortexModel(),
-		MaxTokens:           cortexMaxTokens,
-		ContextWindow:       cortexRef.ContextWindow,
-		MaxTurns:            g.deps.Config.Gateway.MaxTurns,
-		InjectedContext:     injectedCtx,
-		ReflexGuidance:      reflexGuidance,
-		Role:                "cortex",
-		Temperature:         cortexTemp,
-		MessageBudget:       turnMessageBudget.Budget,
-		MessageBudgetSource: turnMessageBudget.Source,
-		ThinkingBudget:      cortexThinkingBudget,
-		ThinkingMode:        cortexRef.ThinkingMode,
-		TurnNow:             now,
-		Effort:              cortexRef.Effort,
-		AllowedTools:        g.allowedToolsForSoul(ctx, us.SoulID, turnRegistry),
-		ReplyToMessageID:    replyToMessageID,
-		TGMessageID:         tgMessageID,
-		OnTiming:            timings.Add,
-	}
+	runCfg.ReplyToMessageID = replyToMessageID
+	runCfg.TGMessageID = tgMessageID
 	if !ephemeral {
 		g.applyToolSelector(ctx, turnRegistry, &runCfg, msgText, forcedCortexTools, false)
 	}

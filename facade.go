@@ -73,6 +73,10 @@ type (
 	ExecutionRequest      = core.ExecutionRequest
 	ExecutionDecision     = core.ExecutionDecision
 	ExecutionAuthorizer   = core.ExecutionAuthorizer
+	AutonomousTurnRequest = core.AutonomousTurnRequest
+	AutonomousTurnDraft   = core.AutonomousTurnDraft
+	AutonomousTurnDrafter = core.AutonomousTurnDrafter
+	AutonomousTurnCommit  = core.AutonomousTurnCommit
 )
 
 // --- Providers: LLM + capability ports ---
@@ -136,25 +140,29 @@ type (
 
 // --- Constructors & helpers (value re-exports preserve signatures) ---
 var (
-	NewToolRegistry     = core.NewToolRegistry
-	NewModelConfigStore = core.NewModelConfigStore
-	NewFilePromptStore  = core.NewFilePromptStore
-	NewUserStore        = core.NewUserStore
-	NewLLMRouter        = core.NewLLMRouter
-	InitDeps            = core.InitDeps
-	ParseTaskProgram    = core.ParseTaskProgram
+	NewToolRegistry                  = core.NewToolRegistry
+	NewModelConfigStore              = core.NewModelConfigStore
+	NewFilePromptStore               = core.NewFilePromptStore
+	NewUserStore                     = core.NewUserStore
+	NewLLMRouter                     = core.NewLLMRouter
+	InitDeps                         = core.InitDeps
+	ParseTaskProgram                 = core.ParseTaskProgram
+	FormatAutonomousTurnNotification = core.FormatAutonomousTurnNotification
+	ParseAutonomousTurnNotification  = core.ParseAutonomousTurnNotification
 
 	NormalizeContent   = core.NormalizeContent
 	EstimateTokens     = core.EstimateTokens
 	EstimateTextTokens = core.EstimateTextTokens
 	ExtractText        = core.ExtractText
 
-	WithSoulID          = core.WithSoulID
-	SoulIDFromContext   = core.SoulIDFromContext
-	SoulIDFromContextOK = core.SoulIDFromContextOK
-	WithUserID          = core.WithUserID
-	UserIDFromContext   = core.UserIDFromContext
-	UserIDFromContextOK = core.UserIDFromContextOK
+	WithSoulID                = core.WithSoulID
+	SoulIDFromContext         = core.SoulIDFromContext
+	SoulIDFromContextOK       = core.SoulIDFromContextOK
+	WithUserID                = core.WithUserID
+	UserIDFromContext         = core.UserIDFromContext
+	UserIDFromContextOK       = core.UserIDFromContextOK
+	ContextWithAutonomousTurn = core.ContextWithAutonomousTurn
+	IsAutonomousTurn          = core.IsAutonomousTurn
 
 	OK   = core.OK
 	Fail = core.Fail

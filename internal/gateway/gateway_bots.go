@@ -405,6 +405,7 @@ func (g *Gateway) SendToUserOnce(ctx context.Context, userID uuid.UUID, text str
 		return receipt, fmt.Errorf("telegram send returned no message id")
 	}
 	receipt.MessageID = strconv.Itoa(result.Result.MessageID)
+	receipt.DeliveredAt = time.Now()
 	return receipt, nil
 }
 

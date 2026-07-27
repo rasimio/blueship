@@ -92,7 +92,7 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 	// escalate — the interaction tier's hand-off sentinel to the deep tier.
 	RegisterEscalateTool(r)
 
-	if d.Config.Sender != nil || d.SendToUser != nil {
+	if d.Config.Sender != nil || d.SendToUser != nil || d.SendConversationMessage != nil {
 		// message_send routes through the configured MessageSender. For
 		// channel-style targets (no leading digit, '-', or '@') prepend '@'
 		// so providers like Telegram resolve them correctly.
@@ -120,10 +120,14 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 				lower := strings.ToLower(strings.TrimSpace(target))
 				if lower == "" || lower == "owner" || lower == "user" || lower == "владелец" {
 					if d.UserID != uuid.Nil {
-						if d.SendToUser == nil {
+						send := d.SendConversationMessage
+						if send == nil {
+							send = d.SendToUser
+						}
+						if send == nil {
 							return nil, fmt.Errorf("message_send: per-user sender is unavailable")
 						}
-						if err := d.SendToUser(ctx, d.UserID, p.Text); err != nil {
+						if err := send(ctx, d.UserID, p.Text); err != nil {
 							return nil, fmt.Errorf("message_send: %w", err)
 						}
 						return map[string]any{

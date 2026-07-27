@@ -100,7 +100,7 @@ func directToolGateway(
 		deps:   &bs.Deps{Config: cfg},
 		logger: slog.Default(),
 		users: map[string]*UserState{
-			"tool:" + userID.String(): {
+			platformUserCacheKey("tool", userID, soulID): {
 				UserID: userID, SoulID: soulID, Registry: registry,
 			},
 		},

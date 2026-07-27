@@ -138,6 +138,9 @@ func TestDeliverTaskNotificationJournal(t *testing.T) {
 				if !core.SingleAttemptNotificationFromContext(ctx) {
 					t.Fatal("keyed transport was not marked single-attempt")
 				}
+				if gotAttemptID, ok := core.NotificationAttemptIDFromContext(ctx); !ok || gotAttemptID != attemptID {
+					t.Fatalf("notification attempt id = %s, found=%t; want %s", gotAttemptID, ok, attemptID)
+				}
 				return receipt, nil
 			},
 			journal, taskID, userID, "soon", refs,
@@ -382,7 +385,8 @@ func TestDeliverTaskNotificationJournal(t *testing.T) {
 			t.Fatalf("first attempt outcome=%+v err=%v", outcome, err)
 		}
 		outcome, err = deliverTaskNotification(context.Background(), notify, journal, taskID, userID, "soon", refs)
-		if err != nil || !outcome.Handled || outcome.Delivered || notifyCalls != 1 || confirmCalls != 1 {
+		if err != nil || !outcome.Handled || outcome.Delivered ||
+			notifyCalls != 1 || confirmCalls != maxNotificationConfirmAttempts {
 			t.Fatalf("retry outcome=%+v err=%v notify_calls=%d confirm_calls=%d", outcome, err, notifyCalls, confirmCalls)
 		}
 	})
@@ -583,6 +587,9 @@ func TestDrainRetryableNotificationsUsesImmutableIntent(t *testing.T) {
 			}
 			if !core.SingleAttemptNotificationFromContext(ctx) || core.SoulIDFromContext(ctx) != soulID || core.UserIDFromContext(ctx) != userID {
 				t.Fatalf("retry context single=%v soul=%s user=%s", core.SingleAttemptNotificationFromContext(ctx), core.SoulIDFromContext(ctx), core.UserIDFromContext(ctx))
+			}
+			if gotAttemptID, ok := core.NotificationAttemptIDFromContext(ctx); !ok || gotAttemptID != stored.ID {
+				t.Fatalf("retry notification attempt id = %s, found=%t; want %s", gotAttemptID, ok, stored.ID)
 			}
 			deadline, ok := ctx.Deadline()
 			if !ok || time.Until(deadline) < 9*time.Second {

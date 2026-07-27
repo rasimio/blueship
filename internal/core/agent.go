@@ -135,6 +135,10 @@ type TaskNotificationReceipt struct {
 	BotID     string `json:"bot_id,omitempty"`
 	ChatID    string `json:"chat_id,omitempty"`
 	MessageID string `json:"message_id,omitempty"`
+	// DeliveredAt is captured immediately after the provider ACK. Durable
+	// post-send projections use it so eager and repaired chat history have
+	// identical chronology.
+	DeliveredAt time.Time `json:"delivered_at,omitempty"`
 }
 
 // TaskNotificationIntent is one immutable journaled message selected for a
@@ -324,6 +328,10 @@ type AgentDeps struct {
 	UserID     uuid.UUID
 	Config     *Config
 	Deliveries TaskDeliveryLedger
+
+	// DraftAutonomousTurn is late-copied from the live gateway on every
+	// scheduler iteration. Nil means no interactive gateway is running.
+	DraftAutonomousTurn AutonomousTurnDrafter
 
 	// SelfAgentID is the Ship's own Fleet-issued agent id. Empty until
 	// the first Fleet bootstrap call completes; used by delegate-strategy

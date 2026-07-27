@@ -84,6 +84,7 @@ const maxConcurrentTasks = 8
 
 const (
 	maxNotificationRetriesPerTick = 20
+	maxHistoryProjectionsPerTick  = 50
 	notificationAttemptTimeout    = 10 * time.Second
 	defaultNotificationRetryDelay = time.Minute
 )
@@ -155,6 +156,18 @@ func (s *Scheduler) WakeFromCallback(ctx context.Context, peerTaskID string) {
 
 func (s *Scheduler) Run(ctx context.Context) error {
 	s.logger.Info("agent-tasks: tick")
+	// When a live gateway owns autonomous-history coordination, it drains and
+	// projects under the same pair-scoped turn lock used by interactive Cortex
+	// turns. Direct store reconciliation is reserved for headless deployments;
+	// running it beside a gateway could mutate dialogue while Cortex reads it.
+	if s.store != nil && (s.deps == nil || s.deps.EnsureAutonomousHistory == nil) {
+		projected, err := s.store.ReconcileAutonomousHistory(ctx, maxHistoryProjectionsPerTick)
+		if err != nil {
+			s.logger.WarnContext(ctx, "agent-tasks: reconcile autonomous history failed", "error", err)
+		} else if projected > 0 {
+			s.logger.InfoContext(ctx, "agent-tasks: reconciled autonomous history", "count", projected)
+		}
+	}
 	s.drainRetryableNotifications(ctx)
 
 	// Auto-complete tasks that exhausted iterations but weren't marked done.
@@ -178,7 +191,11 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		if s.notify != nil {
 			caveat := "⚠️ «" + t.Title + "» не дотянула до планки достоверности за отведённые итерации. " +
 				"Сохранила лучший доступный черновик в /artefact — он частичный и непроверенный, перепроверь источники."
-			s.notify(ctx, t.UserID, caveat)
+			notifyCtx := core.WithUserID(core.WithSoulID(ctx, t.SoulID), t.UserID)
+			if _, err := s.notify(notifyCtx, t.UserID, caveat); err != nil {
+				s.logger.WarnContext(ctx, "agent-tasks: exhausted-task caveat delivery failed",
+					"task_id", t.ID, "user_id", t.UserID, "soul_id", t.SoulID, "error", err)
+			}
 		}
 		if s.deps.AgentIterationCompletedHook != nil {
 			task := core.AgentTask{ID: t.ID, Title: t.Title, UserID: t.UserID, SoulID: t.SoulID}
@@ -412,24 +429,25 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 	registry := registryForTask(baseRegistry, handler.DefaultTools(), requestedTools, hasRequestedTools)
 
 	agentDeps := core.AgentDeps{
-		LLM:             s.deps.LLM,
-		Embedder:        s.deps.Embedder,
-		Registry:        registry,
-		RoleTools:       s.deps.RoleTools,
-		ModelStore:      s.deps.ModelStore,
-		Store:           s.msgStore,
-		Prompts:         s.deps.Prompts,
-		Users:           s.deps.Users,
-		Sessions:        s.deps.Sessions,
-		Logger:          s.logger,
-		DB:              s.deps.DB,
-		UserID:          task.UserID,
-		Config:          s.deps.Config,
-		Deliveries:      s.store,
-		SelfAgentID:     s.deps.SelfAgentID,
-		ContextInjector: s.deps.ContextInjector,
-		ReflexPreparer:  s.deps.ReflexPreparer,
-		RuleEngine:      s.deps.RuleEngine,
+		LLM:                 s.deps.LLM,
+		Embedder:            s.deps.Embedder,
+		Registry:            registry,
+		RoleTools:           s.deps.RoleTools,
+		ModelStore:          s.deps.ModelStore,
+		Store:               s.msgStore,
+		Prompts:             s.deps.Prompts,
+		Users:               s.deps.Users,
+		Sessions:            s.deps.Sessions,
+		Logger:              s.logger,
+		DB:                  s.deps.DB,
+		UserID:              task.UserID,
+		Config:              s.deps.Config,
+		Deliveries:          s.store,
+		SelfAgentID:         s.deps.SelfAgentID,
+		DraftAutonomousTurn: s.deps.DraftAutonomousTurn,
+		ContextInjector:     s.deps.ContextInjector,
+		ReflexPreparer:      s.deps.ReflexPreparer,
+		RuleEngine:          s.deps.RuleEngine,
 	}
 
 	// Apply deadline or default timeout.
@@ -792,6 +810,8 @@ const (
 	notificationFailureRetry
 )
 
+const maxNotificationConfirmAttempts = 3
+
 func classifyNotificationFailure(
 	task core.AgentTask,
 	result core.IterationResult,
@@ -874,6 +894,7 @@ func deliverTaskNotification(
 	transportCtx, transportCancel := context.WithTimeout(context.WithoutCancel(ctx), notificationAttemptTimeout)
 	defer transportCancel()
 	transportCtx = core.ContextWithSingleAttemptNotification(transportCtx)
+	transportCtx = core.ContextWithNotificationAttemptID(transportCtx, attemptID)
 	receipt, notifyErr := notify(transportCtx, userID, text)
 	delivered, resolveErr := resolveTaskNotificationAttempt(ctx, journal, attemptID, receipt, notifyErr)
 	return taskNotificationOutcome{Handled: true, Delivered: delivered}, resolveErr
@@ -892,10 +913,18 @@ func resolveTaskNotificationAttempt(
 	finalizeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notificationAttemptTimeout)
 	defer cancel()
 	if notifyErr == nil {
-		if err := journal.ConfirmNotificationAttempt(finalizeCtx, attemptID, receipt); err != nil {
-			return true, fmt.Errorf("confirm notification attempt: %w", err)
+		var confirmErr error
+		for attempt := 0; attempt < maxNotificationConfirmAttempts; attempt++ {
+			confirmErr = journal.ConfirmNotificationAttempt(finalizeCtx, attemptID, receipt)
+			if confirmErr == nil {
+				return true, nil
+			}
+			if finalizeCtx.Err() != nil {
+				break
+			}
 		}
-		return true, nil
+		return true, fmt.Errorf("confirm notification attempt after %d tries: %w",
+			maxNotificationConfirmAttempts, confirmErr)
 	}
 	if core.IsPermanentlyNotSent(notifyErr) {
 		if err := journal.RejectNotificationAttempt(finalizeCtx, attemptID, notifyErr.Error()); err != nil {
@@ -979,6 +1008,7 @@ func (s *Scheduler) retryTaskNotification(ctx context.Context, intent core.TaskN
 	transportCtx := core.WithSoulID(context.WithoutCancel(ctx), task.SoulID)
 	transportCtx = core.WithUserID(transportCtx, task.UserID)
 	transportCtx = core.ContextWithSingleAttemptNotification(transportCtx)
+	transportCtx = core.ContextWithNotificationAttemptID(transportCtx, intent.ID)
 	transportCtx, transportCancel := context.WithTimeout(transportCtx, notificationAttemptTimeout)
 	defer transportCancel()
 	receipt, notifyErr := s.notify(transportCtx, intent.UserID, intent.Text)

@@ -84,6 +84,25 @@ func TestMessagesForAPINeverDropsOversizedPlainLatestMessage(t *testing.T) {
 	}
 }
 
+func TestMessagesForAPISkipsAutonomousTurnBoundary(t *testing.T) {
+	msgs := []Message{
+		storedMessage(t, "assistant", []bs.ContentBlock{{Type: "text", Text: "autonomous hello"}}, 10),
+		storedMessage(t, "turn_boundary", nil, 0),
+		storedMessage(t, "assistant", []bs.ContentBlock{{Type: "text", Text: "older answer"}}, 10),
+		storedMessage(t, "user", []bs.ContentBlock{{Type: "text", Text: "older question"}}, 10),
+	}
+
+	apiMessages := messagesForAPIFromRows(msgs, 6000)
+	if len(apiMessages) != 3 {
+		t.Fatalf("want provider-visible messages only, got %#v", apiMessages)
+	}
+	for _, msg := range apiMessages {
+		if msg.Role != "user" && msg.Role != "assistant" {
+			t.Fatalf("internal role leaked to provider: %#v", msg)
+		}
+	}
+}
+
 func TestDialogMessagesForAPISkipsToolTranscript(t *testing.T) {
 	msgs := []Message{
 		storedMessage(t, "user", []bs.ContentBlock{{

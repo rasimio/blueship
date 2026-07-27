@@ -64,7 +64,7 @@ func TestFeltTimeContextStaleGap(t *testing.T) {
 		{Role: "user", Content: "текущее", CreatedAt: now},
 	}
 
-	got := feltTimeContext(msgs, now)
+	got := feltTimeContext(msgs, now, true)
 	for _, needle := range []string{"[felt_time]", "Now: Monday 2026-07-20 11:50", "Saturday 2026-07-18 20:14", "40h ago"} {
 		if !strings.Contains(got, needle) {
 			t.Fatalf("felt_time missing %q in %q", needle, got)
@@ -79,10 +79,24 @@ func TestFeltTimeContextQuietWhenRecentSameDay(t *testing.T) {
 		{Role: "assistant", Content: "недавнее", CreatedAt: now.Add(-30 * time.Minute)},
 		{Role: "user", Content: "текущее", CreatedAt: now},
 	}
-	if got := feltTimeContext(msgs, now); got != "" {
+	if got := feltTimeContext(msgs, now, true); got != "" {
 		t.Fatalf("expected empty felt_time for recent same-day gap, got %q", got)
 	}
-	if got := feltTimeContext(msgs[1:], now); got != "" {
+	if got := feltTimeContext(msgs[1:], now, true); got != "" {
 		t.Fatalf("expected empty felt_time with no prior message, got %q", got)
+	}
+}
+
+func TestFeltTimeContextPromptOnlyUsesLatestStoredMessage(t *testing.T) {
+	loc := time.UTC
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, loc)
+	msgs := []bs.Message{
+		{Role: "user", Content: "old question", CreatedAt: now.Add(-73 * time.Hour)},
+		{Role: "assistant", Content: "last reply", CreatedAt: now.Add(-72 * time.Hour)},
+	}
+
+	got := feltTimeContext(msgs, now, false)
+	if !strings.Contains(got, "Tuesday 2026-07-21 12:00 — 72h ago") {
+		t.Fatalf("prompt-only felt_time should use latest stored assistant, got %q", got)
 	}
 }

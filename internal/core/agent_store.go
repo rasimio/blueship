@@ -7,8 +7,10 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -247,18 +249,31 @@ func (s *AgentTaskStore) ConfirmNotificationAttempt(ctx context.Context, id uuid
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	state, err := notificationAttemptStateForUpdate(ctx, tx, id)
+	attempt, err := notificationAttemptForUpdate(ctx, tx, id)
 	if err != nil {
 		return fmt.Errorf("confirm notification attempt: %w", err)
 	}
-	switch state {
+	commit, autonomous, parseErr := ParseAutonomousTurnNotification(attempt.MessageText)
+	if parseErr != nil {
+		return fmt.Errorf("confirm notification attempt: parse autonomous turn: %w", parseErr)
+	}
+	if autonomous && commit.UserID != attempt.UserID {
+		return fmt.Errorf(
+			"confirm notification attempt: autonomous user %s does not match journal user %s",
+			commit.UserID, attempt.UserID,
+		)
+	}
+	switch attempt.State {
 	case "sent":
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("confirm notification attempt: commit existing sent state: %w", err)
+		}
+		return nil
 	case "uncertain":
 		return fmt.Errorf("confirm notification attempt: attempt %s is uncertain", id)
 	case "dispatching":
 	default:
-		return fmt.Errorf("confirm notification attempt: invalid state %q", state)
+		return fmt.Errorf("confirm notification attempt: invalid state %q", attempt.State)
 	}
 
 	if _, err := tx.ExecContext(ctx, `
@@ -285,6 +300,258 @@ func (s *AgentTaskStore) ConfirmNotificationAttempt(ctx context.Context, id uuid
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("confirm notification attempt: commit: %w", err)
+	}
+	return nil
+}
+
+type autonomousHistoryProjectionRow struct {
+	State         string          `db:"state"`
+	UserID        uuid.UUID       `db:"user_id"`
+	MessageText   string          `db:"message_text"`
+	Receipt       json.RawMessage `db:"receipt"`
+	LastAttemptAt time.Time       `db:"last_attempt_at"`
+	ResolvedAt    sql.NullTime    `db:"resolved_at"`
+	ProjectedAt   sql.NullTime    `db:"autonomous_history_projected_at"`
+}
+
+// ProjectAutonomousHistoryAttempt materializes one confirmed assistant turn
+// from its immutable journal row. It is safe to call repeatedly: both chat
+// rows have deterministic ids and the projection marker commits in the same
+// transaction as the rows and session counters.
+func (s *AgentTaskStore) ProjectAutonomousHistoryAttempt(ctx context.Context, id uuid.UUID) error {
+	if id == uuid.Nil {
+		return fmt.Errorf("project autonomous history: attempt id is required")
+	}
+	tx, err := s.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("project autonomous history transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var row autonomousHistoryProjectionRow
+	if err := tx.GetContext(ctx, &row, `
+		SELECT state, user_id, message_text, receipt, last_attempt_at, resolved_at,
+		       autonomous_history_projected_at
+		FROM agent_task_notification_attempts
+		WHERE id = $1
+		FOR UPDATE`, id); err != nil {
+		return fmt.Errorf("project autonomous history: load attempt: %w", err)
+	}
+	if row.ProjectedAt.Valid {
+		return tx.Commit()
+	}
+	if row.State != "sent" {
+		return fmt.Errorf("project autonomous history: attempt %s is %s", id, row.State)
+	}
+	commit, matched, err := ParseAutonomousTurnNotification(row.MessageText)
+	if err != nil {
+		return fmt.Errorf("project autonomous history: parse marker: %w", err)
+	}
+	if !matched {
+		return fmt.Errorf("project autonomous history: attempt %s is not autonomous", id)
+	}
+	if commit.UserID != row.UserID {
+		return fmt.Errorf(
+			"project autonomous history: autonomous user %s does not match journal user %s",
+			commit.UserID, row.UserID,
+		)
+	}
+	var receipt TaskNotificationReceipt
+	if err := json.Unmarshal(row.Receipt, &receipt); err != nil {
+		return fmt.Errorf("project autonomous history: parse receipt: %w", err)
+	}
+	deliveredAt := receipt.DeliveredAt
+	if deliveredAt.IsZero() && row.ResolvedAt.Valid {
+		deliveredAt = row.ResolvedAt.Time
+	}
+	if deliveredAt.IsZero() {
+		deliveredAt = row.LastAttemptAt
+	}
+	if err := projectAutonomousTurn(ctx, tx, id, deliveredAt, commit, receipt); err != nil {
+		return fmt.Errorf("project autonomous history: append turn: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE agent_task_notification_attempts
+		SET autonomous_history_projected_at = NOW()
+		WHERE id = $1 AND state = 'sent'
+		  AND autonomous_history_projected_at IS NULL`, id); err != nil {
+		return fmt.Errorf("project autonomous history: mark complete: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("project autonomous history: commit: %w", err)
+	}
+	return nil
+}
+
+// EnsureAutonomousHistoryForSession projects every confirmed autonomous turn
+// belonging to one exact live conversation. Callers serialize this method with
+// interactive turns for the same (user, soul); the store deliberately owns no
+// process-local locking. There is no row limit: a long outage must not leave an
+// older pulse invisible to the next Cortex turn.
+func (s *AgentTaskStore) EnsureAutonomousHistoryForSession(
+	ctx context.Context,
+	userID, soulID uuid.UUID,
+	sessionID string,
+) error {
+	if userID == uuid.Nil || soulID == uuid.Nil || strings.TrimSpace(sessionID) == "" {
+		return fmt.Errorf("ensure autonomous history: user, soul, and session are required")
+	}
+
+	type candidate struct {
+		ID          uuid.UUID `db:"id"`
+		MessageText string    `db:"message_text"`
+	}
+	var candidates []candidate
+	if err := s.db.SelectContext(ctx, &candidates, `
+		SELECT id, message_text
+		FROM agent_task_notification_attempts
+		WHERE state = 'sent'
+		  AND autonomous_history_projected_at IS NULL
+		  AND user_id = $1
+		  AND message_text LIKE '[blueship:autonomous-turn:v1]%'
+		ORDER BY resolved_at, id`, userID); err != nil {
+		return fmt.Errorf("ensure autonomous history: list pending: %w", err)
+	}
+
+	var projectionErrors []error
+	for _, candidate := range candidates {
+		commit, matched, err := ParseAutonomousTurnNotification(candidate.MessageText)
+		if err != nil {
+			// A malformed poison row cannot be attributed to a soul/session.
+			// The global reconciler reports it for operators; it must not block
+			// every healthy conversation owned by the same user.
+			continue
+		}
+		if !matched || commit.UserID != userID || commit.SoulID != soulID ||
+			commit.SessionID != sessionID {
+			continue
+		}
+		if err := s.ProjectAutonomousHistoryAttempt(ctx, candidate.ID); err != nil {
+			projectionErrors = append(projectionErrors,
+				fmt.Errorf("attempt %s: %w", candidate.ID, err))
+		}
+	}
+	return errors.Join(projectionErrors...)
+}
+
+// ReconcileAutonomousHistory drains confirmed turns whose post-send history
+// projection did not finish in the delivery request. It never touches the
+// transport, so retries cannot duplicate a Telegram message.
+func (s *AgentTaskStore) ReconcileAutonomousHistory(ctx context.Context, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, nil
+	}
+	var ids []uuid.UUID
+	if err := s.db.SelectContext(ctx, &ids, `
+		SELECT id
+		FROM agent_task_notification_attempts
+		WHERE state = 'sent'
+		  AND autonomous_history_projected_at IS NULL
+		  AND message_text LIKE '[blueship:autonomous-turn:v1]%'
+		ORDER BY resolved_at DESC, id
+		LIMIT $1`, limit); err != nil {
+		return 0, fmt.Errorf("reconcile autonomous history: list pending: %w", err)
+	}
+	projected := 0
+	var projectionErrors []error
+	for _, id := range ids {
+		if err := s.ProjectAutonomousHistoryAttempt(ctx, id); err != nil {
+			projectionErrors = append(projectionErrors, fmt.Errorf("attempt %s: %w", id, err))
+			continue
+		}
+		projected++
+	}
+	return projected, errors.Join(projectionErrors...)
+}
+
+// projectAutonomousTurn repairs the shared dialogue from the immutable
+// notification journal. The gateway eagerly performs the same projection
+// after Telegram returns; deterministic row ids make both paths converge.
+func projectAutonomousTurn(
+	ctx context.Context,
+	tx *sqlx.Tx,
+	attemptID uuid.UUID,
+	deliveredAt time.Time,
+	commit AutonomousTurnCommit,
+	receipt TaskNotificationReceipt,
+) error {
+	sessionID, err := uuid.Parse(strings.TrimSpace(commit.SessionID))
+	if err != nil {
+		return fmt.Errorf("invalid session id: %w", err)
+	}
+	var sessionExists bool
+	if err := tx.GetContext(ctx, &sessionExists, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM chat_sessions
+			WHERE id = $1 AND user_id = $2 AND soul_id = $3 AND source = 'chat'
+		)`, sessionID, commit.UserID, commit.SoulID); err != nil {
+		return fmt.Errorf("validate session: %w", err)
+	}
+	if !sessionExists {
+		return fmt.Errorf("session %s does not belong to autonomous user/soul", sessionID)
+	}
+
+	var tgMessageID any
+	if receipt.Transport == "telegram" {
+		parsed, parseErr := strconv.ParseInt(strings.TrimSpace(receipt.MessageID), 10, 64)
+		if parseErr != nil || parsed <= 0 {
+			return fmt.Errorf("invalid telegram message id %q", receipt.MessageID)
+		}
+		tgMessageID = parsed
+	}
+
+	boundaryJSON, err := json.Marshal([]ContentBlock{})
+	if err != nil {
+		return fmt.Errorf("marshal boundary: %w", err)
+	}
+	assistantBlocks := []ContentBlock{{Type: "text", Text: strings.TrimSpace(commit.Text)}}
+	assistantJSON, err := json.Marshal(assistantBlocks)
+	if err != nil {
+		return fmt.Errorf("marshal assistant: %w", err)
+	}
+	tokens := EstimateTokens(assistantBlocks)
+	boundaryID, assistantID := AutonomousTurnMessageIDs(attemptID)
+
+	boundaryResult, err := tx.ExecContext(ctx, `
+		INSERT INTO chat_messages
+		    (id, soul_id, session_id, role, content, token_estimate, created_at)
+		VALUES ($1, $2, $3, 'turn_boundary', $4, 0,
+		        $5 - interval '1 microsecond')
+		ON CONFLICT (id) DO NOTHING`,
+		boundaryID, commit.SoulID, sessionID, boundaryJSON, deliveredAt)
+	if err != nil {
+		return fmt.Errorf("insert boundary: %w", err)
+	}
+	assistantResult, err := tx.ExecContext(ctx, `
+		INSERT INTO chat_messages
+		    (id, soul_id, session_id, role, content, token_estimate, tg_message_id, created_at)
+		VALUES ($1, $2, $3, 'assistant', $4, $5, $6,
+		        $7)
+		ON CONFLICT (id) DO NOTHING`,
+		assistantID, commit.SoulID, sessionID, assistantJSON, tokens, tgMessageID, deliveredAt)
+	if err != nil {
+		return fmt.Errorf("insert assistant: %w", err)
+	}
+	boundaryInserted, err := boundaryResult.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("boundary rows affected: %w", err)
+	}
+	assistantInserted, err := assistantResult.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("assistant rows affected: %w", err)
+	}
+	if boundaryInserted+assistantInserted == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE chat_sessions
+		SET token_count = token_count + $2,
+		    message_count = message_count + $3,
+		    updated_at = NOW()
+		WHERE id = $1`,
+		sessionID, tokens*int(assistantInserted), boundaryInserted+assistantInserted); err != nil {
+		return fmt.Errorf("update session counters: %w", err)
 	}
 	return nil
 }
@@ -479,16 +746,28 @@ func (s *AgentTaskStore) ClaimRetryableNotification(ctx context.Context, now tim
 	return &intent, nil
 }
 
-func notificationAttemptStateForUpdate(ctx context.Context, tx *sqlx.Tx, id uuid.UUID) (string, error) {
-	var state string
-	if err := tx.GetContext(ctx, &state, `
-		SELECT state
+type notificationAttemptLocked struct {
+	State         string    `db:"state"`
+	UserID        uuid.UUID `db:"user_id"`
+	MessageText   string    `db:"message_text"`
+	LastAttemptAt time.Time `db:"last_attempt_at"`
+}
+
+func notificationAttemptForUpdate(ctx context.Context, tx *sqlx.Tx, id uuid.UUID) (notificationAttemptLocked, error) {
+	var attempt notificationAttemptLocked
+	if err := tx.GetContext(ctx, &attempt, `
+		SELECT state, user_id, message_text, last_attempt_at
 		FROM agent_task_notification_attempts
 		WHERE id = $1
 		FOR UPDATE`, id); err != nil {
-		return "", err
+		return notificationAttemptLocked{}, err
 	}
-	return state, nil
+	return attempt, nil
+}
+
+func notificationAttemptStateForUpdate(ctx context.Context, tx *sqlx.Tx, id uuid.UUID) (string, error) {
+	attempt, err := notificationAttemptForUpdate(ctx, tx, id)
+	return attempt.State, err
 }
 
 func sortTaskDeliveryRefs(refs []TaskDeliveryRef) {

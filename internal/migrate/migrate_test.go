@@ -49,3 +49,17 @@ func TestAgentTaskNotificationJournalMigrationMatchesInitSchema(t *testing.T) {
 		}
 	}
 }
+
+func TestAutonomousHistoryProjectionMigrationMatchesInitSchema(t *testing.T) {
+	incremental, err := migrations.ReadFile("sql/019_autonomous_history_projection.sql")
+	if err != nil {
+		t.Fatalf("read incremental migration: %v", err)
+	}
+	initSchema, err := migrations.ReadFile("sql/init.sql")
+	if err != nil {
+		t.Fatalf("read init schema: %v", err)
+	}
+	if !strings.Contains(string(initSchema), strings.TrimSpace(string(incremental))) {
+		t.Fatal("init.sql autonomous history projection differs from migration 019")
+	}
+}
