@@ -1096,19 +1096,21 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 			quoted = msg.ReplyToMessage.Caption
 		}
 		if quoted == "" {
-			sess, sessErr := g.GetOrCreateSession(ctx, us)
+			replyCtx := bs.WithUserID(ctx, us.UserID)
+			replyCtx = bs.WithSoulID(replyCtx, us.SoulID)
+			sess, sessErr := g.GetOrCreateSession(replyCtx, us)
 			if sessErr != nil {
 				g.logger.Warn("reply-to processed content: session lookup failed",
 					"reply_msg_id", msg.ReplyToMessage.MessageID, "error", sessErr)
 			} else {
 				parentID, lookupErr := g.store.LookupByTGMessageID(
-					ctx, sess.ID, int64(msg.ReplyToMessage.MessageID),
+					replyCtx, sess.ID, int64(msg.ReplyToMessage.MessageID),
 				)
 				if lookupErr != nil {
 					g.logger.Warn("reply-to processed content: parent lookup failed",
 						"reply_msg_id", msg.ReplyToMessage.MessageID, "error", lookupErr)
 				} else if parentID != "" {
-					quoted, lookupErr = g.store.MessageText(ctx, sess.ID, parentID)
+					quoted, lookupErr = g.store.MessageText(replyCtx, sess.ID, parentID)
 					if lookupErr != nil {
 						g.logger.Warn("reply-to processed content: text lookup failed",
 							"reply_msg_id", msg.ReplyToMessage.MessageID, "error", lookupErr)
