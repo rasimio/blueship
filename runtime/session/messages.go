@@ -206,6 +206,40 @@ func (s *Store) LookupByTGMessageID(ctx context.Context, sessionID string, tgMes
 	return id, nil
 }
 
+// MessageText returns the text blocks stored for one session-scoped message.
+// It is used to recover the processed representation of Telegram attachments
+// (for example a video transcript) when a reply target has no raw caption.
+func (s *Store) MessageText(ctx context.Context, sessionID, messageID string) (string, error) {
+	if sessionID == "" || messageID == "" {
+		return "", nil
+	}
+	var raw json.RawMessage
+	err := s.db.QueryRowContext(ctx,
+		`SELECT content FROM chat_messages
+		  WHERE session_id = $1 AND id = $2
+		  LIMIT 1`,
+		sessionID, messageID,
+	).Scan(&raw)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", fmt.Errorf("get message text: %w", err)
+	}
+
+	var blocks []bs.ContentBlock
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return "", fmt.Errorf("decode message text: %w", err)
+	}
+	texts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if block.Type == "text" && strings.TrimSpace(block.Text) != "" {
+			texts = append(texts, block.Text)
+		}
+	}
+	return strings.Join(texts, "\n\n"), nil
+}
+
 func (s *Store) appendInternal(ctx context.Context, sessionID string, msg bs.Message, blocks []bs.ContentBlock, toolUseID *string, tokens int) (*Message, error) {
 	contentJSON, err := json.Marshal(blocks)
 	if err != nil {

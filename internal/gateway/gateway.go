@@ -1091,15 +1091,45 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	// Prepend quoted reply context so the model sees what message the user is replying to
 	if msg.ReplyToMessage != nil {
 		quoted := msg.ReplyToMessage.Text
+		processedReply := false
 		if quoted == "" {
 			quoted = msg.ReplyToMessage.Caption
 		}
+		if quoted == "" {
+			sess, sessErr := g.GetOrCreateSession(ctx, us)
+			if sessErr != nil {
+				g.logger.Warn("reply-to processed content: session lookup failed",
+					"reply_msg_id", msg.ReplyToMessage.MessageID, "error", sessErr)
+			} else {
+				parentID, lookupErr := g.store.LookupByTGMessageID(
+					ctx, sess.ID, int64(msg.ReplyToMessage.MessageID),
+				)
+				if lookupErr != nil {
+					g.logger.Warn("reply-to processed content: parent lookup failed",
+						"reply_msg_id", msg.ReplyToMessage.MessageID, "error", lookupErr)
+				} else if parentID != "" {
+					quoted, lookupErr = g.store.MessageText(ctx, sess.ID, parentID)
+					if lookupErr != nil {
+						g.logger.Warn("reply-to processed content: text lookup failed",
+							"reply_msg_id", msg.ReplyToMessage.MessageID, "error", lookupErr)
+					} else {
+						processedReply = quoted != ""
+					}
+				}
+			}
+		}
 		if quoted != "" {
-			// Truncate very long quoted messages to keep context manageable
-			if len(quoted) > 500 {
+			// Raw Telegram quotes are previews. A processed attachment
+			// representation must stay complete: it may be the only durable
+			// copy of a transcript the user is explicitly asking about.
+			if !processedReply && len(quoted) > 500 {
 				quoted = quoted[:500] + "..."
 			}
 			text = fmt.Sprintf("[reply to: %s]\n\n%s", quoted, text)
+			if processedReply {
+				g.logger.Info("reply-to processed content restored",
+					"reply_msg_id", msg.ReplyToMessage.MessageID, "chars", len(quoted))
+			}
 		} else {
 			g.logger.Warn("reply-to message has no text/caption",
 				"reply_msg_id", msg.ReplyToMessage.MessageID,
