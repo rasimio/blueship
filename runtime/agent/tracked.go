@@ -144,7 +144,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			"dialog_budget_mode", dialogDecision.Mode,
 			"prompt_overhead_exceeds_budget", dialogDecision.PromptOverheadExceedsBudget,
 		}
-		callAttrs = append(callAttrs, anatomy.logAttrs()...)
+		callAttrs = append(callAttrs, anatomy.logAttrs(cfg.SessionID)...)
 		a.logger.Info("calling LLM", callAttrs...)
 		llmStarted := time.Now()
 		req := bs.CompletionRequest{

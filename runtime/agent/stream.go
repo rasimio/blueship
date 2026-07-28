@@ -122,7 +122,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			"dialog_budget_mode", dialogDecision.Mode,
 			"prompt_overhead_exceeds_budget", dialogDecision.PromptOverheadExceedsBudget,
 		}
-		callAttrs = append(callAttrs, anatomy.logAttrs()...)
+		callAttrs = append(callAttrs, anatomy.logAttrs(cfg.SessionID)...)
 		a.logger.Info("calling LLM (stream)", callAttrs...)
 
 		llmStarted := time.Now()

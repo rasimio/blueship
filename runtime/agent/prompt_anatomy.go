@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -10,31 +11,33 @@ import (
 )
 
 type promptAnatomy struct {
-	rawSystemTokens      int
-	compactTokens        int
-	baseSystemTokens     int
-	effectiveSystem      int
-	toolSchemaTokens     int
-	dialogTokens         int
-	scratchpadTokens     int
-	messageTokens        int
-	turnContextTokens    int
-	estimatedInput       int
-	rawSystemRunes       int
-	compactRunes         int
-	effectiveSystemRunes int
-	turnContextRunes     int
-	messageRunes         int
-	messageBytes         int
-	toolSchemaBytes      int
-	roleCounts           string
-	blockCounts          string
-	maxMessageRole       string
-	maxMessageIndex      int
-	maxMessageTokens     int
-	maxMessageRunes      int
-	toolNames            string
-	toolSources          string
+	rawSystemSHA256       string
+	effectiveSystemSHA256 string
+	rawSystemTokens       int
+	compactTokens         int
+	baseSystemTokens      int
+	effectiveSystem       int
+	toolSchemaTokens      int
+	dialogTokens          int
+	scratchpadTokens      int
+	messageTokens         int
+	turnContextTokens     int
+	estimatedInput        int
+	rawSystemRunes        int
+	compactRunes          int
+	effectiveSystemRunes  int
+	turnContextRunes      int
+	messageRunes          int
+	messageBytes          int
+	toolSchemaBytes       int
+	roleCounts            string
+	blockCounts           string
+	maxMessageRole        string
+	maxMessageIndex       int
+	maxMessageTokens      int
+	maxMessageRunes       int
+	toolNames             string
+	toolSources           string
 }
 
 func newPromptAnatomy(
@@ -59,36 +62,41 @@ func newPromptAnatomy(
 	toolNames, toolSources := summarizePromptTools(registry, tools)
 
 	return promptAnatomy{
-		rawSystemTokens:      estimateTextTokens(rawSystem),
-		compactTokens:        estimateTextTokens(compactSummary),
-		baseSystemTokens:     estimateTextTokens(baseSystem),
-		effectiveSystem:      estimateTextTokens(effectiveSystem),
-		toolSchemaTokens:     estimateToolSchemaTokens(tools),
-		dialogTokens:         dialogTokens,
-		scratchpadTokens:     scratchpadTokens,
-		messageTokens:        estimateMessagesTokens(messages),
-		turnContextTokens:    estimateTextTokens(turnContext),
-		estimatedInput:       estimateTextTokens(effectiveSystem) + estimateToolSchemaTokens(tools) + estimateMessagesTokens(messages),
-		rawSystemRunes:       len([]rune(rawSystem)),
-		compactRunes:         len([]rune(compactSummary)),
-		effectiveSystemRunes: len([]rune(effectiveSystem)),
-		turnContextRunes:     len([]rune(turnContext)),
-		messageRunes:         msgStats.runes,
-		messageBytes:         msgStats.bytes,
-		toolSchemaBytes:      toolSchemaBytes,
-		roleCounts:           orderedPromptCountString(msgStats.roleCounts, []string{"user", "assistant", "system", "tool"}),
-		blockCounts:          orderedPromptCountString(msgStats.blockCounts, []string{"text", "tool_use", "tool_result", "image", "other"}),
-		maxMessageRole:       msgStats.maxRole,
-		maxMessageIndex:      msgStats.maxIndex,
-		maxMessageTokens:     msgStats.maxTokens,
-		maxMessageRunes:      msgStats.maxRunes,
-		toolNames:            toolNames,
-		toolSources:          toolSources,
+		rawSystemSHA256:       fmt.Sprintf("%x", sha256.Sum256([]byte(rawSystem))),
+		effectiveSystemSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte(effectiveSystem))),
+		rawSystemTokens:       estimateTextTokens(rawSystem),
+		compactTokens:         estimateTextTokens(compactSummary),
+		baseSystemTokens:      estimateTextTokens(baseSystem),
+		effectiveSystem:       estimateTextTokens(effectiveSystem),
+		toolSchemaTokens:      estimateToolSchemaTokens(tools),
+		dialogTokens:          dialogTokens,
+		scratchpadTokens:      scratchpadTokens,
+		messageTokens:         estimateMessagesTokens(messages),
+		turnContextTokens:     estimateTextTokens(turnContext),
+		estimatedInput:        estimateTextTokens(effectiveSystem) + estimateToolSchemaTokens(tools) + estimateMessagesTokens(messages),
+		rawSystemRunes:        len([]rune(rawSystem)),
+		compactRunes:          len([]rune(compactSummary)),
+		effectiveSystemRunes:  len([]rune(effectiveSystem)),
+		turnContextRunes:      len([]rune(turnContext)),
+		messageRunes:          msgStats.runes,
+		messageBytes:          msgStats.bytes,
+		toolSchemaBytes:       toolSchemaBytes,
+		roleCounts:            orderedPromptCountString(msgStats.roleCounts, []string{"user", "assistant", "system", "tool"}),
+		blockCounts:           orderedPromptCountString(msgStats.blockCounts, []string{"text", "tool_use", "tool_result", "image", "other"}),
+		maxMessageRole:        msgStats.maxRole,
+		maxMessageIndex:       msgStats.maxIndex,
+		maxMessageTokens:      msgStats.maxTokens,
+		maxMessageRunes:       msgStats.maxRunes,
+		toolNames:             toolNames,
+		toolSources:           toolSources,
 	}
 }
 
-func (p promptAnatomy) logAttrs() []any {
+func (p promptAnatomy) logAttrs(sessionID string) []any {
 	return []any{
+		"session_id", sessionID,
+		"prompt_raw_system_sha256", p.rawSystemSHA256,
+		"prompt_effective_system_sha256", p.effectiveSystemSHA256,
 		"raw_system_tokens_estimate", p.rawSystemTokens,
 		"compact_summary_tokens_estimate", p.compactTokens,
 		"base_system_tokens_estimate", p.baseSystemTokens,
