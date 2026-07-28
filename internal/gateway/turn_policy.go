@@ -262,13 +262,16 @@ func (g *Gateway) runTurnPolicyPreActions(
 			timings.RecordSince("turn_policy.pre_action", started,
 				fmt.Sprintf("tool=%s error=%t", action.Tool, isError))
 		}
+		// Truncate by runes: evidence inputs and results are natural language,
+		// so a byte cut lands mid-codepoint and hands the debug trace broken
+		// UTF-8 instead of a readable prefix.
 		input := string(action.Input)
-		if len(input) > 200 {
-			input = input[:200] + "..."
+		if bounded := truncateStr(input, 200); bounded != input {
+			input = bounded + "..."
 		}
 		traceOutput := result
-		if len(traceOutput) > 500 {
-			traceOutput = traceOutput[:500] + "..."
+		if bounded := truncateStr(traceOutput, 500); bounded != traceOutput {
+			traceOutput = bounded + "..."
 		}
 		traces = append(traces, agent.ToolTrace{
 			Name:   action.Tool,
