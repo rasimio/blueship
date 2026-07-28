@@ -18,6 +18,12 @@ import (
 type Message struct {
 	Role    string `json:"role"`
 	Content any    `json:"content"` // string | []ContentBlock — normalized to []ContentBlock on storage
+	// VisibleText is the exact transport-visible text for this persisted
+	// message, captured before reply parents, attachment bytes, or extracted
+	// document content are expanded for the provider. A non-nil empty string
+	// is meaningful for attachment-only dialogue. It is persistence metadata
+	// and is never serialized to a model provider.
+	VisibleText *string `json:"-"`
 	// ReplyToMessageID, when non-empty, marks this row as a reply to
 	// the named chat_messages.id. The session store writes the
 	// column on append; the cabinet's history endpoint joins the

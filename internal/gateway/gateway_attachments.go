@@ -231,13 +231,12 @@ func collapseBlankLinesGateway(s string) string {
 // pasted message, the assistant side runs it against the assistant's final
 // reply. The OG enrichment worker picks the rows up from there.
 //
-// sessionID is required (so the cabinet's session-scoped view can
-// surface the chip on the right turn). messageID is best-effort —
-// callers pass uuid.Nil when the underlying chat_messages row hasn't
-// been written yet (user side: append happens later inside the agent
-// loop). Empty text and a nil AttachmentSink are silent no-ops. URL
-// upsert failures are warn-logged and per-URL — one bad URL does not
-// abort the rest of the scan or the turn.
+// sessionID is required (so the cabinet's session-scoped view can surface the
+// chip on the right turn). Inbound user scans run from the exact persisted
+// message receipt; autonomous/legacy callers may still pass uuid.Nil when no
+// durable message id exists. Empty text and a nil AttachmentSink are silent
+// no-ops. URL upsert failures are warn-logged and per-URL — one bad URL does
+// not abort the rest of the scan or the turn.
 func (g *Gateway) scanAndSaveLinks(ctx context.Context, us *UserState, sessionID, messageID uuid.UUID, source, text string) {
 	if g.deps.AttachmentSink == nil || us == nil || us.UserID == uuid.Nil || us.SoulID == uuid.Nil {
 		return

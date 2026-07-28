@@ -226,6 +226,9 @@ func (r *ToolRegistry) DefinitionsForNames(names []string) []ToolDefinition {
 
 // Execute runs a tool by name and returns the result JSON string and whether it's an error.
 func (r *ToolRegistry) Execute(ctx context.Context, name string, input json.RawMessage) (string, bool) {
+	if IsToolDenied(ctx, name) {
+		return fmt.Sprintf("tool denied for this turn: %s", name), true
+	}
 	tool, ok := r.tools[name]
 	if !ok {
 		return fmt.Sprintf("unknown tool: %s", name), true

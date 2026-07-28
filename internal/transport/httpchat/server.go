@@ -68,21 +68,7 @@ func NewServer(gw *gateway.Gateway, port int, token, transportName string, valid
 
 // Run starts the HTTP server. Blocks until ctx is done.
 func (s *Server) Run(ctx context.Context) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /chat", s.handleChat)
-	mux.HandleFunc("POST /api/internal/tools/invoke", s.handleInvokeTool)
-	mux.HandleFunc("POST /api/internal/mcp/refresh", s.handleRefreshMCP)
-	if s.reset != nil {
-		mux.HandleFunc("POST /api/internal/chat/reset", s.handleReset)
-	}
-	if s.extras != nil {
-		s.extras(mux)
-	}
-
-	handler := http.Handler(mux)
-	if s.token != "" {
-		handler = s.requireBearer(handler)
-	}
+	handler := s.handler()
 
 	addr := fmt.Sprintf(":%d", s.port)
 	srv := &http.Server{Addr: addr, Handler: handler}
@@ -101,12 +87,61 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
+func (s *Server) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /chat", s.handleChat)
+	mux.Handle(
+		"POST /api/internal/tools/invoke",
+		s.requireInternalBearer(http.HandlerFunc(s.handleInvokeTool)),
+	)
+	mux.Handle(
+		"POST /api/internal/mcp/refresh",
+		s.requireInternalBearer(http.HandlerFunc(s.handleRefreshMCP)),
+	)
+	if s.reset != nil {
+		mux.Handle(
+			"POST /api/internal/chat/reset",
+			s.requireInternalBearer(http.HandlerFunc(s.handleReset)),
+		)
+	}
+	if s.extras != nil {
+		s.extras(mux)
+	}
+
+	handler := http.Handler(mux)
+	if s.token != "" {
+		handler = s.requireBearer(handler)
+	}
+	return handler
+}
+
 // requireBearer is the auth middleware applied to every route on the mux
 // (both `/chat` and host-supplied extras). Vaelum is the only trusted
 // caller; the token comes from the shared VAELUM_DAEMON_SERVICE_TOKEN env.
 func (s *Server) requireBearer(next http.Handler) http.Handler {
 	want := "Bearer " + s.token
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != want {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requireInternalBearer fails closed when the host omitted its service token
+// or passed an unexpanded ${ENV_VAR} placeholder. The public /chat route keeps
+// its historical empty-token development mode, but privileged internal routes
+// are never exposed through that fallback.
+func (s *Server) requireInternalBearer(next http.Handler) http.Handler {
+	token := strings.TrimSpace(s.token)
+	configured := token != "" && !strings.Contains(token, "${")
+	want := "Bearer " + token
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !configured {
+			http.Error(w, "internal API authentication unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		if r.Header.Get("Authorization") != want {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return

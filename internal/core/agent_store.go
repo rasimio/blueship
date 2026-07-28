@@ -510,26 +510,39 @@ func projectAutonomousTurn(
 	if err != nil {
 		return fmt.Errorf("marshal assistant: %w", err)
 	}
+	boundaryProjection := ProjectMessageForWrite(Message{Role: "turn_boundary"}, nil)
+	assistantText := commit.Text
+	assistantProjection := ProjectMessageForWrite(Message{
+		Role:        "assistant",
+		Content:     assistantBlocks,
+		VisibleText: &assistantText,
+	}, assistantBlocks)
 	tokens := EstimateTokens(assistantBlocks)
 	boundaryID, assistantID := AutonomousTurnMessageIDs(attemptID)
 
 	boundaryResult, err := tx.ExecContext(ctx, `
 		INSERT INTO chat_messages
-		    (id, soul_id, session_id, role, content, token_estimate, created_at)
+		    (id, soul_id, session_id, role, content, token_estimate, created_at,
+		     visible_text, projection_status, projection_reason, projector_version)
 		VALUES ($1, $2, $3, 'turn_boundary', $4, 0,
-		        $5 - interval '1 microsecond')
+		        $5 - interval '1 microsecond', $6, $7, $8, $9)
 		ON CONFLICT (id) DO NOTHING`,
-		boundaryID, commit.SoulID, sessionID, boundaryJSON, deliveredAt)
+		boundaryID, commit.SoulID, sessionID, boundaryJSON, deliveredAt,
+		boundaryProjection.VisibleText, boundaryProjection.Status,
+		projectionReasonValue(boundaryProjection), boundaryProjection.ProjectorVersion)
 	if err != nil {
 		return fmt.Errorf("insert boundary: %w", err)
 	}
 	assistantResult, err := tx.ExecContext(ctx, `
 		INSERT INTO chat_messages
-		    (id, soul_id, session_id, role, content, token_estimate, tg_message_id, created_at)
+		    (id, soul_id, session_id, role, content, token_estimate, tg_message_id, created_at,
+		     visible_text, projection_status, projection_reason, projector_version)
 		VALUES ($1, $2, $3, 'assistant', $4, $5, $6,
-		        $7)
+		        $7, $8, $9, $10, $11)
 		ON CONFLICT (id) DO NOTHING`,
-		assistantID, commit.SoulID, sessionID, assistantJSON, tokens, tgMessageID, deliveredAt)
+		assistantID, commit.SoulID, sessionID, assistantJSON, tokens, tgMessageID, deliveredAt,
+		assistantProjection.VisibleText, assistantProjection.Status,
+		projectionReasonValue(assistantProjection), assistantProjection.ProjectorVersion)
 	if err != nil {
 		return fmt.Errorf("insert assistant: %w", err)
 	}
@@ -554,6 +567,13 @@ func projectAutonomousTurn(
 		return fmt.Errorf("update session counters: %w", err)
 	}
 	return nil
+}
+
+func projectionReasonValue(projection MessageProjection) any {
+	if projection.Reason == "" {
+		return nil
+	}
+	return projection.Reason
 }
 
 // MarkNotificationUncertain tombstones an ambiguous external outcome. It does

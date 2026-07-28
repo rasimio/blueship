@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -70,12 +69,10 @@ type Gateway struct {
 
 	// Reflex pipeline prompts. Loaded from <Config.Prompts>/<key>.md when
 	// the agent ships those files; missing files leave the default empty.
-	reflexSystemPrompt       string   // system prompt for reflex LLM call
-	reflexPlanTemplate       string   // user prompt template (has %s placeholders for rules, tools, message)
-	reflexInteractionPrompt  string   // interaction-tier task rules, appended to the soul prompt when InteractionTier is on
-	reflexInterjectionPrompt string   // system prompt for barge-in interjection classification
-	extractInsightPrompt     string   // system prompt for insight extraction
-	selfReflectionMarkers    []string // optional self_reflection_markers.md (JSON array)
+	reflexSystemPrompt       string // system prompt for reflex LLM call
+	reflexPlanTemplate       string // user prompt template (has %s placeholders for rules, tools, message)
+	reflexInteractionPrompt  string // interaction-tier task rules, appended to the soul prompt when InteractionTier is on
+	reflexInterjectionPrompt string // system prompt for barge-in interjection classification
 
 	mu sync.Mutex
 	// Entries are keyed by transport identity. Telegram keys include bot id:
@@ -529,8 +526,8 @@ func (g *Gateway) loadPlatformGreet(dir string) {
 
 // loadSystemPrompts composes the system prompt from <key>.md files in
 // dir, ordered by Config.SystemPromptKeys. Optional pipeline prompts
-// (compact, reflex-system, reflex-plan, extract-insight,
-// self_reflection_markers) are picked up if present; missing optional
+// (compact, reflex-system, reflex-plan, reflex-interaction,
+// reflex-interjection) are picked up if present; missing optional
 // files fall back to in-code defaults set elsewhere on the gateway.
 func (g *Gateway) loadSystemPrompts(dir string) error {
 	var parts []string
@@ -561,15 +558,6 @@ func (g *Gateway) loadSystemPrompts(dir string) error {
 	}
 	if v := readOpt("reflex-interjection"); v != "" {
 		g.reflexInterjectionPrompt = v
-	}
-	if v := readOpt("extract-insight"); v != "" {
-		g.extractInsightPrompt = v
-	}
-	if raw := readOpt("self_reflection_markers"); raw != "" {
-		var markers []string
-		if json.Unmarshal([]byte(raw), &markers) == nil && len(markers) > 0 {
-			g.selfReflectionMarkers = markers
-		}
 	}
 	return nil
 }
@@ -862,6 +850,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	if !admitted {
 		return
 	}
+	visibleText := text
 	handoffAdmission := false
 	defer func() {
 		if !handoffAdmission {
@@ -894,6 +883,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 				text = appendDocInline(text, "[video: no speech detected]")
 			} else {
 				text = appendVideoTranscript(text, transcript)
+				visibleText = appendVisibleTranscript(visibleText, transcript)
 			}
 		}
 	}
@@ -1028,6 +1018,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 				text = appendDocInline(text, "[video: no speech detected]")
 			} else {
 				text = appendVideoTranscript(text, transcript)
+				visibleText = appendVisibleTranscript(visibleText, transcript)
 			}
 		}
 	}
@@ -1046,6 +1037,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 				} else {
 					text = transcript
 				}
+				visibleText = appendVisibleTranscript(visibleText, transcript)
 			}
 		}
 	}
@@ -1152,6 +1144,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		text:               text,
 		images:             images,
 		messageID:          msg.MessageID,
+		visibleText:        &visibleText,
 		rawAttachments:     rawAttachments,
 		replyToTGMessageID: replyToTGID,
 		activityVersion:    admissionVersion,

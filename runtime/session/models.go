@@ -35,13 +35,17 @@ type Session struct {
 
 // Message represents a chat message stored in PostgreSQL.
 type Message struct {
-	ID            string          `db:"id" json:"id"`
-	SessionID     string          `db:"session_id" json:"session_id"`
-	Role          string          `db:"role" json:"role"`
-	Content       json.RawMessage `db:"content" json:"content"`
-	ToolUseID     *string         `db:"tool_use_id" json:"tool_use_id,omitempty"`
-	TokenEstimate int             `db:"token_estimate" json:"token_estimate"`
-	CreatedAt     time.Time       `db:"created_at" json:"created_at"`
+	ID               string                     `db:"id" json:"id"`
+	SessionID        string                     `db:"session_id" json:"session_id"`
+	Role             string                     `db:"role" json:"role"`
+	Content          json.RawMessage            `db:"content" json:"content"`
+	VisibleText      *string                    `db:"visible_text" json:"visible_text,omitempty"`
+	ProjectionStatus bs.MessageProjectionStatus `db:"projection_status" json:"projection_status"`
+	ProjectionReason *string                    `db:"projection_reason" json:"projection_reason,omitempty"`
+	ProjectorVersion string                     `db:"projector_version" json:"projector_version"`
+	ToolUseID        *string                    `db:"tool_use_id" json:"tool_use_id,omitempty"`
+	TokenEstimate    int                        `db:"token_estimate" json:"token_estimate"`
+	CreatedAt        time.Time                  `db:"created_at" json:"created_at"`
 }
 
 // ToAPIMessage converts a stored Message back to a bs.Message.
@@ -65,7 +69,8 @@ func (m *Message) ToAPIMessage() bs.Message {
 	}
 
 	return bs.Message{
-		Role:    m.Role,
-		Content: content,
+		Role:        m.Role,
+		Content:     content,
+		VisibleText: m.VisibleText,
 	}
 }

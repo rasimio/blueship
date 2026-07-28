@@ -15,105 +15,6 @@ import (
 	"github.com/rasimio/blueship/runtime/session"
 )
 
-func (g *Gateway) executePostActions(ctx context.Context, us *UserState, actions []bs.PostAction, reply string) {
-	for _, pa := range actions {
-		switch pa.Type {
-		case "save_reflection":
-			// Extract a concise insight from the cortex response via Flash.
-			insight := g.extractInsight(ctx, reply, "reflection")
-			if insight == "" {
-				g.logger.Warn("post-action save_reflection: extraction returned empty")
-				continue
-			}
-			input := fmt.Sprintf(`{"kind":"reflection","content":%q}`, insight)
-			result, isError := us.Registry.Execute(ctx, "memory_save", json.RawMessage(input))
-			if isError {
-				g.logger.Warn("post-action save_reflection failed", "error", result)
-			} else {
-				g.logger.Info("post-action save_reflection done", "insight", truncateStr(insight, 100))
-			}
-		case "save_fact":
-			insight := g.extractInsight(ctx, reply, "fact")
-			if insight == "" {
-				g.logger.Warn("post-action save_fact: extraction returned empty")
-				continue
-			}
-			input := fmt.Sprintf(`{"fact":%q,"category":"general","source":"reflex"}`, insight)
-			result, isError := us.Registry.Execute(ctx, "memory_save", json.RawMessage(input))
-			if isError {
-				g.logger.Warn("post-action save_fact failed", "error", result)
-			} else {
-				g.logger.Info("post-action save_fact done", "insight", truncateStr(insight, 100))
-			}
-		default:
-			g.logger.Warn("unknown post-action type", "type", pa.Type)
-		}
-	}
-}
-
-// extractInsight calls Flash to distill a concise insight from a long cortex response.
-// extractType is "reflection" or "fact".
-func (g *Gateway) extractInsight(ctx context.Context, response, extractType string) string {
-	model := g.reflexModel()
-	if model == "" {
-		return truncateStr(response, 200) // fallback
-	}
-	var effort, thinkingMode string
-	if g.deps.ModelStore != nil {
-		ref := g.deps.ModelStore.Get("reflex")
-		effort = ref.Effort
-		thinkingMode = ref.ThinkingMode
-	}
-
-	if g.extractInsightPrompt == "" {
-		g.logger.Warn("extract-insight prompt not in DB, skipping")
-		return ""
-	}
-	prompt := fmt.Sprintf(g.extractInsightPrompt, extractType, truncateStr(response, 1500))
-
-	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
-		Model:        model,
-		MaxTokens:    128,
-		Effort:       effort,
-		ThinkingMode: thinkingMode,
-		System:       g.reflexSystemPrompt,
-		Messages:     []bs.Message{{Role: "user", Content: prompt}},
-	})
-	if err != nil {
-		g.logger.Warn("extractInsight failed", "error", err)
-		return ""
-	}
-
-	text := strings.TrimSpace(bs.ExtractText(resp.Content))
-	// `[skip]` is the extract-insight prompt's signal that the response was
-	// only an unverified temporal claim — don't persist as reflection/fact.
-	// Treating it as empty short-circuits the executePostActions write.
-	if text == "[skip]" || strings.HasPrefix(text, "[skip]") {
-		g.logger.Info("extractInsight skipped", "type", extractType, "reason", "unverified temporal claim")
-		return ""
-	}
-	g.logger.Info("extractInsight done", "type", extractType, "result", truncateStr(text, 100))
-	return text
-}
-
-// looksLikeSelfReflection detects cortex responses that contain self-referential
-// insights or reflections worth auto-saving. Markers are loaded from
-// <Config.Prompts>/self_reflection_markers.md (JSON array). Empty slice
-// (file absent) makes the check a no-op.
-func (g *Gateway) looksLikeSelfReflection(text string) bool {
-	if len(g.selfReflectionMarkers) == 0 {
-		return false
-	}
-	lower := strings.ToLower(text)
-	hits := 0
-	for _, m := range g.selfReflectionMarkers {
-		if strings.Contains(lower, m) {
-			hits++
-		}
-	}
-	return hits >= 2
-}
-
 func truncateStr(s string, max int) string {
 	r := []rune(s)
 	if len(r) <= max {
@@ -172,7 +73,6 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 		Intent               string                   `json:"intent"`
 		Confidence           float64                  `json:"confidence"`
 		PreActions           []bs.ToolAction          `json:"pre_actions"`
-		PostActions          []bs.PostAction          `json:"post_actions"`
 		Tools                json.RawMessage          `json:"tools"`
 		Guidance             string                   `json:"guidance"`
 		ClarificationOptions []bs.ClarificationOption `json:"clarification_options"`
@@ -186,7 +86,6 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 		Intent:               raw.Intent,
 		Confidence:           raw.Confidence,
 		PreActions:           raw.PreActions,
-		PostActions:          raw.PostActions,
 		Guidance:             raw.Guidance,
 		ClarificationOptions: raw.ClarificationOptions,
 	}
@@ -423,6 +322,10 @@ type pendingMsg struct {
 	text      string
 	images    []bs.ContentBlock
 	messageID int
+	// visibleText is the exact user-visible transport text/transcript before
+	// provider-only reply quotes and attachment expansions. Pointer-to-empty
+	// is meaningful for attachment-only input; nil is legacy/unknown.
+	visibleText *string
 	// activityTracked means transport ingress has already advanced the
 	// pair-scoped activity fence. processMessages clears the pending count
 	// only after the turn has finished while preserving the monotonic version.
@@ -451,6 +354,35 @@ type pendingMsg struct {
 	// ephemeral marks a private, read-only notebook ask:
 	// context from memory, but no persistence — see core.WithEphemeral.
 	ephemeral bool
+}
+
+func appendVisibleTranscript(text, transcript string) string {
+	if transcript == "" {
+		return text
+	}
+	if text == "" {
+		return transcript
+	}
+	return text + "\n\n" + transcript
+}
+
+func joinedVisibleText(msgs []pendingMsg) *string {
+	known := false
+	parts := make([]string, 0, len(msgs))
+	for _, msg := range msgs {
+		if msg.visibleText == nil {
+			continue
+		}
+		known = true
+		if *msg.visibleText != "" {
+			parts = append(parts, *msg.visibleText)
+		}
+	}
+	if !known {
+		return nil
+	}
+	text := strings.Join(parts, "\n\n")
+	return &text
 }
 
 // rawAttachment is one inbound file held by pendingMsg until the
@@ -519,57 +451,7 @@ func (d *debouncer) fireNow() {
 // generates as plain text instead of structured tool_calls.
 // Also removes HTML artifacts (<br>, </html>, etc.).
 func sanitizeLeakedToolCalls(text string) string {
-	// Remove patterns like: call:tool_name{...}
-	for {
-		idx := strings.Index(text, "call:")
-		if idx == -1 {
-			break
-		}
-		// Find the end of the tool call (closing brace)
-		end := strings.Index(text[idx:], "}")
-		if end == -1 {
-			break
-		}
-		// Also consume any trailing |> or similar tokens
-		endAbs := idx + end + 1
-		for endAbs < len(text) && (text[endAbs] == '|' || text[endAbs] == '>' || text[endAbs] == '<' || text[endAbs] == ' ' || text[endAbs] == '\n') {
-			endAbs++
-		}
-		text = text[:idx] + text[endAbs:]
-	}
-
-	// Remove <tool_call>...</tool_call> blocks
-	for {
-		start := strings.Index(text, "<tool_call")
-		if start == -1 {
-			break
-		}
-		end := strings.Index(text[start:], "</tool_call>")
-		if end == -1 {
-			end = strings.Index(text[start:], ">")
-			if end == -1 {
-				break
-			}
-			text = text[:start] + text[start+end+1:]
-		} else {
-			text = text[:start] + text[start+end+len("</tool_call>"):]
-		}
-	}
-
-	// Remove HTML artifacts
-	for _, tag := range []string{"<br>", "<br/>", "<br />", "</html>", "<html>", "</body>", "<body>"} {
-		text = strings.ReplaceAll(text, tag, "")
-	}
-
-	// Remove Gemma thinking/channel control tokens
-	for _, tok := range []string{"<channel|>", "</channel>", "\nthought\n", "\n\nthought\n\n"} {
-		text = strings.ReplaceAll(text, tok, "")
-	}
-	// Standalone "thought" at start of response
-	text = strings.TrimPrefix(text, "thought\n")
-	text = strings.TrimPrefix(text, "thought")
-
-	return strings.TrimSpace(text)
+	return bs.SanitizeLeakedAssistantText(text)
 }
 
 // resolveDisambiguation checks if a short message resolves a pending disambiguation.

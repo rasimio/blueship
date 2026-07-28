@@ -16,7 +16,6 @@ import (
 type reflexPipelineResult struct {
 	InjectedCtx     string
 	ReflexGuidance  string
-	PostActions     []bs.PostAction
 	PreTraces       []agent.ToolTrace
 	CortexTools     []string
 	EngineRuleCount int
@@ -84,7 +83,7 @@ func appendMemoryGroundingGuidance(guidance *strings.Builder, formattedTraces st
 		guidance.WriteString("\n\n")
 	}
 	guidance.WriteString("[memory grounding]\n")
-	guidance.WriteString("No user-specific memory matched this turn. Do not claim remembered or observed facts about the user from memory. If the user asks what you remember, or asks for a judgement that requires history, answer directly: \"I do not have enough saved evidence to judge that.\" Keep it to one short sentence plus, at most, a request for concrete examples. Never evaluate hypothetically. Do not add unsupported reassurance, praise, inferred traits, or conditional compliments like \"if you keep learning, that says a lot.\" In Russian, avoid phrases like \"если ты продолжаешь учиться\", \"если ты продолжаешь развиваться\", \"это уже о многом говорит\", \"это хороший знак\", and generic offers to help. If useful, ask for concrete evidence to evaluate.\n")
+	guidance.WriteString("No user-specific Memory/Association item matched this turn. This says nothing about whether a conversation or event happened. Direct transcript excerpts and successful tool evidence outrank this no_match and must not be contradicted. Without direct evidence, state only the limitation of what you can verify; never conclude \"that conversation/event did not happen\". Do not claim remembered or observed facts about the user from Memory. If the user asks for a judgement that requires history, answer directly: \"I do not have enough saved evidence to judge that.\" Keep it to one short sentence plus, at most, a request for concrete examples. Never evaluate hypothetically. Do not add unsupported reassurance, praise, inferred traits, or conditional compliments like \"if you keep learning, that says a lot.\" In Russian, avoid phrases like \"если ты продолжаешь учиться\", \"если ты продолжаешь развиваться\", \"это уже о многом говорит\", \"это хороший знак\", and generic offers to help. If useful, ask for concrete evidence to evaluate.\n")
 	guidance.WriteString("[/memory grounding]")
 }
 
@@ -343,13 +342,19 @@ func searchCandidateSummary(candidates []searchResultCandidate) string {
 
 // runReflexPipeline executes the System 1/2 pipeline:
 // 1. ReflexPreparer → structured context (traces + candidate rules)
-// 2. Reflex LLM (Gemini Flash) → plan (matched rules, pre/post actions, tools)
+// 2. Reflex LLM (Gemini Flash) → plan (matched rules, pre-actions, tools)
 // 3. Execute pre-actions (web_search etc.) → inject results into context
 // 4. Build cortex context: matched rules + research + AME traces
 //
 // When result.Silent=true the caller MUST abort the turn without calling
 // cortex or sending any output — a structured rule with Silent=true matched.
-func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText, priorContext string, timings *turnTimer) reflexPipelineResult {
+func (g *Gateway) runReflexPipeline(
+	ctx context.Context,
+	us *UserState,
+	msgText, priorContext string,
+	timings *turnTimer,
+	turnPolicy bs.TurnPolicy,
+) reflexPipelineResult {
 	// Interaction tier: the fast reflex-answer layer is transport-level and is
 	// usually skipped for text, but Cortex still needs AME traces. Run context
 	// prep + RuleEngine here without calling the old reflex planner LLM.
@@ -393,6 +398,11 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 			timings.RecordSince("rule_engine", ruleStarted, "interaction_tier")
 			for _, r := range engineRules {
 				if r.Suppressed {
+					suppressedRules = append(suppressedRules, matchedRuleFromActive(r, "engine", 0))
+					continue
+				}
+				if turnPolicy.SuppressToolDirectives && ruleHasToolDirective(r) {
+					suppressedRules = append(suppressedRules, matchedRuleFromActive(suppressToolRule(r), "engine", 0))
 					continue
 				}
 				if r.Silent {
@@ -400,13 +410,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 						"rule_id", r.ID, "trigger", r.Trigger, "chat_id", us.ChatID)
 					return reflexPipelineResult{Silent: true}
 				}
-			}
-			for _, r := range engineRules {
-				if r.Suppressed {
-					suppressedRules = append(suppressedRules, matchedRuleFromActive(r, "engine", 0))
-					continue
-				}
 				activeRules = append(activeRules, r)
+			}
+			for _, r := range activeRules {
 				cortexTools = append(cortexTools, r.Tools...)
 				if !hasRules {
 					guidance.WriteString("[active rules]\n")
@@ -430,7 +436,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 			injectedCtx = rc.FormattedTraces
 			strategy = rc.Strategy
 			memoriesCount = rc.MemoriesCount
-			if len(disambiguationOptions) == 0 {
+			if len(disambiguationOptions) == 0 && !turnPolicy.SuppressToolDirectives {
 				actions := g.hostReflexPreActions(ctx, us, msgText, priorContext, "", rc)
 				g.runReflexPreActions(ctx, us, timings, actions, &preTraces, &researchBlock, &actionsBlock)
 				appendResearchGuidance(&guidance, &researchBlock)
@@ -463,7 +469,12 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 
 	// Build reflex prompt.
 	var rulesBlock strings.Builder
+	policySuppressedSemantic := make(map[string]bs.MatchedRule)
 	for _, r := range rc.CandidateRules {
+		if turnPolicy.SuppressToolDirectives && semanticRuleHasToolDirective(r, us.Registry) {
+			policySuppressedSemantic[r.ID] = suppressedSemanticRule(r)
+			continue
+		}
 		fmt.Fprintf(&rulesBlock, "[%s] WHEN: %s → DO: %s (sr=%.0f%%)\n",
 			r.ID, r.Trigger, r.Action, r.SuccessRate*100)
 	}
@@ -483,6 +494,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 			peerTools := make(map[string]*strings.Builder)
 
 			for _, def := range us.Registry.DefinitionsForNames(names) {
+				if bs.IsToolDenied(ctx, def.Name) {
+					continue
+				}
 				peer := us.Registry.PeerForTool(def.Name)
 				line := fmt.Sprintf("- %s: %s\n", def.Name, strings.TrimSpace(def.Description))
 				if peer == "" {
@@ -542,7 +556,6 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		"confidence", reflexResult.Confidence,
 		"matched_rules", reflexResult.MatchedRules,
 		"pre_actions", len(reflexResult.PreActions),
-		"post_actions", len(reflexResult.PostActions),
 		"tools", reflexResult.Tools,
 	)
 
@@ -558,7 +571,10 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		)
 		reflexResult.MatchedRules = nil
 		reflexResult.PreActions = nil
-		reflexResult.PostActions = nil
+		reflexResult.Tools = nil
+	}
+	if turnPolicy.SuppressToolDirectives {
+		reflexResult.PreActions = nil
 		reflexResult.Tools = nil
 	}
 	formattedTraces := rc.FormattedTraces
@@ -570,7 +586,6 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		reflexResult.Intent = "clarification_needed"
 		reflexResult.ClarificationOptions = disambiguationOptions
 		reflexResult.PreActions = nil
-		reflexResult.PostActions = nil
 		reflexResult.Tools = nil
 		g.logger.Info("reflex: deterministic disambiguation",
 			"options", len(disambiguationOptions),
@@ -583,7 +598,7 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	var actionsBlock strings.Builder
 	var preTraces []agent.ToolTrace
 	preActionsToRun := reflexResult.PreActions
-	if len(disambiguationOptions) == 0 {
+	if len(disambiguationOptions) == 0 && !turnPolicy.SuppressToolDirectives {
 		hostActions := g.hostReflexPreActions(ctx, us, msgText, priorContext, reflexResult.Intent, rc)
 		if len(hostActions) > 0 {
 			preActionsToRun = hostActions
@@ -596,10 +611,17 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	var hasRules bool
 	seenRuleIDs := make(map[string]bool)
 	var matchedRulesInfo []bs.MatchedRule
-	var suppressedRulesInfo []bs.MatchedRule
+	suppressedRulesInfo := make([]bs.MatchedRule, 0, len(policySuppressedSemantic))
+	for _, r := range rc.CandidateRules {
+		if suppressed, ok := policySuppressedSemantic[r.ID]; ok {
+			suppressedRulesInfo = append(suppressedRulesInfo, suppressed)
+		}
+	}
 	var activeEngineRules []bs.ActiveRule
 	var cortexTools []string
-	cortexTools = append(cortexTools, reflexResult.Tools...)
+	if !turnPolicy.SuppressToolDirectives {
+		cortexTools = append(cortexTools, reflexResult.Tools...)
+	}
 
 	// 0. Disambiguation: reflex detected multiple plausible tools.
 	if reflexResult.Intent == "clarification_needed" && len(reflexResult.ClarificationOptions) > 0 {
@@ -623,6 +645,9 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 			matchedSet[id] = true
 		}
 		for _, r := range rc.CandidateRules {
+			if _, suppressed := policySuppressedSemantic[r.ID]; suppressed {
+				continue
+			}
 			if matchedSet[r.ID] && !seenRuleIDs[r.ID] {
 				seenRuleIDs[r.ID] = true
 				if !hasRules {
@@ -657,14 +682,17 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 		})
 		timings.RecordSince("rule_engine", ruleStarted, "reflex_pipeline")
 
-		// Hard-silence gate: if any matched rule is marked Silent, abort the
-		// turn entirely — no cortex call, no message sent. This is the only
-		// way to enforce "do not respond" reliably; soft prompt instructions
-		// in the rule's Action text are routinely ignored by the cortex LLM.
 		for _, r := range engineRules {
 			if r.Suppressed {
+				suppressedRulesInfo = append(suppressedRulesInfo, matchedRuleFromActive(r, "engine", 0))
 				continue
 			}
+			if turnPolicy.SuppressToolDirectives && ruleHasToolDirective(r) {
+				suppressedRulesInfo = append(suppressedRulesInfo, matchedRuleFromActive(suppressToolRule(r), "engine", 0))
+				continue
+			}
+			// Hard silence is checked only after policy suppression so a
+			// tool-bearing silent rule cannot abort a protected turn.
 			if r.Silent {
 				g.logger.Info("rule engine: silent rule matched, aborting turn",
 					"rule_id", r.ID,
@@ -672,13 +700,6 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 					"chat_id", us.ChatID,
 				)
 				return reflexPipelineResult{Silent: true}
-			}
-		}
-
-		for _, r := range engineRules {
-			if r.Suppressed {
-				suppressedRulesInfo = append(suppressedRulesInfo, matchedRuleFromActive(r, "engine", 0))
-				continue
 			}
 			if seenRuleIDs[r.ID] {
 				continue // already added by reflex
@@ -753,7 +774,6 @@ func (g *Gateway) runReflexPipeline(ctx context.Context, us *UserState, msgText,
 	return reflexPipelineResult{
 		InjectedCtx:     formattedTraces,
 		ReflexGuidance:  guidance.String(),
-		PostActions:     reflexResult.PostActions,
 		PreTraces:       preTraces,
 		CortexTools:     dedupeStrings(cortexTools),
 		EngineRuleCount: engineRuleCount,
@@ -808,6 +828,11 @@ func (g *Gateway) runInteraction(
 	reflexCb, cortexCb *bs.StreamCallbacks,
 	onReflexDone func(),
 ) (reply string, traces []agent.ToolTrace, escalated bool, err error) {
+	if cortexCfg.TurnPolicyActive {
+		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
+		return reply, traces, false, err
+	}
+
 	// Legacy path: interaction tier off, or the caller didn't wire it up
 	// (missing prompt / reflex loop / reflex system prompt).
 	if !g.deps.Config.Gateway.InteractionTier || g.reflexInteractionPrompt == "" ||
@@ -829,12 +854,7 @@ func (g *Gateway) runInteraction(
 	// cortex directly with the full content; persist the user turn
 	// once, matching the interaction-tier append-once pattern below.
 	if hasHeavyContent(content) {
-		if err = g.appendUnlessEphemeral(ctx, cortexCfg.SessionID, bs.Message{
-			Role:             "user",
-			Content:          content,
-			ReplyToMessageID: cortexCfg.ReplyToMessageID,
-			TGMessageID:      cortexCfg.TGMessageID,
-		}); err != nil {
+		if err = g.appendInteractionUser(ctx, cortexCfg, content); err != nil {
 			return "", nil, false, fmt.Errorf("interaction: append user message (heavy bypass): %w", err)
 		}
 		cortexCfg.SkipUserAppend = !bs.EphemeralFromContext(ctx)
@@ -850,12 +870,7 @@ func (g *Gateway) runInteraction(
 	// reflex pre-pass is net overhead: streaming Cortex is its own latency
 	// handshake, and a cheap difficulty gate mis-routes ~half the hard turns.
 	if onReflexDone == nil && g.deps.Config.Gateway.SkipReflexOnText {
-		if err = g.appendUnlessEphemeral(ctx, cortexCfg.SessionID, bs.Message{
-			Role:             "user",
-			Content:          content,
-			ReplyToMessageID: cortexCfg.ReplyToMessageID,
-			TGMessageID:      cortexCfg.TGMessageID,
-		}); err != nil {
+		if err = g.appendInteractionUser(ctx, cortexCfg, content); err != nil {
 			return "", nil, false, fmt.Errorf("interaction: append user message (skip-reflex): %w", err)
 		}
 		cortexCfg.SkipUserAppend = !bs.EphemeralFromContext(ctx)
@@ -916,7 +931,7 @@ func (g *Gateway) runInteraction(
 	}
 
 	// Persist the user message once; both tiers read it, neither re-appends.
-	if err = g.appendUnlessEphemeral(ctx, cortexCfg.SessionID, bs.Message{Role: "user", Content: content}); err != nil {
+	if err = g.appendInteractionUser(ctx, cortexCfg, content); err != nil {
 		return "", nil, false, fmt.Errorf("interaction: append user message: %w", err)
 	}
 
@@ -1127,5 +1142,3 @@ func (g *Gateway) PersistInterrupted(_ context.Context, chatID, partial string) 
 		g.logger.Warn("persist interrupted: append failed", "error", err)
 	}
 }
-
-// executePostActions runs post-cortex actions (save reflection, etc.).

@@ -26,18 +26,23 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	if cfg.Model == "" {
 		cfg.Model = a.cfg.Models.Primary.Name
 	}
+	ctx = bs.WithDeniedTools(ctx, cfg.DeniedTools)
 
 	if !cfg.SkipUserAppend && !cfg.PromptOnlyInput {
 		started := time.Now()
-		err := a.store.Append(ctx, cfg.SessionID, bs.Message{
+		receipt, err := appendPersistedMessage(ctx, a.store, cfg.SessionID, bs.Message{
 			Role:             "user",
-			Content:          userMessage,
+			Content:          durableUserContent(cfg, userMessage),
+			VisibleText:      cfg.VisibleUserText,
 			ReplyToMessageID: cfg.ReplyToMessageID,
 			TGMessageID:      cfg.TGMessageID,
 		})
 		emitTiming(cfg, "agent.append_user", started, "role="+cfg.Role)
 		if err != nil {
 			return "", nil, fmt.Errorf("append user message: %w", err)
+		}
+		if cfg.OnUserMessagePersisted != nil && receipt.ID != "" {
+			cfg.OnUserMessagePersisted(ctx, receipt)
 		}
 	}
 
@@ -48,7 +53,9 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	toolObservationContext := a.recentToolObservationContext(ctx, cfg)
 	turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, tools, toolObservationContext)
 	dialogDecision := effectiveDialogBudgetDecision(tokenBudget, cfg.SystemPrompt, compactSummary, turnContext, tools)
-	dialogBudget := dialogDecision.DialogBudget
+	dialogBudget := dialogBudgetAfterCurrentExpansion(
+		dialogDecision.DialogBudget, cfg, userMessage,
+	)
 	promptOverhead := dialogDecision.PromptOverhead
 	loadStarted := time.Now()
 	dialogMessages, loadErr := a.store.DialogMessagesForAPI(ctx, cfg.SessionID, dialogBudget)
@@ -56,6 +63,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	if loadErr != nil {
 		return "", nil, fmt.Errorf("load dialog messages: %w", loadErr)
 	}
+	dialogMessages = overlayCurrentUserContent(dialogMessages, cfg, userMessage)
 	feltTime := feltTimeContext(dialogMessages, cfg.TurnNow, !cfg.PromptOnlyInput)
 	dialogMessages = annotateDialogDays(dialogMessages, cfg.TurnNow)
 	dialogTokens := estimateMessagesTokens(dialogMessages)
@@ -218,8 +226,9 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		}
 
 		assistantMsg := bs.Message{
-			Role:    "assistant",
-			Content: resp.Content,
+			Role:        "assistant",
+			Content:     resp.Content,
+			VisibleText: visibleTextPointer(resp.Content),
 		}
 		if !cfg.Ephemeral {
 			appendStarted := time.Now()
@@ -265,6 +274,32 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			var promptToolResults []bs.ContentBlock
 			for _, block := range resp.Content {
 				if block.Type != "tool_use" {
+					continue
+				}
+				if cfg.StrictTools && !toolDefinitionPresent(turnTools, block.Name) {
+					result := fmt.Sprintf("tool %q is not allowed by the strict turn policy", block.Name)
+					input := string(block.Input)
+					if len(input) > 200 {
+						input = input[:200] + "..."
+					}
+					a.logger.Warn("strict tool policy denied dispatch (stream)",
+						"role", cfg.Role,
+						"tool", block.Name,
+						"tool_use_id", block.ID,
+					)
+					if cb != nil && cb.OnToolResult != nil {
+						cb.OnToolResult(block.ID, result, true, 0)
+					}
+					traces = append(traces, ToolTrace{Name: block.Name, Input: input, Output: result, Error: true})
+					resultBlock := bs.ContentBlock{
+						Type:      "tool_result",
+						ToolUseID: block.ID,
+						Name:      block.Name,
+						Content:   result,
+						IsError:   true,
+					}
+					toolResults = append(toolResults, resultBlock)
+					promptToolResults = append(promptToolResults, compactToolResultBlockForPrompt(resultBlock))
 					continue
 				}
 				if block.Name == ToolboxToolName && len(cfg.ToolboxExpansion) > 0 {

@@ -34,7 +34,7 @@ func TestHandleInvokeToolRequiresBearerAndValidatesOwnership(t *testing.T) {
 			}, nil
 		},
 	}
-	handler := server.requireBearer(http.HandlerFunc(server.handleInvokeTool))
+	handler := server.requireInternalBearer(http.HandlerFunc(server.handleInvokeTool))
 	body := `{"user_id":"` + userID.String() + `","soul_id":"` + soulID.String() + `","name":"lookup","input":{"q":"x"}}`
 
 	res := httptest.NewRecorder()
@@ -58,6 +58,35 @@ func TestHandleInvokeToolRequiresBearerAndValidatesOwnership(t *testing.T) {
 	}
 	if response.Invocation.Name != "lookup" || response.Invocation.Output != `{"ok":true}` {
 		t.Fatalf("response=%+v", response)
+	}
+}
+
+func TestInternalToolRouteFailsClosedWithoutConfiguredBearer(t *testing.T) {
+	for _, token := range []string{"", "${VAELUM_DAEMON_SERVICE_TOKEN}"} {
+		t.Run("token="+token, func(t *testing.T) {
+			server := &Server{
+				token:  token,
+				logger: slog.Default(),
+				invokeTool: func(context.Context, uuid.UUID, uuid.UUID, string, json.RawMessage) (gateway.ToolInvocation, error) {
+					t.Fatal("invoke called")
+					return gateway.ToolInvocation{}, nil
+				},
+			}
+			handler := server.handler()
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/api/internal/tools/invoke",
+				strings.NewReader(`{"user_id":"00000000-0000-0000-0000-000000000001","soul_id":"00000000-0000-0000-0000-000000000002","name":"lookup","input":{}}`),
+			)
+			if token != "" {
+				req.Header.Set("Authorization", "Bearer "+token)
+			}
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status=%d body=%s", res.Code, res.Body.String())
+			}
+		})
 	}
 }
 

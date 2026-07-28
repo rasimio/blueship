@@ -16,8 +16,6 @@ type ReflexResult struct {
 	Confidence float64 `json:"confidence"`
 	// PreActions are tools to execute BEFORE cortex. Results become context.
 	PreActions []ToolAction `json:"pre_actions"`
-	// PostActions are actions to execute AFTER cortex response.
-	PostActions []PostAction `json:"post_actions"`
 	// Tools lists tool names the cortex model should have access to during generation.
 	// nil = use role default; empty slice = no tools needed.
 	Tools []string `json:"tools"`
@@ -65,12 +63,6 @@ type ReflexPreActionRequest struct {
 // ReflexPreActionSelector can add deterministic pre-actions before Cortex.
 // It is intentionally host-provided so BlueShip stays tool-name agnostic.
 type ReflexPreActionSelector func(ctx context.Context, req ReflexPreActionRequest) []ToolAction
-
-// PostAction is an action to execute after cortex generates a response.
-type PostAction struct {
-	// Type: "save_reflection", "save_fact"
-	Type string `json:"type"`
-}
 
 // CandidateRule is a rule found by supplementary search, sent to reflex for classification.
 type CandidateRule struct {

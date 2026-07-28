@@ -17,6 +17,23 @@ type preparedCortexTurn struct {
 	now      time.Time
 }
 
+func (g *Gateway) cortexTurnRegistry(ctx context.Context, us *UserState, noTools bool) *bs.ToolRegistry {
+	if noTools || us == nil || us.Registry == nil {
+		return bs.NewToolRegistry()
+	}
+	turnRegistry := us.Registry
+	if g.deps.Config.MCPSource == nil {
+		return turnRegistry
+	}
+	if mcpTools := g.deps.Config.MCPSource.ToolsForSoul(ctx, us.SoulID); len(mcpTools) > 0 {
+		turnRegistry = us.Registry.Clone()
+		for _, t := range mcpTools {
+			turnRegistry.RegisterRemote(t.Name, t.Description, t.Schema, bs.ToolModeSync, "mcp", t.Handler)
+		}
+	}
+	return turnRegistry
+}
+
 // prepareCortexTurn is the common identity/model/history-window builder used
 // by both inbound and assistant-initiated chat turns. Context preparation is
 // intentionally outside: interactive and autonomous origins have different
@@ -29,18 +46,26 @@ func (g *Gateway) prepareCortexTurn(
 	timings *turnTimer,
 	noTools bool,
 ) (preparedCortexTurn, error) {
-	turnRegistry := us.Registry
+	return g.prepareCortexTurnWithRegistry(
+		ctx, us, sess, injectedCtx, reflexGuidance, timings, noTools, nil, nil,
+	)
+}
+
+func (g *Gateway) prepareCortexTurnWithRegistry(
+	ctx context.Context,
+	us *UserState,
+	sess *session.Session,
+	injectedCtx, reflexGuidance string,
+	timings *turnTimer,
+	noTools bool,
+	turnRegistry *bs.ToolRegistry,
+	allowedToolsSnapshot *[]string,
+) (preparedCortexTurn, error) {
 	if noTools {
 		turnRegistry = bs.NewToolRegistry()
-	} else if g.deps.Config.MCPSource != nil {
-		if mcpTools := g.deps.Config.MCPSource.ToolsForSoul(ctx, us.SoulID); len(mcpTools) > 0 {
-			turnRegistry = us.Registry.Clone()
-			for _, t := range mcpTools {
-				turnRegistry.RegisterRemote(t.Name, t.Description, t.Schema, bs.ToolModeSync, "mcp", t.Handler)
-			}
-		}
+	} else if turnRegistry == nil {
+		turnRegistry = g.cortexTurnRegistry(ctx, us, noTools)
 	}
-
 	loop := agent.NewLoop(g.provider, g.store, turnRegistry, g.deps.RoleTools, g.deps.Config, g.logger)
 	now := time.Now().In(g.deps.Config.Gateway.TimezoneFor(bs.WithSoulID(ctx, us.SoulID), g.tz))
 	promptStarted := time.Now()
@@ -68,6 +93,8 @@ func (g *Gateway) prepareCortexTurn(
 	var allowedTools []string
 	if noTools {
 		allowedTools = []string{}
+	} else if allowedToolsSnapshot != nil {
+		allowedTools = cloneStrings(*allowedToolsSnapshot)
 	} else {
 		allowedTools = g.allowedToolsForSoul(ctx, us.SoulID, turnRegistry)
 	}

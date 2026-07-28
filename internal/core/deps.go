@@ -76,9 +76,9 @@ type Deps struct {
 	// row in vaelum.chat_attachments — so the cabinet's chat history
 	// can show a chip with a download link regardless of which
 	// transport originally produced the file. Nil leaves attachments
-	// transport-local: the LLM still sees them via chat_messages,
-	// but the cabinet won't surface a chip on reload for anything
-	// that didn't arrive through the cabinet's own /api/chat path.
+	// transport-local: the current LLM call still sees the inbound payload,
+	// but later replies cannot replay the bytes and the cabinet won't surface
+	// a chip for anything that didn't arrive through its own upload path.
 	AttachmentSink AttachmentSink
 
 	// TurnCompletedHook is called after the gateway finishes sending an

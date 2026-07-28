@@ -52,7 +52,6 @@ func gatewaySectionCounts(text string) string {
 		"memory":          strings.Count(text, "[memory"),
 		"insight":         strings.Count(text, "[insight"),
 		"episode":         strings.Count(text, "[episode"),
-		"verbatim":        strings.Count(text, "[verbatim"),
 		"stance":          strings.Count(text, "[stance"),
 		"relation":        strings.Count(text, "[relation"),
 		"rule":            strings.Count(text, "[rule"),
@@ -62,7 +61,7 @@ func gatewaySectionCounts(text string) string {
 	}
 	return orderedGatewayCountString(counts, []string{
 		"active_rules", "research", "active_notes", "memory", "insight", "episode",
-		"verbatim", "stance", "relation", "rule", "retrieval", "temporal_anchor", "contradictions",
+		"stance", "relation", "rule", "retrieval", "temporal_anchor", "contradictions",
 	})
 }
 

@@ -63,3 +63,66 @@ func TestAutonomousHistoryProjectionMigrationMatchesInitSchema(t *testing.T) {
 		t.Fatal("init.sql autonomous history projection differs from migration 019")
 	}
 }
+
+func TestChatMessageProjectionMigrationMatchesInitSchema(t *testing.T) {
+	incremental, err := migrations.ReadFile("sql/020_chat_message_projection.sql")
+	if err != nil {
+		t.Fatalf("read incremental migration: %v", err)
+	}
+	initSchema, err := migrations.ReadFile("sql/init.sql")
+	if err != nil {
+		t.Fatalf("read init schema: %v", err)
+	}
+	if !strings.Contains(string(initSchema), strings.TrimSpace(string(incremental))) {
+		t.Fatal("init.sql chat message projection differs from migration 020")
+	}
+
+	sql := string(incremental)
+	for _, required := range []string{
+		"visible_text TEXT",
+		"projection_status TEXT NOT NULL DEFAULT 'unprojectable_legacy'",
+		"'projected'",
+		"'non_dialogue'",
+		"'unprojectable_legacy'",
+		"projector_version TEXT NOT NULL DEFAULT 'legacy-unprojected'",
+		"projection_status = 'projected'",
+		"visible_text IS NOT NULL",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("chat message projection migration lacks %q", required)
+		}
+	}
+	if got := strings.Count(sql, "NOT VALID"); got != 2 {
+		t.Fatalf("chat message projection migration has %d NOT VALID constraints, want 2", got)
+	}
+}
+
+func TestToolDescriptionsMigrationMatchesInitSchema(t *testing.T) {
+	incremental, err := migrations.ReadFile("sql/021_tool_descriptions.sql")
+	if err != nil {
+		t.Fatalf("read incremental migration: %v", err)
+	}
+	initSchema, err := migrations.ReadFile("sql/init.sql")
+	if err != nil {
+		t.Fatalf("read init schema: %v", err)
+	}
+	if !strings.Contains(string(initSchema), strings.TrimSpace(string(incremental))) {
+		t.Fatal("init.sql tool descriptions differs from migration 021")
+	}
+
+	sql := string(incremental)
+	for _, required := range []string{
+		"CREATE TABLE IF NOT EXISTS tool_descriptions",
+		"name        TEXT PRIMARY KEY",
+		"description TEXT NOT NULL",
+		"version     TEXT NOT NULL DEFAULT 'v1'",
+		"updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+		"CHECK (BTRIM(name) <> '')",
+		"CHECK (BTRIM(description) <> '')",
+		"CHECK (BTRIM(version) <> '')",
+	} {
+		if !strings.Contains(sql, required) {
+			t.Fatalf("tool descriptions migration lacks %q", required)
+		}
+	}
+}

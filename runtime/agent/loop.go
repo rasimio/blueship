@@ -75,6 +75,26 @@ type RunConfig struct {
 	// filtering. A tool absent from this list is dropped even if a role or
 	// ToolOverride selected it.
 	AllowedTools []string
+	// DeniedTools is a hard per-turn denylist applied after role, override,
+	// toolbox, and AllowedTools resolution. It also flows through the tool
+	// execution context so live capability reporters hide denied tools.
+	DeniedTools []string
+	// StrictTools prevents dispatch of any tool outside the concrete tool
+	// definitions sent for this turn. It also disables toolbox expansion.
+	StrictTools bool
+	// TurnPolicyActive bypasses any optional interaction-tier answer pass so
+	// mandatory evidence and the resolved Cortex tool contract cannot be
+	// silently skipped by a faster model.
+	TurnPolicyActive bool
+	// VisibleUserText is the exact user-visible transport text/transcript
+	// captured before reply-parent and attachment expansion. Nil means the
+	// caller could not provide a canonical projection; pointer-to-empty is a
+	// valid attachment-only message.
+	VisibleUserText *string
+	// OnUserMessagePersisted receives the exact durable append receipt after
+	// the human row commits. It is used for dependent evidence rows such as
+	// inbound attachments; nil keeps legacy/custom stores unchanged.
+	OnUserMessagePersisted func(context.Context, bs.PersistedMessage)
 	// Temperature for LLM generation (0 = provider default).
 	Temperature float64
 	// Ephemeral, when true, runs the loop without persisting the assistant
@@ -160,6 +180,69 @@ type RunResult struct {
 	ToolTraces []ToolTrace
 }
 
+// durableUserContent returns the transport-visible envelope written to
+// chat_messages. Provider-expanded reply parents, attachment bytes, and
+// extracted file bodies stay in userMessage for the current call only.
+func durableUserContent(cfg RunConfig, userMessage any) any {
+	if cfg.VisibleUserText == nil {
+		return userMessage
+	}
+	return *cfg.VisibleUserText
+}
+
+func appendPersistedMessage(
+	ctx context.Context,
+	store bs.MessageStore,
+	sessionID string,
+	msg bs.Message,
+) (bs.PersistedMessage, error) {
+	if appender, ok := store.(bs.PersistedMessageAppender); ok {
+		return appender.AppendPersisted(ctx, sessionID, msg)
+	}
+	if err := store.Append(ctx, sessionID, msg); err != nil {
+		return bs.PersistedMessage{}, err
+	}
+	return bs.PersistedMessage{Role: msg.Role}, nil
+}
+
+// overlayCurrentUserContent swaps the just-persisted canonical user envelope
+// for the provider-expanded payload in this one in-memory prompt. The turn
+// lock guarantees that a freshly appended human row is the latest dialogue
+// message; if a custom store omits it, append the current payload explicitly.
+func overlayCurrentUserContent(messages []bs.Message, cfg RunConfig, userMessage any) []bs.Message {
+	if cfg.PromptOnlyInput || cfg.VisibleUserText == nil {
+		return messages
+	}
+	if len(messages) > 0 && messages[len(messages)-1].Role == "user" {
+		messages[len(messages)-1].Content = userMessage
+		messages[len(messages)-1].VisibleText = cfg.VisibleUserText
+		return messages
+	}
+	return append(messages, bs.Message{
+		Role:        "user",
+		Content:     userMessage,
+		VisibleText: cfg.VisibleUserText,
+	})
+}
+
+// dialogBudgetAfterCurrentExpansion reserves space for provider-only current
+// payload bytes without charging that expansion to durable dialogue history.
+func dialogBudgetAfterCurrentExpansion(budget int, cfg RunConfig, userMessage any) int {
+	if budget <= 0 || cfg.VisibleUserText == nil || cfg.PromptOnlyInput {
+		return budget
+	}
+	expanded := bs.EstimateTokens(bs.NormalizeContent(userMessage))
+	canonical := bs.EstimateTokens(bs.NormalizeContent(*cfg.VisibleUserText))
+	extra := expanded - canonical
+	if extra <= 0 {
+		return budget
+	}
+	if extra >= budget {
+		return 1
+	}
+	return budget - extra
+}
+
 // Run executes the agent loop and returns the final text response.
 func (a *Loop) Run(ctx context.Context, cfg RunConfig, userMessage any) (string, error) {
 	result, err := a.RunTracked(ctx, cfg, userMessage)
@@ -209,16 +292,29 @@ func (a *Loop) selectTools(cfg RunConfig) []bs.ToolDefinition {
 	} else {
 		tools = a.registry.Definitions()
 	}
-	if cfg.AllowedTools == nil {
+	if cfg.AllowedTools != nil {
+		allow := make(map[string]bool, len(cfg.AllowedTools))
+		for _, n := range cfg.AllowedTools {
+			allow[n] = true
+		}
+		kept := make([]bs.ToolDefinition, 0, len(tools))
+		for _, t := range tools {
+			if allow[t.Name] {
+				kept = append(kept, t)
+			}
+		}
+		tools = kept
+	}
+	if len(cfg.DeniedTools) == 0 {
 		return tools
 	}
-	allow := make(map[string]bool, len(cfg.AllowedTools))
-	for _, n := range cfg.AllowedTools {
-		allow[n] = true
+	denied := make(map[string]bool, len(cfg.DeniedTools))
+	for _, n := range cfg.DeniedTools {
+		denied[n] = true
 	}
 	kept := make([]bs.ToolDefinition, 0, len(tools))
 	for _, t := range tools {
-		if allow[t.Name] {
+		if !denied[t.Name] {
 			kept = append(kept, t)
 		}
 	}
@@ -241,7 +337,7 @@ func toolboxToolDefinition() bs.ToolDefinition {
 // withToolboxTool appends the open_toolbox escape hatch when a narrowed
 // override is active and an expansion set is configured.
 func withToolboxTool(cfg RunConfig, tools []bs.ToolDefinition) []bs.ToolDefinition {
-	if len(cfg.ToolboxExpansion) == 0 || cfg.ToolOverride == nil {
+	if cfg.StrictTools || len(cfg.ToolboxExpansion) == 0 || cfg.ToolOverride == nil {
 		return tools
 	}
 	out := make([]bs.ToolDefinition, 0, len(tools)+1)
@@ -257,6 +353,23 @@ func (a *Loop) toolboxTools(cfg RunConfig) []bs.ToolDefinition {
 	expanded := cfg
 	expanded.ToolOverride = cfg.ToolboxExpansion
 	return a.selectTools(expanded)
+}
+
+func toolDefinitionPresent(tools []bs.ToolDefinition, name string) bool {
+	for _, def := range tools {
+		if def.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func visibleTextPointer(content []bs.ContentBlock) *string {
+	text := bs.ExtractText(content)
+	if text == "" {
+		return nil
+	}
+	return &text
 }
 
 // feltTimeStaleAfter is the gap between the previous stored message and now

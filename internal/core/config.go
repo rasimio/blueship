@@ -46,6 +46,12 @@ type Config struct {
 	// to stderr — fine for examples, never for production.
 	Logger *slog.Logger
 
+	// HostMetrics supplies application-owned Prometheus gauge/counter samples
+	// for BlueShip's existing /metrics endpoint. Nil exposes framework metrics
+	// only. Invalid samples are rejected as one batch so a host cannot corrupt
+	// the scrape exposition.
+	HostMetrics MetricSampleCollector `yaml:"-" json:"-"`
+
 	// SystemPromptKeys defines prompt keys that compose the system prompt.
 	// Each key resolves to <key>.md inside Config.Prompts.
 	// Default: ["preamble", "soul", "agents"]
@@ -61,6 +67,11 @@ type Config struct {
 	// supplies domain-specific packs and keywords. Nil preserves the role
 	// default exactly.
 	ToolSelector ToolSelector `yaml:"-" json:"-"`
+
+	// TurnPolicyResolver optionally resolves an atomic per-turn policy before
+	// reflex/rule tool directives run. The hook is host-owned so intent
+	// detection and concrete tool names never leak into BlueShip.
+	TurnPolicyResolver TurnPolicyResolver `yaml:"-" json:"-"`
 
 	// ReflexPreActionSelector optionally adds deterministic pre-actions before
 	// Cortex. BlueShip executes and logs them through the normal reflex

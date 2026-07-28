@@ -15,18 +15,37 @@ import (
 )
 
 func (s *Store) Append(ctx context.Context, sessionID string, msg bs.Message) error {
+	_, err := s.AppendPersisted(ctx, sessionID, msg)
+	return err
+}
+
+// AppendPersisted adds a message and returns its exact durable receipt.
+func (s *Store) AppendPersisted(ctx context.Context, sessionID string, msg bs.Message) (bs.PersistedMessage, error) {
 	blocks := bs.NormalizeContent(msg.Content)
 	tokens := bs.EstimateTokens(blocks)
-	_, err := s.appendInternal(ctx, sessionID, msg, blocks, nil, tokens)
-	return err
+	stored, err := s.appendInternal(ctx, sessionID, msg, blocks, nil, tokens)
+	if err != nil {
+		return bs.PersistedMessage{}, err
+	}
+	return bs.PersistedMessage{ID: stored.ID, Role: stored.Role, CreatedAt: stored.CreatedAt}, nil
 }
 
 // AppendWithTokens adds a message with a known token count (e.g., from API usage).
 // Satisfies core.MessageStore.
 func (s *Store) AppendWithTokens(ctx context.Context, sessionID string, msg bs.Message, tokens int) error {
-	blocks := bs.NormalizeContent(msg.Content)
-	_, err := s.appendInternal(ctx, sessionID, msg, blocks, nil, tokens)
+	_, err := s.AppendWithTokensPersisted(ctx, sessionID, msg, tokens)
 	return err
+}
+
+// AppendWithTokensPersisted adds a token-counted message and returns its exact
+// durable receipt.
+func (s *Store) AppendWithTokensPersisted(ctx context.Context, sessionID string, msg bs.Message, tokens int) (bs.PersistedMessage, error) {
+	blocks := bs.NormalizeContent(msg.Content)
+	stored, err := s.appendInternal(ctx, sessionID, msg, blocks, nil, tokens)
+	if err != nil {
+		return bs.PersistedMessage{}, err
+	}
+	return bs.PersistedMessage{ID: stored.ID, Role: stored.Role, CreatedAt: stored.CreatedAt}, nil
 }
 
 // AppendReturning adds a message and returns the stored Message (for CLI/debug use).
@@ -119,6 +138,12 @@ func (s *Store) AppendAutonomousAssistant(
 	if err != nil {
 		return fmt.Errorf("append autonomous assistant: marshal message: %w", err)
 	}
+	boundaryProjection := bs.ProjectMessageForWrite(bs.Message{Role: "turn_boundary"}, nil)
+	assistantProjection := bs.ProjectMessageForWrite(bs.Message{
+		Role:        "assistant",
+		Content:     assistantBlocks,
+		VisibleText: &text,
+	}, assistantBlocks)
 	tokens := bs.EstimateTokens(assistantBlocks)
 	var tgMID any
 	if tgMessageID != 0 {
@@ -136,22 +161,28 @@ func (s *Store) AppendAutonomousAssistant(
 	// observes boundary before assistant rather than relying on random UUIDs.
 	boundaryResult, err := tx.ExecContext(ctx,
 		`INSERT INTO chat_messages
-		    (id, soul_id, session_id, role, content, token_estimate, created_at)
+		    (id, soul_id, session_id, role, content, token_estimate, created_at,
+		     visible_text, projection_status, projection_reason, projector_version)
 		 VALUES ($1, $4::uuid, $2, 'turn_boundary', $3, 0,
-		         $5 - interval '1 microsecond')
+		         $5 - interval '1 microsecond', $6, $7, $8, $9)
 		 ON CONFLICT (id) DO NOTHING`,
 		boundaryID, sessionID, boundaryJSON, bs.SoulIDFromContext(ctx), deliveredAt,
+		boundaryProjection.VisibleText, boundaryProjection.Status,
+		projectionReasonArg(boundaryProjection), boundaryProjection.ProjectorVersion,
 	)
 	if err != nil {
 		return fmt.Errorf("append autonomous assistant: insert boundary: %w", err)
 	}
 	assistantResult, err := tx.ExecContext(ctx,
 		`INSERT INTO chat_messages
-		    (id, soul_id, session_id, role, content, token_estimate, tg_message_id, created_at)
+		    (id, soul_id, session_id, role, content, token_estimate, tg_message_id, created_at,
+		     visible_text, projection_status, projection_reason, projector_version)
 		 VALUES ($1, $6::uuid, $2, 'assistant', $3, $4, $5,
-		         $7)
+		         $7, $8, $9, $10, $11)
 		 ON CONFLICT (id) DO NOTHING`,
 		assistantID, sessionID, assistantJSON, tokens, tgMID, bs.SoulIDFromContext(ctx), deliveredAt,
+		assistantProjection.VisibleText, assistantProjection.Status,
+		projectionReasonArg(assistantProjection), assistantProjection.ProjectorVersion,
 	)
 	if err != nil {
 		return fmt.Errorf("append autonomous assistant: insert message: %w", err)
@@ -245,6 +276,7 @@ func (s *Store) appendInternal(ctx context.Context, sessionID string, msg bs.Mes
 	if err != nil {
 		return nil, fmt.Errorf("marshal content: %w", err)
 	}
+	projection := bs.ProjectMessageForWrite(msg, blocks)
 
 	if toolUseID == nil && msg.Role == "user" {
 		for _, b := range blocks {
@@ -278,11 +310,14 @@ func (s *Store) appendInternal(ctx context.Context, sessionID string, msg bs.Mes
 	err = tx.QueryRowxContext(ctx,
 		`INSERT INTO chat_messages
 		    (soul_id, session_id, role, content, tool_use_id, token_estimate,
-		     reply_to_message_id, tg_message_id)
-		 VALUES ($6::uuid, $1, $2, $3, $4, $5, $7, $8)
-		 RETURNING id, session_id, role, content, tool_use_id, token_estimate, created_at`,
+		     reply_to_message_id, tg_message_id, visible_text, projection_status,
+		     projection_reason, projector_version)
+		 VALUES ($6::uuid, $1, $2, $3, $4, $5, $7, $8, $9, $10, $11, $12)
+		 RETURNING id, session_id, role, content, visible_text, projection_status,
+		           projection_reason, projector_version, tool_use_id, token_estimate, created_at`,
 		sessionID, msg.Role, contentJSON, toolUseID, tokens, bs.SoulIDFromContext(ctx),
-		replyTo, tgMID,
+		replyTo, tgMID, projection.VisibleText, projection.Status,
+		projectionReasonArg(projection), projection.ProjectorVersion,
 	).StructScan(&m)
 	if err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
@@ -307,6 +342,13 @@ func (s *Store) appendInternal(ctx context.Context, sessionID string, msg bs.Mes
 	return &m, nil
 }
 
+func projectionReasonArg(projection bs.MessageProjection) any {
+	if projection.Reason == "" {
+		return nil
+	}
+	return projection.Reason
+}
+
 // Messages returns messages for a session, ordered by creation time (newest last).
 func (s *Store) Messages(ctx context.Context, sessionID string, limit int) ([]Message, error) {
 	if limit <= 0 {
@@ -315,7 +357,8 @@ func (s *Store) Messages(ctx context.Context, sessionID string, limit int) ([]Me
 
 	var msgs []Message
 	err := s.db.SelectContext(ctx, &msgs,
-		`SELECT id, session_id, role, content, tool_use_id, token_estimate, created_at
+		`SELECT id, session_id, role, content, visible_text, projection_status,
+		        projection_reason, projector_version, tool_use_id, token_estimate, created_at
 		 FROM chat_messages
 		 WHERE session_id = $1
 		 ORDER BY created_at ASC
@@ -332,7 +375,8 @@ func (s *Store) Messages(ctx context.Context, sessionID string, limit int) ([]Me
 func (s *Store) MessagesForAPI(ctx context.Context, sessionID string, maxTokens int) ([]bs.Message, error) {
 	var msgs []Message
 	err := s.db.SelectContext(ctx, &msgs,
-		`SELECT id, session_id, role, content, tool_use_id, token_estimate, created_at
+		`SELECT id, session_id, role, content, visible_text, projection_status,
+		        projection_reason, projector_version, tool_use_id, token_estimate, created_at
 		 FROM chat_messages
 		 WHERE session_id = $1
 		   AND role IN ('user', 'assistant')
@@ -357,7 +401,8 @@ func (s *Store) MessagesForAPI(ctx context.Context, sessionID string, maxTokens 
 func (s *Store) DialogMessagesForAPI(ctx context.Context, sessionID string, maxTokens int) ([]bs.Message, error) {
 	var msgs []Message
 	err := s.db.SelectContext(ctx, &msgs,
-		`SELECT id, session_id, role, content, tool_use_id, token_estimate, created_at
+		`SELECT id, session_id, role, content, visible_text, projection_status,
+		        projection_reason, projector_version, tool_use_id, token_estimate, created_at
 		 FROM chat_messages
 		 WHERE session_id = $1
 		 ORDER BY created_at DESC
@@ -395,7 +440,8 @@ func (s *Store) RecentToolObservations(ctx context.Context, sessionID string, si
 	}
 	var msgs []Message
 	err := s.db.SelectContext(ctx, &msgs,
-		`SELECT id, session_id, role, content, tool_use_id, token_estimate, created_at
+		`SELECT id, session_id, role, content, visible_text, projection_status,
+		        projection_reason, projector_version, tool_use_id, token_estimate, created_at
 		 FROM chat_messages
 		 WHERE session_id = $1
 		   AND ($2::timestamptz IS NULL OR created_at >= $2::timestamptz)
@@ -805,7 +851,8 @@ func messageBlocks(msg Message) []bs.ContentBlock {
 func (s *Store) AllMessagesForAPI(ctx context.Context, sessionID string) ([]bs.Message, error) {
 	var msgs []Message
 	err := s.db.SelectContext(ctx, &msgs,
-		`SELECT id, session_id, role, content, tool_use_id, token_estimate, created_at
+		`SELECT id, session_id, role, content, visible_text, projection_status,
+		        projection_reason, projector_version, tool_use_id, token_estimate, created_at
 		 FROM chat_messages
 		 WHERE session_id = $1
 		   AND role IN ('user', 'assistant')
@@ -834,7 +881,8 @@ func (s *Store) AllMessagesForAPI(ctx context.Context, sessionID string) ([]bs.M
 func (s *Store) MessagesSince(ctx context.Context, userID string, since time.Time) ([]bs.SessionMessage, error) {
 	var msgs []bs.SessionMessage
 	err := s.db.SelectContext(ctx, &msgs,
-		`SELECT m.id, m.session_id, m.role, m.content, m.tool_use_id, m.token_estimate, m.created_at
+		`SELECT m.id, m.session_id, m.role, m.content, m.visible_text, m.projection_status,
+		        m.projection_reason, m.projector_version, m.tool_use_id, m.token_estimate, m.created_at
 		 FROM chat_messages m
 		 JOIN chat_sessions s ON s.id = m.session_id
 		 WHERE s.user_id = $1 AND m.created_at >= $2 AND s.source = 'chat'
@@ -863,7 +911,8 @@ func (s *Store) ChainMessages(ctx context.Context, sessionID string, limit int, 
 			JOIN chain c ON c.id = cs.id
 			WHERE cs.previous_id IS NOT NULL
 		)
-		SELECT m.id, m.session_id, m.role, m.content, m.tool_use_id, m.token_estimate, m.created_at
+		SELECT m.id, m.session_id, m.role, m.content, m.visible_text, m.projection_status,
+		       m.projection_reason, m.projector_version, m.tool_use_id, m.token_estimate, m.created_at
 		FROM chat_messages m
 		WHERE m.session_id IN (SELECT id FROM chain)`
 
@@ -894,7 +943,9 @@ func (s *Store) LastMessages(ctx context.Context, sessionIDs []string) (map[stri
 		return nil, nil
 	}
 	query, args, err := sqlx.In(`
-		SELECT DISTINCT ON (session_id) id, session_id, role, content, tool_use_id, token_estimate, created_at
+		SELECT DISTINCT ON (session_id) id, session_id, role, content, visible_text,
+		       projection_status, projection_reason, projector_version,
+		       tool_use_id, token_estimate, created_at
 		FROM chat_messages
 		WHERE session_id IN (?) AND role IN ('user', 'assistant')
 		ORDER BY session_id, created_at DESC`, sessionIDs)

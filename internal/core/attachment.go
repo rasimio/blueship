@@ -55,8 +55,8 @@ func ParseAttachmentMarkers(text string) (ids []uuid.UUID, cleaned string, ok bo
 // back into the model.
 //
 // A nil sink on Deps is the documented "no CDN" mode — the gateway
-// silently skips persistence/resolution and continues serving the
-// model from chat_messages alone.
+// silently skips persistence/resolution. The current model call still sees
+// the transport payload, but raw files have no durable replay path.
 type AttachmentSink interface {
 	Save(ctx context.Context, p AttachmentParams) (id uuid.UUID, err error)
 	Get(ctx context.Context, userID, soulID, id uuid.UUID) (*AttachmentRecord, []byte, error)
@@ -134,6 +134,10 @@ type AttachmentParams struct {
 	UserID    uuid.UUID
 	SoulID    uuid.UUID
 	SessionID uuid.UUID
+	// MessageID is the exact chat_messages.id whose inbound envelope carried
+	// this file. Zero is retained for legacy/custom appenders that cannot
+	// return a durable message receipt.
+	MessageID uuid.UUID
 	Name      string
 	Mime      string
 	Kind      string

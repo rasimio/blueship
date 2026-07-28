@@ -49,34 +49,43 @@ type (
 
 // --- S2 cortex: the agent turn + tools + agent tasks ---
 type (
-	Message               = core.Message
-	ContentBlock          = core.ContentBlock
-	ToolDefinition        = core.ToolDefinition
-	ToolHandler           = core.ToolHandler
-	ToolRegistry          = core.ToolRegistry
-	ToolSelector          = core.ToolSelector
-	ToolSelection         = core.ToolSelection
-	ToolSelectionRequest  = core.ToolSelectionRequest
-	Usage                 = core.Usage
-	AgentHandler          = core.AgentHandler
-	AgentTask             = core.AgentTask
-	AgentDeps             = core.AgentDeps
-	IterationResult       = core.IterationResult
-	TaskProgram           = core.TaskProgram
-	TaskProgramInput      = core.TaskProgramInput
-	TaskProgramActivation = core.TaskProgramActivation
-	TaskProgramDecision   = core.TaskProgramDecision
-	TaskProgramQuietHours = core.TaskProgramQuietHours
-	TaskDeliveryRef       = core.TaskDeliveryRef
-	SkillMeta             = core.SkillMeta
-	ExecutionKind         = core.ExecutionKind
-	ExecutionRequest      = core.ExecutionRequest
-	ExecutionDecision     = core.ExecutionDecision
-	ExecutionAuthorizer   = core.ExecutionAuthorizer
-	AutonomousTurnRequest = core.AutonomousTurnRequest
-	AutonomousTurnDraft   = core.AutonomousTurnDraft
-	AutonomousTurnDrafter = core.AutonomousTurnDrafter
-	AutonomousTurnCommit  = core.AutonomousTurnCommit
+	Message                       = core.Message
+	PersistedMessage              = core.PersistedMessage
+	PersistedMessageAppender      = core.PersistedMessageAppender
+	PersistedMessageTokenAppender = core.PersistedMessageTokenAppender
+	MessageProjection             = core.MessageProjection
+	MessageProjectionStatus       = core.MessageProjectionStatus
+	ContentBlock                  = core.ContentBlock
+	ToolDefinition                = core.ToolDefinition
+	ToolHandler                   = core.ToolHandler
+	ToolRegistry                  = core.ToolRegistry
+	ToolSelector                  = core.ToolSelector
+	ToolSelection                 = core.ToolSelection
+	ToolSelectionRequest          = core.ToolSelectionRequest
+	TurnPolicyMode                = core.TurnPolicyMode
+	TurnPolicy                    = core.TurnPolicy
+	TurnPolicyRequest             = core.TurnPolicyRequest
+	TurnPolicyResolver            = core.TurnPolicyResolver
+	Usage                         = core.Usage
+	AgentHandler                  = core.AgentHandler
+	AgentTask                     = core.AgentTask
+	AgentDeps                     = core.AgentDeps
+	IterationResult               = core.IterationResult
+	TaskProgram                   = core.TaskProgram
+	TaskProgramInput              = core.TaskProgramInput
+	TaskProgramActivation         = core.TaskProgramActivation
+	TaskProgramDecision           = core.TaskProgramDecision
+	TaskProgramQuietHours         = core.TaskProgramQuietHours
+	TaskDeliveryRef               = core.TaskDeliveryRef
+	SkillMeta                     = core.SkillMeta
+	ExecutionKind                 = core.ExecutionKind
+	ExecutionRequest              = core.ExecutionRequest
+	ExecutionDecision             = core.ExecutionDecision
+	ExecutionAuthorizer           = core.ExecutionAuthorizer
+	AutonomousTurnRequest         = core.AutonomousTurnRequest
+	AutonomousTurnDraft           = core.AutonomousTurnDraft
+	AutonomousTurnDrafter         = core.AutonomousTurnDrafter
+	AutonomousTurnCommit          = core.AutonomousTurnCommit
 )
 
 // --- Providers: LLM + capability ports ---
@@ -97,20 +106,23 @@ type (
 
 // --- Config tree ---
 type (
-	Config             = core.Config
-	ModelsConfig       = core.ModelsConfig
-	LimitsConfig       = core.LimitsConfig
-	TimeoutsConfig     = core.TimeoutsConfig
-	RetryConfig        = core.RetryConfig
-	GatewayConfig      = core.GatewayConfig
-	UIStrings          = core.UIStrings
-	OnboardingMessages = core.OnboardingMessages
-	OwnerConfig        = core.OwnerConfig
-	ToolMeta           = core.ToolMeta
-	A2AConfig          = core.A2AConfig
-	A2APeerConfig      = core.A2APeerConfig
-	FleetConfig        = core.FleetConfig
-	FleetCapability    = core.FleetCapability
+	Config                = core.Config
+	ModelsConfig          = core.ModelsConfig
+	LimitsConfig          = core.LimitsConfig
+	TimeoutsConfig        = core.TimeoutsConfig
+	RetryConfig           = core.RetryConfig
+	GatewayConfig         = core.GatewayConfig
+	UIStrings             = core.UIStrings
+	OnboardingMessages    = core.OnboardingMessages
+	OwnerConfig           = core.OwnerConfig
+	ToolMeta              = core.ToolMeta
+	A2AConfig             = core.A2AConfig
+	A2APeerConfig         = core.A2APeerConfig
+	FleetConfig           = core.FleetConfig
+	FleetCapability       = core.FleetCapability
+	MetricType            = core.MetricType
+	MetricSample          = core.MetricSample
+	MetricSampleCollector = core.MetricSampleCollector
 )
 
 // --- Memory / DI / host seams ---
@@ -150,10 +162,11 @@ var (
 	FormatAutonomousTurnNotification = core.FormatAutonomousTurnNotification
 	ParseAutonomousTurnNotification  = core.ParseAutonomousTurnNotification
 
-	NormalizeContent   = core.NormalizeContent
-	EstimateTokens     = core.EstimateTokens
-	EstimateTextTokens = core.EstimateTextTokens
-	ExtractText        = core.ExtractText
+	NormalizeContent     = core.NormalizeContent
+	EstimateTokens       = core.EstimateTokens
+	EstimateTextTokens   = core.EstimateTextTokens
+	ExtractText          = core.ExtractText
+	ProjectLegacyMessage = core.ProjectLegacyMessage
 
 	WithSoulID                = core.WithSoulID
 	SoulIDFromContext         = core.SoulIDFromContext
@@ -163,9 +176,24 @@ var (
 	UserIDFromContextOK       = core.UserIDFromContextOK
 	ContextWithAutonomousTurn = core.ContextWithAutonomousTurn
 	IsAutonomousTurn          = core.IsAutonomousTurn
+	WithDeniedTools           = core.WithDeniedTools
+	DeniedToolsFromContext    = core.DeniedToolsFromContext
+	IsToolDenied              = core.IsToolDenied
 
 	OK   = core.OK
 	Fail = core.Fail
+)
+
+const (
+	TurnPolicyOff    = core.TurnPolicyOff
+	TurnPolicyShadow = core.TurnPolicyShadow
+	TurnPolicyCanary = core.TurnPolicyCanary
+	TurnPolicyOn     = core.TurnPolicyOn
+)
+
+const (
+	MetricGauge   = core.MetricGauge
+	MetricCounter = core.MetricCounter
 )
 
 // --- Strategy constants (agent_task dispatch) ---
@@ -193,6 +221,14 @@ const (
 const (
 	ExecutionInteractive = core.ExecutionInteractive
 	ExecutionBackground  = core.ExecutionBackground
+)
+
+const (
+	ProjectionProjected              = core.ProjectionProjected
+	ProjectionNonDialogue            = core.ProjectionNonDialogue
+	ProjectionUnprojectableLegacy    = core.ProjectionUnprojectableLegacy
+	CanonicalMessageProjectorVersion = core.CanonicalMessageProjectorVersion
+	LegacyMessageProjectorVersion    = core.LegacyMessageProjectorVersion
 )
 
 // --- Sentinel errors ---

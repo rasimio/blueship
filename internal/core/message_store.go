@@ -60,6 +60,27 @@ type MessageStore interface {
 	RecordLLMUsage(ctx context.Context, usage LLMUsageRecord) error
 }
 
+// PersistedMessage is the exact receipt for one durable chat_messages append.
+// Optional V2 appenders expose it without changing the legacy MessageStore
+// contract; callers that need exact evidence IDs can feature-detect the narrow
+// interfaces below while custom stores keep implementing Append as before.
+type PersistedMessage struct {
+	ID        string
+	Role      string
+	CreatedAt time.Time
+}
+
+// PersistedMessageAppender is the optional exact-ID append path.
+type PersistedMessageAppender interface {
+	AppendPersisted(ctx context.Context, sessionID string, msg Message) (PersistedMessage, error)
+}
+
+// PersistedMessageTokenAppender is the token-aware counterpart used by
+// assistant writes once delivery receipts are wired end-to-end.
+type PersistedMessageTokenAppender interface {
+	AppendWithTokensPersisted(ctx context.Context, sessionID string, msg Message, tokens int) (PersistedMessage, error)
+}
+
 // ToolObservation is a previous tool result that can be summarized into the
 // turn context without reintroducing raw tool transcripts as dialogue history.
 type ToolObservation struct {

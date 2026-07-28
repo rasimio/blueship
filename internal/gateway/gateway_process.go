@@ -112,9 +112,11 @@ func (g *Gateway) ProcessInbound(ctx context.Context, chatID string, messages []
 		if m.Text == "" && len(m.Images) == 0 {
 			continue
 		}
+		visibleText := m.Text
 		pending = append(pending, pendingMsg{
-			text:   m.Text,
-			images: m.Images,
+			text:        m.Text,
+			images:      m.Images,
+			visibleText: &visibleText,
 		})
 	}
 	if len(pending) == 0 {
@@ -185,9 +187,11 @@ func (g *Gateway) ProcessInboundForUser(ctx context.Context, userID, soulID uuid
 		if m.Text == "" && len(m.Images) == 0 {
 			continue
 		}
+		visibleText := m.Text
 		pending = append(pending, pendingMsg{
 			text:             m.Text,
 			images:           m.Images,
+			visibleText:      &visibleText,
 			replyToMessageID: m.ReplyToMessageID,
 			ephemeral:        m.Ephemeral,
 		})
@@ -317,6 +321,157 @@ func (g *Gateway) appendUnlessEphemeral(ctx context.Context, sessionID string, m
 	return g.store.Append(ctx, sessionID, msg)
 }
 
+// appendInteractionUser persists the canonical human envelope and reports the
+// exact committed row to dependent writers. Provider-expanded reply parents
+// and attachment bytes remain in content for this call only.
+func (g *Gateway) appendInteractionUser(
+	ctx context.Context,
+	cfg agent.RunConfig,
+	content any,
+) error {
+	if bs.EphemeralFromContext(ctx) {
+		return nil
+	}
+	durableContent := content
+	if cfg.VisibleUserText != nil {
+		durableContent = *cfg.VisibleUserText
+	}
+	receipt, err := g.store.AppendPersisted(ctx, cfg.SessionID, bs.Message{
+		Role:             "user",
+		Content:          durableContent,
+		VisibleText:      cfg.VisibleUserText,
+		ReplyToMessageID: cfg.ReplyToMessageID,
+		TGMessageID:      cfg.TGMessageID,
+	})
+	if err != nil {
+		return err
+	}
+	if cfg.OnUserMessagePersisted != nil {
+		cfg.OnUserMessagePersisted(ctx, receipt)
+	}
+	return nil
+}
+
+func (g *Gateway) saveInboundAttachments(
+	ctx context.Context,
+	us *UserState,
+	sessionID uuid.UUID,
+	messageID uuid.UUID,
+	msgs []pendingMsg,
+) {
+	if g.deps.AttachmentSink == nil || sessionID == uuid.Nil || messageID == uuid.Nil {
+		return
+	}
+	for _, m := range msgs {
+		for _, a := range m.rawAttachments {
+			if len(a.data) == 0 {
+				continue
+			}
+			if _, err := g.deps.AttachmentSink.Save(ctx, bs.AttachmentParams{
+				UserID:    us.UserID,
+				SoulID:    us.SoulID,
+				SessionID: sessionID,
+				MessageID: messageID,
+				Name:      a.name,
+				Mime:      a.mime,
+				Kind:      a.kind,
+				Data:      a.data,
+			}); err != nil {
+				g.logger.Warn("attachment sink save failed",
+					"chat_id", us.ChatID, "message_id", messageID,
+					"name", a.name, "kind", a.kind, "err", err)
+			}
+		}
+	}
+}
+
+func (g *Gateway) bindInboundEnvelopeArtifacts(
+	cfg *agent.RunConfig,
+	us *UserState,
+	sessionID uuid.UUID,
+	msgs []pendingMsg,
+	linkText string,
+) {
+	if cfg == nil || g.deps == nil || g.deps.AttachmentSink == nil || sessionID == uuid.Nil {
+		return
+	}
+	cfg.OnUserMessagePersisted = func(appendCtx context.Context, receipt bs.PersistedMessage) {
+		messageID, err := uuid.Parse(receipt.ID)
+		if err != nil {
+			g.logger.Warn("attachment sink: persisted message id parse failed",
+				"session_id", cfg.SessionID, "message_id", receipt.ID, "err", err)
+			return
+		}
+		g.saveInboundAttachments(appendCtx, us, sessionID, messageID, msgs)
+		g.scanAndSaveLinks(appendCtx, us, sessionID, messageID, "user", linkText)
+	}
+}
+
+type telegramReplyLookup interface {
+	LookupByTGMessageID(ctx context.Context, sessionID string, tgMessageID int64) (string, error)
+}
+
+func resolveReplyMetadata(
+	ctx context.Context,
+	lookup telegramReplyLookup,
+	sessionID string,
+	msgs []pendingMsg,
+) (replyToMessageID string, tgMessageID int64, err error) {
+	if len(msgs) == 0 {
+		return "", 0, nil
+	}
+	first := msgs[0]
+	if first.messageID != 0 {
+		tgMessageID = int64(first.messageID)
+	}
+	if first.replyToMessageID != "" {
+		return first.replyToMessageID, tgMessageID, nil
+	}
+	if first.replyToTGMessageID == 0 {
+		return "", tgMessageID, nil
+	}
+	parentID, err := lookup.LookupByTGMessageID(ctx, sessionID, int64(first.replyToTGMessageID))
+	return parentID, tgMessageID, err
+}
+
+func providerContentFromBlocks(blocks []bs.ContentBlock) any {
+	if len(blocks) == 1 && blocks[0].Type == "text" {
+		return blocks[0].Text
+	}
+	return blocks
+}
+
+func (g *Gateway) prependReplyAttachmentBlocks(
+	ctx context.Context,
+	us *UserState,
+	replyToMessageID string,
+	blocks []bs.ContentBlock,
+) []bs.ContentBlock {
+	if g.deps == nil || g.deps.AttachmentSink == nil || replyToMessageID == "" {
+		return blocks
+	}
+	parentID, err := uuid.Parse(replyToMessageID)
+	if err != nil {
+		return blocks
+	}
+	attachmentIDs, err := g.deps.AttachmentSink.ListForMessage(ctx, us.UserID, us.SoulID, parentID)
+	if err != nil {
+		g.logger.Warn("reply-attachments: list failed",
+			"chat_id", us.ChatID, "parent_id", parentID, "err", err)
+		return blocks
+	}
+	parentBlocks := g.attachmentBlocksByIDs(ctx, us, attachmentIDs, "reply-attached")
+	if len(parentBlocks) == 0 {
+		return blocks
+	}
+	out := make([]bs.ContentBlock, 0, len(parentBlocks)+len(blocks))
+	out = append(out, parentBlocks...)
+	out = append(out, blocks...)
+	g.logger.Info("reply-attachments: inlined parent files",
+		"chat_id", us.ChatID, "parent_id", parentID, "count", len(parentBlocks))
+	return out
+}
+
 func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pendingMsg, sink bs.ResponseSink) {
 	turnMu := g.turnMutex(us.UserID, us.SoulID)
 	turnMu.Lock()
@@ -382,6 +537,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			blocks = append(blocks, bs.ContentBlock{Type: "text", Text: m.text})
 		}
 	}
+	visibleUserText := joinedVisibleText(msgs)
 
 	// Attachment-reference resolution: if the user pasted an
 	// attachment UUID into their message ("read file abc-…", "what's
@@ -392,44 +548,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// UUIDs (foreign id, plain UUIDs the user happens to mention)
 	// are silently passed through.
 	blocks = g.resolveInlineAttachmentRefs(ctx, us, blocks)
-
-	// Reply-parent attachment expansion (cabinet path only — the
-	// frontend hands us a uuid for replyToMessageID before session
-	// creation). When the user replies to an older message that
-	// carried images / files, pull those parent attachments back
-	// into the current turn so cortex can see them, not just the
-	// inline `[reply to:…snippet…]` prefix. Telegram replies take
-	// a separate code path (replyToTGMessageID needs a session-id
-	// lookup) and aren't covered here yet.
-	if g.deps.AttachmentSink != nil && len(msgs) > 0 && msgs[0].replyToMessageID != "" {
-		parentID, perr := uuid.Parse(msgs[0].replyToMessageID)
-		if perr == nil {
-			attIDs, lerr := g.deps.AttachmentSink.ListForMessage(ctx, us.UserID, us.SoulID, parentID)
-			if lerr != nil {
-				g.logger.Warn("reply-attachments: list failed",
-					"chat_id", us.ChatID, "parent_id", parentID, "err", lerr)
-			} else if len(attIDs) > 0 {
-				parentBlocks := g.attachmentBlocksByIDs(ctx, us, attIDs, "reply-attached")
-				if len(parentBlocks) > 0 {
-					// Prepend so the parent's files arrive before the
-					// user's typed text — cortex parses the context
-					// "this file ← my reply about it" in order.
-					blocks = append(parentBlocks, blocks...)
-					g.logger.Info("reply-attachments: inlined parent files",
-						"chat_id", us.ChatID, "parent_id", parentID, "count", len(parentBlocks))
-				}
-			}
-		}
-	}
 	timings.RecordSince("gateway.prepare_content", prepareStarted, fmt.Sprintf("messages=%d blocks=%d", len(msgs), len(blocks)))
 
-	var content any
 	var msgText string
+	content := providerContentFromBlocks(blocks)
 	if len(blocks) == 1 && blocks[0].Type == "text" {
 		msgText = blocks[0].Text
-		content = msgText
 	} else {
-		content = blocks
 		// Extract text for memory encoding
 		for _, b := range blocks {
 			if b.Type == "text" {
@@ -476,12 +601,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		"blocks", len(blocks),
 	)
 
-	// Push raw attachment bytes to the host CDN once the session id
-	// is known. The cabinet history endpoint joins on session_id, so
-	// stamping here is what makes a Telegram-originated photo / PDF
-	// show up as a chip in the web UI. Failures are warn-and-continue
-	// — the LLM still has the bytes via chat_messages, the user just
-	// loses the cabinet chip.
+	// Parse the durable session id now; raw files are saved only after the
+	// exact human chat_messages row commits, so reply lookup can link by
+	// message_id instead of falling back to a session-wide association.
 	var sessionUUID uuid.UUID
 	if g.deps.AttachmentSink != nil {
 		sessID, perr := uuid.Parse(sess.ID)
@@ -490,38 +612,22 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 				"session_id", sess.ID, "err", perr)
 		} else {
 			sessionUUID = sessID
-			for _, m := range msgs {
-				for _, a := range m.rawAttachments {
-					if len(a.data) == 0 {
-						continue
-					}
-					if _, aerr := g.deps.AttachmentSink.Save(ctx, bs.AttachmentParams{
-						UserID:    us.UserID,
-						SoulID:    us.SoulID,
-						SessionID: sessID,
-						Name:      a.name,
-						Mime:      a.mime,
-						Kind:      a.kind,
-						Data:      a.data,
-					}); aerr != nil {
-						g.logger.Warn("attachment sink save failed",
-							"chat_id", us.ChatID, "name", a.name, "kind", a.kind, "err", aerr)
-					}
-				}
-			}
 		}
 	}
 
-	// Auto-extract pasted URLs from the user's text and persist them as
-	// kind='link' attachment rows. The OG worker (the host daemon)
-	// enriches the row with og:title / og:description / og:image_url
-	// asynchronously; the cabinet's Links tab + per-message chip
-	// rendering pick the row up either way (empty OG = favicon
-	// fallback). message_id stays NULL on the user side because the
-	// user's chat_messages row is appended later inside the agent loop;
-	// the link still surfaces in the cabinet's session-scoped view via
-	// session_id.
-	g.scanAndSaveLinks(ctx, us, sessionUUID, uuid.Nil, "user", msgText)
+	// Resolve the relational parent only after the session exists. Cabinet
+	// replies already carry chat_messages.id; Telegram replies carry a
+	// transport id that must be looked up inside this exact session.
+	replyToMessageID, tgMessageID, replyErr := resolveReplyMetadata(ctx, g.store, sess.ID, msgs)
+	if replyErr != nil {
+		g.logger.Warn("reply: tg parent lookup failed",
+			"session_id", sess.ID, "tg_id", msgs[0].replyToTGMessageID, "err", replyErr)
+	}
+	replyAttachmentsStarted := time.Now()
+	blocks = g.prependReplyAttachmentBlocks(ctx, us, replyToMessageID, blocks)
+	content = providerContentFromBlocks(blocks)
+	timings.RecordSince("gateway.reply_attachments", replyAttachmentsStarted,
+		fmt.Sprintf("parent=%t blocks=%d", replyToMessageID != "", len(blocks)))
 
 	// Wire the session ID into a meta SSE frame so a vaelum-style relayer
 	// can begin attributing persisted tool_calls before any tool fires.
@@ -549,13 +655,46 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	priorContext := g.buildPriorContext(ctx, sess.ID, 6)
 	timings.RecordSince("gateway.prior_context", priorStarted, "turns=6")
 
+	policyText := msgText
+	if visibleUserText != nil {
+		policyText = *visibleUserText
+	}
+	policyRegistry := g.cortexTurnRegistry(ctx, us, false)
+	turnPolicy, allowedToolsSnapshot := g.resolveTurnPolicy(
+		ctx, us, policyRegistry, policyText, ephemeral,
+	)
+	g.logger.Info("turn policy resolved",
+		"requested_mode", turnPolicy.RequestedMode,
+		"effective_mode", turnPolicy.EffectiveMode,
+		"flags", turnPolicy.Flags,
+		"strict", turnPolicy.Strict,
+		"suppress_tool_directives", turnPolicy.SuppressToolDirectives,
+		"selected_tools", turnPolicy.Tools,
+		"denied_tools", turnPolicy.DeniedTools,
+		"unavailable_reason", turnPolicy.UnavailableReason,
+		"diagnostics", turnPolicy.Diagnostics,
+	)
+	if turnPolicy.UnavailableReason != "" {
+		g.logger.Error("turn policy failed closed",
+			"requested_mode", turnPolicy.RequestedMode,
+			"effective_mode", turnPolicy.EffectiveMode,
+			"reason", turnPolicy.UnavailableReason,
+		)
+	}
+	g.startTurnPolicyObservers(ctx, us, turnPolicy)
+	// The detached shadow observer intentionally sees the original context.
+	// All foreground preflight paths share the hard denylist after this point.
+	ctx = bs.WithDeniedTools(ctx, turnPolicy.DeniedTools)
+	policyGuidance, policyTraces := g.runTurnPolicyPreActions(ctx, us, turnPolicy, timings)
+
 	// Build Cortex context and run the turn preflight. The old reflex planner
 	// is optional; AME context prep must not depend on whether that LLM tier is
 	// enabled for this transport.
 	var injectedCtx, reflexGuidance string
-	var postActions []bs.PostAction // executed after cortex response
 	var engineRuleCount int
 	var forcedCortexTools []string
+	preTraces := append([]agent.ToolTrace(nil), policyTraces...)
+	var noReflexSuppressedRules []bs.MatchedRule
 
 	// Rule engine pass for agents that run WITHOUT a ReflexPreparer.
 	// Two responsibilities:
@@ -575,6 +714,12 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		var activeRules []bs.ActiveRule
 		for _, r := range engineRules {
 			if r.Suppressed {
+				noReflexSuppressedRules = append(noReflexSuppressedRules, matchedRuleFromActive(r, "engine", 0))
+				continue
+			}
+			if turnPolicy.SuppressToolDirectives && ruleHasToolDirective(r) {
+				noReflexSuppressedRules = append(noReflexSuppressedRules,
+					matchedRuleFromActive(suppressToolRule(r), "engine", 0))
 				continue
 			}
 			if r.Silent {
@@ -590,15 +735,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		}
 		engineRuleCount = len(activeRules)
 		if engineRuleCount > 0 {
-			reflexGuidance = formatRulesAsGuidance(engineRules)
+			reflexGuidance = formatRulesAsGuidance(activeRules)
 			g.logger.Info("rule engine: non-silent rules matched (no-reflex path)",
 				"count", len(activeRules),
 				"chat_id", us.ChatID,
 			)
 		}
 	}
-
-	var preTraces []agent.ToolTrace
 
 	// Resolve pending disambiguation: if previous turn asked "which option?"
 	// and this message is a short answer, inject the chosen tool directly.
@@ -621,27 +764,26 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	// rp carries the structured reflex pipeline output so we can both feed
-	// the agent loop (InjectedCtx / ReflexGuidance / PostActions) and
+	// the agent loop (InjectedCtx / ReflexGuidance) and
 	// surface MemoriesCount + MatchedRules + Strategy to the web cabinet
 	// via a SendContextInfo frame.
-	var rp reflexPipelineResult
+	rp := reflexPipelineResult{SuppressedRules: noReflexSuppressedRules}
 	if reflexGuidance == "" && msgText != "" && us.Deps != nil && us.Deps.ReflexPreparer != nil &&
 		(g.reflexModel() != "" || g.deps.Config.Gateway.InteractionTier) {
 		// Context/preflight pipeline:
 		//   interaction tier: AME context + RuleEngine, no reflex planner LLM.
 		//   legacy tier: AME context → reflex planner → pre-actions → RuleEngine.
 		pipelineStarted := time.Now()
-		rp = g.runReflexPipeline(ctx, us, msgText, priorContext, timings)
+		rp = g.runReflexPipeline(ctx, us, msgText, priorContext, timings, turnPolicy)
 		timings.RecordSince("reflex_pipeline.total", pipelineStarted, "")
 		if rp.Silent {
 			// Hard rule said "do not respond". Abort the whole turn — no
-			// cortex call, no message sent, no post-actions, no debug dump.
+			// cortex call, no message sent, and no debug dump.
 			return
 		}
 		injectedCtx = rp.InjectedCtx
 		reflexGuidance = rp.ReflexGuidance
-		postActions = rp.PostActions
-		preTraces = rp.PreTraces
+		preTraces = append(preTraces, rp.PreTraces...)
 		engineRuleCount = rp.EngineRuleCount
 		forcedCortexTools = append(forcedCortexTools, rp.CortexTools...)
 	} else if msgText != "" && us.Deps != nil && us.Deps.ContextInjector != nil {
@@ -650,6 +792,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		injectedCtx = us.Deps.ContextInjector(ctx, us.UserID.String(), msgText, priorContext)
 		timings.RecordSince("context_injector", contextStarted, "fallback")
 	}
+	reflexGuidance = prependTurnGuidance(policyGuidance, reflexGuidance)
 
 	// Surface the prepared context (AME memories + rule matches + AME
 	// strategy) to streaming sinks so the web cabinet can render a
@@ -668,7 +811,10 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		})
 	}
 
-	prepared, err := g.prepareCortexTurn(ctx, us, sess, injectedCtx, reflexGuidance, timings, false)
+	prepared, err := g.prepareCortexTurnWithRegistry(
+		ctx, us, sess, injectedCtx, reflexGuidance, timings, false,
+		policyRegistry, &allowedToolsSnapshot,
+	)
 	if err != nil {
 		g.logger.Error("cortex: cannot resolve system prompt, aborting turn",
 			"soul_id", us.SoulID.String(), "chat_id", us.ChatID, "error", err)
@@ -700,38 +846,21 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		reflexLoop = agent.NewLoop(g.provider, g.store, reflexRegistry, g.deps.RoleTools, g.deps.Config, g.logger)
 	}
 
-	// Reply metadata: the first pendingMsg in the batch carries
-	// the user-visible reply target. Cabinet-originated replies set
-	// replyToMessageID directly (the frontend knows the parent
-	// uuid). Telegram-originated replies set replyToTGMessageID and
-	// we resolve it via the session store's tg_message_id index.
-	// TGMessageID of the inbound message itself is stamped on the
-	// new row so future Telegram replies pointing at it can be
-	// resolved the same way.
-	var replyToMessageID string
-	var tgMessageID int64
-	if len(msgs) > 0 {
-		first := msgs[0]
-		if first.messageID != 0 {
-			tgMessageID = int64(first.messageID)
-		}
-		if first.replyToMessageID != "" {
-			replyToMessageID = first.replyToMessageID
-		} else if first.replyToTGMessageID != 0 {
-			if parentID, lerr := g.store.LookupByTGMessageID(ctx, sess.ID, int64(first.replyToTGMessageID)); lerr == nil {
-				replyToMessageID = parentID
-			} else {
-				g.logger.Warn("reply: tg parent lookup failed",
-					"session_id", sess.ID, "tg_id", first.replyToTGMessageID, "err", lerr)
-			}
-		}
-	}
-
 	runCfg.ReplyToMessageID = replyToMessageID
 	runCfg.TGMessageID = tgMessageID
-	if !ephemeral {
-		g.applyToolSelector(ctx, turnRegistry, &runCfg, msgText, forcedCortexTools, false)
+	runCfg.VisibleUserText = visibleUserText
+	if !ephemeral && g.deps.AttachmentSink != nil && sessionUUID != uuid.Nil {
+		g.bindInboundEnvelopeArtifacts(&runCfg, us, sessionUUID, msgs, policyText)
 	}
+	g.applyTurnToolPolicy(ctx, turnRegistry, &runCfg, msgText, forcedCortexTools, ephemeral, turnPolicy)
+	g.logger.Info("turn policy applied",
+		"effective_mode", turnPolicy.EffectiveMode,
+		"flags", turnPolicy.Flags,
+		"strict", runCfg.StrictTools,
+		"tool_override", runCfg.ToolOverride,
+		"denied_tools", runCfg.DeniedTools,
+		"suppressed_rules", len(rp.SuppressedRules),
+	)
 
 	// Ephemeral notebook ask: a fast, private answer on the SELECTED text.
 	//  - a dedicated source='notebook' session → the ask is isolated from the
@@ -944,9 +1073,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		if reply != "" {
 			sink.SendText(ctx, reply)
 		}
-		if reply != "" && len(postActions) > 0 {
-			g.executePostActions(ctx, us, postActions, reply)
-		}
 		if reply != "" {
 			// Voice symmetry — if the assistant happens to read a URL (uncommon
 			// but not impossible on the JS-fetch-this branch), persist it
@@ -1012,9 +1138,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		// delivered chunk-by-chunk via cb.OnText; calling SendText again
 		// here would duplicate the whole response in the rendered bubble.
 		if reply != "" {
-			if len(postActions) > 0 {
-				g.executePostActions(ctx, us, postActions, reply)
-			}
 			if _, isStream := sink.(bs.TextStreamSink); !isStream {
 				sink.SendText(ctx, reply)
 			}
@@ -1164,19 +1287,6 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		g.logger.Error("telegram final delivery failed",
 			"chat_id", us.ChatID, "preview_message_id", streamMsgID,
 			"reply_runes", len([]rune(reply)), "error", deliveryErr)
-	}
-
-	// Auto-detect self-reflections in cortex response and save them even
-	// when reflex didn't prescribe a post_action. Long responses with
-	// self-reference markers ("I realized", "my conclusion", "I recognize") likely
-	// contain insights worth persisting.
-	if len(postActions) == 0 && len(reply) > 300 && g.looksLikeSelfReflection(reply) {
-		postActions = append(postActions, bs.PostAction{Type: "save_reflection"})
-		g.logger.Info("auto-detected self-reflection in cortex response", "reply_len", len(reply))
-	}
-
-	if len(postActions) > 0 {
-		g.executePostActions(ctx, us, postActions, reply)
 	}
 
 	if !ephemeral {

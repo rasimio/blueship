@@ -12,6 +12,7 @@ import (
 // a snapshot of Deps. Set by the gateway before dispatching cortex.
 type chatIDCtxKey struct{}
 type userIDCtxKey struct{}
+type deniedToolsCtxKey struct{}
 
 // ContextWithChatID returns a copy of ctx that carries the given chat
 // id. Empty chat id is a no-op.
@@ -51,6 +52,44 @@ func UserIDFromContextOK(ctx context.Context) (uuid.UUID, bool) {
 		return uuid.Nil, false
 	}
 	return v, true
+}
+
+// WithDeniedTools carries the turn's hard tool denylist into handlers that
+// report live capabilities. The agent loop enforces the same list before
+// definitions are sent or calls are dispatched.
+func WithDeniedTools(ctx context.Context, names []string) context.Context {
+	if len(names) == 0 {
+		return ctx
+	}
+	denied := make(map[string]bool, len(names))
+	for _, name := range names {
+		if name != "" {
+			denied[name] = true
+		}
+	}
+	if len(denied) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, deniedToolsCtxKey{}, denied)
+}
+
+// DeniedToolsFromContext returns a copy of the turn-level tool denylist.
+func DeniedToolsFromContext(ctx context.Context) map[string]bool {
+	stored, _ := ctx.Value(deniedToolsCtxKey{}).(map[string]bool)
+	if len(stored) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(stored))
+	for name := range stored {
+		out[name] = true
+	}
+	return out
+}
+
+// IsToolDenied reports whether name is hidden for the current turn.
+func IsToolDenied(ctx context.Context, name string) bool {
+	denied, _ := ctx.Value(deniedToolsCtxKey{}).(map[string]bool)
+	return denied[name]
 }
 
 // soulIDCtxKey is a typed context key carrying the tenant identity of

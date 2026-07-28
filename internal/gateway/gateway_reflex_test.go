@@ -68,7 +68,7 @@ func TestInteractionTierPreparesCortexContextWithoutReflexLLM(t *testing.T) {
 	}
 
 	timings := newTurnTimer()
-	result := g.runReflexPipeline(context.Background(), us, "готово", "prior", timings)
+	result := g.runReflexPipeline(context.Background(), us, "готово", "prior", timings, bs.TurnPolicy{})
 
 	if !preparerCalled {
 		t.Fatalf("interaction-tier preflight should still call ReflexPreparer for Cortex context")
@@ -123,7 +123,7 @@ func TestInteractionTierRunsHostReflexPreActions(t *testing.T) {
 		},
 	}
 
-	result := g.runReflexPipeline(context.Background(), us, "Как ты думаешь, я хороший разработчик?", "prior", newTurnTimer())
+	result := g.runReflexPipeline(context.Background(), us, "Как ты думаешь, я хороший разработчик?", "prior", newTurnTimer(), bs.TurnPolicy{})
 
 	if len(result.PreTraces) != 1 || result.PreTraces[0].Name != "memory_associate" {
 		t.Fatalf("host reflex pre-action not executed: %#v", result.PreTraces)
@@ -136,6 +136,112 @@ func TestInteractionTierRunsHostReflexPreActions(t *testing.T) {
 	}
 	if !strings.Contains(result.ReflexGuidance, "I do not have enough saved evidence to judge that") {
 		t.Fatalf("unsupported reassurance guard missing:\n%s", result.ReflexGuidance)
+	}
+	for _, want := range []string{
+		"says nothing about whether a conversation or event happened",
+		"Direct transcript excerpts and successful tool evidence outrank this no_match",
+		`never conclude "that conversation/event did not happen"`,
+	} {
+		if !strings.Contains(result.ReflexGuidance, want) {
+			t.Fatalf("memory no_match epistemic guard missing %q:\n%s", want, result.ReflexGuidance)
+		}
+	}
+}
+
+func TestInteractionTierDeniedToolCannotRunAsHostPreAction(t *testing.T) {
+	userID := uuid.New()
+	called := false
+	g := &Gateway{
+		deps: &bs.Deps{Config: &bs.Config{
+			Gateway: bs.GatewayConfig{InteractionTier: true},
+			ReflexPreActionSelector: func(context.Context, bs.ReflexPreActionRequest) []bs.ToolAction {
+				return []bs.ToolAction{{Tool: "chat_recall", Input: json.RawMessage(`{"query":"x"}`)}}
+			},
+		}},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	registry := bs.NewToolRegistry()
+	registry.Register("chat_recall", "transcript recall", json.RawMessage(`{"type":"object"}`),
+		func(context.Context, json.RawMessage) (any, error) {
+			called = true
+			return map[string]any{"status": "found"}, nil
+		})
+	us := &UserState{
+		UserID:   userID,
+		Registry: registry,
+		Deps: &bs.Deps{
+			UserID: userID,
+			ReflexPreparer: func(context.Context, string, string, string) *bs.ReflexContext {
+				return &bs.ReflexContext{FormattedTraces: "memory"}
+			},
+		},
+	}
+	ctx := bs.WithDeniedTools(context.Background(), []string{"chat_recall"})
+
+	result := g.runReflexPipeline(ctx, us, "ты это говорила?", "", newTurnTimer(), bs.TurnPolicy{})
+
+	if called {
+		t.Fatal("denied chat_recall handler was invoked by interaction-tier preflight")
+	}
+	if len(result.PreTraces) != 1 || !result.PreTraces[0].Error ||
+		!strings.Contains(result.PreTraces[0].Output, "tool denied") {
+		t.Fatalf("denied pre-action trace = %#v", result.PreTraces)
+	}
+}
+
+func TestLegacyReflexPromptHidesDeniedTool(t *testing.T) {
+	userID := uuid.New()
+	var captured bs.CompletionRequest
+	g := &Gateway{
+		deps: &bs.Deps{
+			Config:     &bs.Config{},
+			ModelStore: staticModelStore{},
+			RoleTools: bs.NewRoleToolStore(map[string][]string{
+				"cortex": {"chat_recall", "note_create"},
+			}),
+		},
+		provider: reflexProviderFunc(func(_ context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
+			captured = req
+			return &bs.CompletionResponse{Content: []bs.ContentBlock{{
+				Type: "text",
+				Text: `{"intent":"free_reflection","confidence":0.95,"pre_actions":[],"tools":[]}`,
+			}}}, nil
+		}),
+		logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+		tz:                 time.UTC,
+		reflexPlanTemplate: "%s\n%s\n%s\n%s",
+	}
+	registry := bs.NewToolRegistry()
+	registry.Register("chat_recall", "transcript recall", json.RawMessage(`{"type":"object"}`),
+		func(context.Context, json.RawMessage) (any, error) { return nil, nil })
+	registry.Register("note_create", "create a note", json.RawMessage(`{"type":"object"}`),
+		func(context.Context, json.RawMessage) (any, error) { return nil, nil })
+	us := &UserState{
+		UserID:   userID,
+		Registry: registry,
+		Deps: &bs.Deps{
+			UserID: userID,
+			ReflexPreparer: func(context.Context, string, string, string) *bs.ReflexContext {
+				return &bs.ReflexContext{}
+			},
+		},
+	}
+	ctx := bs.WithDeniedTools(context.Background(), []string{"chat_recall"})
+
+	g.runReflexPipeline(ctx, us, "ты это говорила?", "", newTurnTimer(), bs.TurnPolicy{})
+
+	if len(captured.Messages) != 1 {
+		t.Fatalf("captured request = %+v", captured)
+	}
+	prompt, ok := captured.Messages[0].Content.(string)
+	if !ok {
+		t.Fatalf("Reflex prompt content type = %T, want string", captured.Messages[0].Content)
+	}
+	if strings.Contains(prompt, "chat_recall") {
+		t.Fatalf("denied tool leaked into Reflex prompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "note_create") {
+		t.Fatalf("allowed tool missing from Reflex prompt:\n%s", prompt)
 	}
 }
 
@@ -183,7 +289,7 @@ func TestLegacyReflexHostPreActionsOverridePlannerPreActions(t *testing.T) {
 		},
 	}
 
-	result := g.runReflexPipeline(context.Background(), us, "Как ты думаешь, я хороший разработчик?", "prior", newTurnTimer())
+	result := g.runReflexPipeline(context.Background(), us, "Как ты думаешь, я хороший разработчик?", "prior", newTurnTimer(), bs.TurnPolicy{})
 
 	if browserSearchCalled {
 		t.Fatal("planner browser_search should not run when host pre-actions are present")
@@ -334,7 +440,7 @@ func TestInteractionTierAmbiguousDeleteForcesDisambiguation(t *testing.T) {
 		},
 	}
 
-	result := g.runReflexPipeline(context.Background(), us, "Удали последнюю.", "prior", newTurnTimer())
+	result := g.runReflexPipeline(context.Background(), us, "Удали последнюю.", "prior", newTurnTimer(), bs.TurnPolicy{})
 
 	if preActionCalled {
 		t.Fatalf("ambiguous delete should not run reflex pre-actions")
@@ -382,7 +488,6 @@ func TestRunReflexPreActionsMutationRendersActionsBlock(t *testing.T) {
 	for _, want := range []string{
 		"[performed actions usage]",
 		"ALREADY executed for this turn",
-		"verbatim",
 		"it is already done",
 		"[/actions performed]",
 	} {

@@ -193,6 +193,78 @@ CREATE INDEX IF NOT EXISTS idx_agent_task_notifications_autonomous_history
       AND autonomous_history_projected_at IS NULL
       AND message_text LIKE '[blueship:autonomous-turn:v1]%';
 
+-- Additive, non-destructive transcript projection.
+--
+-- Raw content remains the audit/provider payload. Existing rows deliberately
+-- start as unprojectable_legacy: a later conservative projector may promote
+-- only rows whose visible transport text can be recovered without guessing.
+
+ALTER TABLE chat_messages
+    ADD COLUMN IF NOT EXISTS visible_text TEXT,
+    ADD COLUMN IF NOT EXISTS projection_status TEXT NOT NULL DEFAULT 'unprojectable_legacy',
+    ADD COLUMN IF NOT EXISTS projection_reason TEXT DEFAULT 'legacy_not_projected',
+    ADD COLUMN IF NOT EXISTS projector_version TEXT NOT NULL DEFAULT 'legacy-unprojected';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'chat_messages'::regclass
+          AND conname = 'chat_messages_projection_status_check'
+    ) THEN
+        ALTER TABLE chat_messages
+            ADD CONSTRAINT chat_messages_projection_status_check
+            CHECK (projection_status IN (
+                'projected',
+                'non_dialogue',
+                'unprojectable_legacy'
+            )) NOT VALID;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conrelid = 'chat_messages'::regclass
+          AND conname = 'chat_messages_projection_shape_check'
+    ) THEN
+        ALTER TABLE chat_messages
+            ADD CONSTRAINT chat_messages_projection_shape_check
+            CHECK (
+                (
+                    projection_status = 'projected'
+                    AND visible_text IS NOT NULL
+                )
+                OR
+                (
+                    projection_status <> 'projected'
+                    AND visible_text IS NULL
+                    AND NULLIF(BTRIM(projection_reason), '') IS NOT NULL
+                )
+            ) NOT VALID;
+    END IF;
+END
+$$;
+
+-- Versioned native tool descriptions.
+--
+-- Tool names, schemas, handlers, and effect metadata remain code-owned. This
+-- table stores only the reviewed prose presented to models.
+
+CREATE TABLE IF NOT EXISTS tool_descriptions (
+    name        TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    version     TEXT NOT NULL DEFAULT 'v1',
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT tool_descriptions_name_nonempty
+        CHECK (BTRIM(name) <> ''),
+    CONSTRAINT tool_descriptions_description_nonempty
+        CHECK (BTRIM(description) <> ''),
+    CONSTRAINT tool_descriptions_version_nonempty
+        CHECK (BTRIM(version) <> '')
+);
+
 -- ============================================================
 -- A2A (Agent-to-Agent) protocol — universal tool bus
 -- Each ship exposes selected local tools to other ships and imports
