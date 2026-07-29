@@ -208,9 +208,9 @@ func (s *Ship) Run(ctx context.Context) error {
 		reg.RegisterAllTools(globalRegistry, deps)
 		// Subscribe globalRegistry to future Fleet remote-tool pushes so
 		// federation discovered after boot reaches the agent-task scheduler
-		// without rebuilding the registry. RegisterRemote overwrites any
-		// local registration with the same name — federation wins for
-		// delegation flows like agent_task_accept.
+		// without rebuilding the registry. Local registrations keep their
+		// name; delegation flows like agent_task_accept resolve the peer's
+		// copy explicitly via RemoteHandlerForPeer.
 		reg.AddTargetRegistry(globalRegistry)
 
 		taskStore = core.NewAgentTaskStore(shipDB)

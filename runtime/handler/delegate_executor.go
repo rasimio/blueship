@@ -65,10 +65,12 @@ func (e *DelegateStrategyExecutor) Run(ctx context.Context, task core.AgentTask,
 }
 
 // submit calls agent_task_accept on the peer. The federated tool is
-// registered in the local registry by the Fleet bootstrap; we look it
-// up by name and invoke through it like any other tool.
+// registered in the local registry by the Fleet bootstrap. We resolve it
+// by peer rather than by bare name: this ship implements agent_task_accept
+// locally too, and the local registration owns that name, so a plain
+// lookup would hand the task straight back to ourselves.
 func (e *DelegateStrategyExecutor) submit(ctx context.Context, task core.AgentTask, deps core.AgentDeps, prog *delegateProgress) (core.IterationResult, error) {
-	handler, ok := deps.Registry.HandlerByName("agent_task_accept")
+	handler, ok := deps.Registry.RemoteHandlerForPeer(*task.DelegateTo, "agent_task_accept")
 	if !ok {
 		return core.IterationResult{}, fmt.Errorf("delegate: federated tool agent_task_accept not in registry — peer %s has not exposed it via Fleet", *task.DelegateTo)
 	}
@@ -132,9 +134,11 @@ func (e *DelegateStrategyExecutor) submit(ctx context.Context, task core.AgentTa
 }
 
 // poll calls agent_task_status on the peer, mirrors state into progress,
-// and reports done when the peer reaches a terminal status.
+// and reports done when the peer reaches a terminal status. Resolved by
+// peer for the same reason as submit — the id being polled is the peer's
+// task id, which means nothing to our local store.
 func (e *DelegateStrategyExecutor) poll(ctx context.Context, task core.AgentTask, deps core.AgentDeps, prog *delegateProgress) (core.IterationResult, error) {
-	handler, ok := deps.Registry.HandlerByName("agent_task_status")
+	handler, ok := deps.Registry.RemoteHandlerForPeer(*task.DelegateTo, "agent_task_status")
 	if !ok {
 		return core.IterationResult{}, fmt.Errorf("delegate: federated tool agent_task_status not in registry")
 	}

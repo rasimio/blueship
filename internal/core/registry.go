@@ -27,7 +27,16 @@ func toolPeerAttr(peer string) attribute.KeyValue {
 // ToolRegistry manages tool definitions and dispatches tool calls.
 type ToolRegistry struct {
 	tools map[string]registeredTool
+	// remoteByPeer holds every remote registration keyed by peer+name,
+	// including ones that lost the bare-name slot to a local tool. It is
+	// what lets delegation address a peer's copy of a name this ship also
+	// implements locally (agent_task_accept / agent_task_status).
+	remoteByPeer map[string]registeredTool
 }
+
+// remoteKey builds the composite key for remoteByPeer. The separator is
+// a NUL so it cannot collide with a peer or tool name.
+func remoteKey(peer, name string) string { return peer + "\x00" + name }
 
 // ToolMode classifies a tool by its expected execution profile. Duplicated
 // as a raw string here so core does not have to import the a2a package.
@@ -51,7 +60,10 @@ type registeredTool struct {
 
 // NewToolRegistry creates a new empty tool registry.
 func NewToolRegistry() *ToolRegistry {
-	return &ToolRegistry{tools: make(map[string]registeredTool)}
+	return &ToolRegistry{
+		tools:        make(map[string]registeredTool),
+		remoteByPeer: make(map[string]registeredTool),
+	}
 }
 
 // Register adds a tool to the registry. Tools registered via this call
@@ -86,8 +98,17 @@ func (r *ToolRegistry) Expose(name string, mode ToolMode) bool {
 // RegisterRemote installs a proxy tool that wraps an HTTP call to a peer.
 // The handler does the network dispatch; the registry only needs the
 // metadata to expose the tool to the cortex alongside local ones.
+//
+// A local registration owns its name: when this ship already implements
+// `name` itself, the peer's copy is kept in remoteByPeer but does not take
+// the bare-name slot. Without that rule a peer exposing a name we also
+// implement silently hijacks every local call — `agent_task_status` used to
+// resolve to a peer that had never heard of this ship's tasks, so reading
+// our own task state failed with "no rows in result set". Callers that
+// genuinely want the peer's copy ask for it by peer via
+// RemoteHandlerForPeer.
 func (r *ToolRegistry) RegisterRemote(name, description string, schema json.RawMessage, mode ToolMode, peerName string, handler ToolHandler) {
-	r.tools[name] = registeredTool{
+	rt := registeredTool{
 		Definition: ToolDefinition{
 			Name:        name,
 			Description: description,
@@ -98,6 +119,45 @@ func (r *ToolRegistry) RegisterRemote(name, description string, schema json.RawM
 		Remote:  true,
 		PeerTag: peerName,
 	}
+	if r.remoteByPeer == nil {
+		r.remoteByPeer = make(map[string]registeredTool)
+	}
+	r.remoteByPeer[remoteKey(peerName, name)] = rt
+	if existing, ok := r.tools[name]; ok && !existing.Remote {
+		return
+	}
+	r.tools[name] = rt
+}
+
+// RemoteHandlerForPeer returns the handler for a peer's copy of a tool,
+// even when a local registration owns the bare name. Delegation uses this
+// to reach the peer explicitly instead of relying on name shadowing.
+//
+// peer is matched against the PeerTag recorded at registration, which Fleet
+// sets to the peer's agent *name*. A task's delegate_to may instead hold the
+// peer's agent *id*, so an exact miss falls back to the sole remote
+// registration of that name — unambiguous in a one-peer fleet and identical
+// to the pre-existing shadowing behaviour. An ambiguous fallback (several
+// peers exposing the name) resolves to none, since guessing which ship to
+// hand a task to is worse than failing loudly.
+func (r *ToolRegistry) RemoteHandlerForPeer(peer, name string) (ToolHandler, bool) {
+	if t, ok := r.remoteByPeer[remoteKey(peer, name)]; ok {
+		return t.Handler, true
+	}
+	var found *registeredTool
+	for key, t := range r.remoteByPeer {
+		if strings.HasSuffix(key, "\x00"+name) {
+			if found != nil {
+				return nil, false
+			}
+			candidate := t
+			found = &candidate
+		}
+	}
+	if found == nil {
+		return nil, false
+	}
+	return found.Handler, true
 }
 
 // ExposedTools returns {name, mode, description, schema} for every tool
@@ -286,6 +346,11 @@ func (r *ToolRegistry) SubsetForNames(names []string) *ToolRegistry {
 			}
 		}
 	}
+	// The subset narrows what the cortex may call, not who the delegate
+	// executor may reach; keep peer-addressable copies intact.
+	for key, t := range r.remoteByPeer {
+		sub.remoteByPeer[key] = t
+	}
 	return sub
 }
 
@@ -301,6 +366,11 @@ func (r *ToolRegistry) Clone() *ToolRegistry {
 	c := NewToolRegistry()
 	for name, t := range r.tools {
 		c.tools[name] = t
+	}
+	// Carry peer-addressable copies too, so a per-turn clone can still
+	// dispatch delegation to a peer whose tool a local name shadows.
+	for key, t := range r.remoteByPeer {
+		c.remoteByPeer[key] = t
 	}
 	return c
 }

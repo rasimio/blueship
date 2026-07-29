@@ -76,9 +76,9 @@ func (r *moduleRegistry) ReplaceFleetRemoteTools(sourceTag string, fresh []remot
 	targets := append([]*ToolRegistry(nil), r.targets...)
 	r.mu.Unlock()
 
-	// Push current snapshot into every target. RegisterRemote overwrites
-	// any local registration with the same name — exactly the priority we
-	// want for delegation-style flows where federation is authoritative.
+	// Push current snapshot into every target. RegisterRemote leaves any
+	// same-named local registration in place and files the peer's copy
+	// under its peer tag; delegation reaches it via RemoteHandlerForPeer.
 	for _, reg := range targets {
 		for _, rt := range fresh {
 			reg.RegisterRemote(rt.Name, rt.Description, rt.Schema, rt.Mode, rt.PeerName, rt.Handler)
