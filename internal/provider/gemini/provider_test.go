@@ -286,3 +286,31 @@ func TestGemma4UsesThinkingLevel(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildToolsRemovesUnsupportedAdditionalProperties(t *testing.T) {
+	tools := buildTools([]bs.ToolDefinition{{
+		Name: "notes_create",
+		InputSchema: json.RawMessage(`{
+			"type":"object",
+			"properties":{
+				"schedule":{
+					"type":"object",
+					"properties":{"freq":{"type":"string"}},
+					"additionalProperties":false
+				}
+			},
+			"additionalProperties":false
+		}`),
+	}})
+
+	if len(tools) != 1 || len(tools[0].FunctionDeclarations) != 1 {
+		t.Fatalf("unexpected tools: %#v", tools)
+	}
+	schema := string(tools[0].FunctionDeclarations[0].Parameters)
+	if strings.Contains(schema, "additionalProperties") {
+		t.Fatalf("unsupported keyword remained in schema: %s", schema)
+	}
+	if !strings.Contains(schema, `"schedule"`) || !strings.Contains(schema, `"freq"`) {
+		t.Fatalf("schema fields were lost: %s", schema)
+	}
+}

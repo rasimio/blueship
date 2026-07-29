@@ -509,9 +509,40 @@ func buildTools(tools []bs.ToolDefinition) []toolWrapper {
 	}
 	funcs := make([]functionDecl, 0, len(tools))
 	for _, t := range tools {
-		funcs = append(funcs, functionDecl{Name: t.Name, Description: t.Description, Parameters: t.InputSchema})
+		funcs = append(funcs, functionDecl{
+			Name:        t.Name,
+			Description: t.Description,
+			Parameters:  sanitizeToolSchema(t.InputSchema),
+		})
 	}
 	return []toolWrapper{{FunctionDeclarations: funcs}}
+}
+
+func sanitizeToolSchema(raw json.RawMessage) json.RawMessage {
+	var schema any
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return raw
+	}
+	removeAdditionalProperties(schema)
+	sanitized, err := json.Marshal(schema)
+	if err != nil {
+		return raw
+	}
+	return sanitized
+}
+
+func removeAdditionalProperties(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		delete(typed, "additionalProperties")
+		for _, child := range typed {
+			removeAdditionalProperties(child)
+		}
+	case []any:
+		for _, child := range typed {
+			removeAdditionalProperties(child)
+		}
+	}
 }
 
 func toContentBlocks(c content) []bs.ContentBlock {
