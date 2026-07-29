@@ -26,6 +26,7 @@ type CompletionProvider struct {
 	httpClient  *http.Client
 	logger      *slog.Logger
 	generateURL string
+	streamURL   string
 	backoffs    []time.Duration
 }
 
@@ -36,6 +37,7 @@ func NewCompletionProvider(apiKey string, timeout time.Duration) *CompletionProv
 		httpClient:  &http.Client{Timeout: timeout},
 		logger:      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
 		generateURL: generateContentURL,
+		streamURL:   streamContentURL,
 		backoffs:    []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second, 45 * time.Second, 60 * time.Second},
 	}
 }
@@ -54,7 +56,8 @@ type genConfig struct {
 }
 
 type thinkingConfig struct {
-	ThinkingBudget int `json:"thinkingBudget"`
+	ThinkingBudget *int   `json:"thinkingBudget,omitempty"`
+	ThinkingLevel  string `json:"thinkingLevel,omitempty"`
 }
 
 type toolWrapper struct {
@@ -74,6 +77,7 @@ type content struct {
 
 type part struct {
 	Text             string            `json:"text,omitempty"`
+	Thought          bool              `json:"thought,omitempty"`
 	InlineData       *inlineData       `json:"inlineData,omitempty"`
 	FunctionCall     *functionCall     `json:"functionCall,omitempty"`
 	FunctionResponse *functionResponse `json:"functionResponse,omitempty"`
@@ -86,11 +90,13 @@ type inlineData struct {
 }
 
 type functionCall struct {
+	ID   string         `json:"id,omitempty"`
 	Name string         `json:"name"`
 	Args map[string]any `json:"args,omitempty"`
 }
 
 type functionResponse struct {
+	ID       string `json:"id,omitempty"`
 	Name     string `json:"name"`
 	Response any    `json:"response"`
 }
@@ -158,20 +164,11 @@ func (p *CompletionProvider) sendOnce(ctx context.Context, req bs.CompletionRequ
 		sys = &content{Role: "system", Parts: []part{{Text: req.System}}}
 	}
 
-	generation := &genConfig{MaxOutputTokens: req.MaxTokens}
-	if req.Temperature > 0 {
-		t := req.Temperature
-		generation.Temperature = &t
-	}
-	if req.ThinkingBudget >= 0 {
-		generation.ThinkingConfig = &thinkingConfig{ThinkingBudget: req.ThinkingBudget}
-	}
-
 	payload := generateRequest{
 		SystemInstruction: sys,
 		Contents:          contents,
 		Tools:             buildTools(req.Tools),
-		GenerationConfig:  generation,
+		GenerationConfig:  buildGenerationConfig(req),
 	}
 
 	body, err := json.Marshal(payload)
@@ -267,20 +264,11 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		sys = &content{Role: "system", Parts: []part{{Text: req.System}}}
 	}
 
-	generation := &genConfig{MaxOutputTokens: req.MaxTokens}
-	if req.Temperature > 0 {
-		t := req.Temperature
-		generation.Temperature = &t
-	}
-	if req.ThinkingBudget >= 0 {
-		generation.ThinkingConfig = &thinkingConfig{ThinkingBudget: req.ThinkingBudget}
-	}
-
 	payload := generateRequest{
 		SystemInstruction: sys,
 		Contents:          contents,
 		Tools:             buildTools(req.Tools),
-		GenerationConfig:  generation,
+		GenerationConfig:  buildGenerationConfig(req),
 	}
 
 	body, err := json.Marshal(payload)
@@ -288,7 +276,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf(streamContentURL, req.Model, p.apiKey)
+	url := fmt.Sprintf(p.streamURL, req.Model, p.apiKey)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -346,7 +334,14 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 
 		// Extract text chunks and fire cb.OnText live.
 		for _, prt := range cand.Content.Parts {
-			if prt.Text != "" && cb != nil && cb.OnText != nil {
+			if prt.Text == "" || cb == nil {
+				continue
+			}
+			if prt.Thought {
+				if cb.OnThinking != nil {
+					cb.OnThinking(prt.Text)
+				}
+			} else if cb.OnText != nil {
 				cb.OnText(prt.Text)
 			}
 		}
@@ -447,7 +442,7 @@ func buildUserParts(blocks []bs.ContentBlock) ([]part, []part) {
 				parts = append(parts, part{InlineData: &inlineData{MimeType: b.Source.MediaType, Data: b.Source.Data}})
 			}
 		case "tool_result":
-			toolParts = append(toolParts, part{FunctionResponse: &functionResponse{Name: b.Name, Response: normalizeFunctionResponse(b.Content)}})
+			toolParts = append(toolParts, part{FunctionResponse: &functionResponse{ID: b.ToolUseID, Name: b.Name, Response: normalizeFunctionResponse(b.Content)}})
 		}
 	}
 	return parts, toolParts
@@ -502,7 +497,7 @@ func buildModelParts(blocks []bs.ContentBlock) []part {
 			if len(b.Input) > 0 {
 				_ = json.Unmarshal(b.Input, &args)
 			}
-			parts = append(parts, part{FunctionCall: &functionCall{Name: b.Name, Args: args}, ThoughtSignature: b.ThoughtSignature})
+			parts = append(parts, part{FunctionCall: &functionCall{ID: b.ID, Name: b.Name, Args: args}, ThoughtSignature: b.ThoughtSignature})
 		}
 	}
 	return parts
@@ -522,14 +517,18 @@ func buildTools(tools []bs.ToolDefinition) []toolWrapper {
 func toContentBlocks(c content) []bs.ContentBlock {
 	var blocks []bs.ContentBlock
 	for i, p := range c.Parts {
-		if p.Text != "" {
+		if p.Text != "" && !p.Thought {
 			blocks = append(blocks, bs.ContentBlock{Type: "text", Text: p.Text, ThoughtSignature: p.ThoughtSignature})
 		}
 		if p.FunctionCall != nil {
 			rawArgs, _ := json.Marshal(p.FunctionCall.Args)
+			id := p.FunctionCall.ID
+			if id == "" {
+				id = createToolUseID(p.FunctionCall.Name, rawArgs, p.ThoughtSignature, i)
+			}
 			blocks = append(blocks, bs.ContentBlock{
 				Type:             "tool_use",
-				ID:               createToolUseID(p.FunctionCall.Name, rawArgs, p.ThoughtSignature, i),
+				ID:               id,
 				Name:             p.FunctionCall.Name,
 				Input:            rawArgs,
 				ThoughtSignature: p.ThoughtSignature,
@@ -537,6 +536,40 @@ func toContentBlocks(c content) []bs.ContentBlock {
 		}
 	}
 	return blocks
+}
+
+func buildGenerationConfig(req bs.CompletionRequest) *genConfig {
+	config := &genConfig{MaxOutputTokens: req.MaxTokens}
+	if req.Temperature > 0 {
+		temperature := req.Temperature
+		config.Temperature = &temperature
+	}
+	config.ThinkingConfig = buildThinkingConfig(req)
+	return config
+}
+
+func buildThinkingConfig(req bs.CompletionRequest) *thinkingConfig {
+	if strings.HasPrefix(strings.ToLower(req.Model), "gemma-4-") {
+		switch req.ThinkingMode {
+		case "off":
+			return &thinkingConfig{ThinkingLevel: "minimal"}
+		case "adaptive":
+			return &thinkingConfig{ThinkingLevel: "high"}
+		}
+		if req.ThinkingBudget < 0 {
+			return nil
+		}
+		if req.ThinkingBudget == 0 {
+			return &thinkingConfig{ThinkingLevel: "minimal"}
+		}
+		return &thinkingConfig{ThinkingLevel: "high"}
+	}
+
+	if req.ThinkingBudget < 0 {
+		return nil
+	}
+	budget := req.ThinkingBudget
+	return &thinkingConfig{ThinkingBudget: &budget}
 }
 
 func createToolUseID(name string, rawArgs []byte, thoughtSignature string, index int) string {
