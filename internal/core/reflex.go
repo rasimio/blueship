@@ -151,4 +151,11 @@ type ReflexContext struct {
 	// Surfaced to the web cabinet so the chat UI can render a chip
 	// "🧠 N memories • M rules" alongside each assistant turn.
 	MemoriesCount int
+
+	// RetrievalStatus is what the memory lookup can honestly claim:
+	// "found", "searched_no_match" or "retrieval_failed". The last is the
+	// one that matters — a search that never completed says nothing about
+	// what memory holds, and must not be presented to the model as an
+	// empty memory. Empty means the host did not report a status.
+	RetrievalStatus string
 }

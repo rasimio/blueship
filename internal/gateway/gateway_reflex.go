@@ -75,6 +75,30 @@ func memoryNoMatch(formattedTraces string) bool {
 	return strings.Contains(text, "[retrieval]\nno_match") || text == "no_match"
 }
 
+// RetrievalFailedStatus is the status a host reports when the memory
+// lookup did not complete. Mirrors entities.RetrievalFailed on the Arlene
+// side; kept as a bare string so blueship stays free of that dependency.
+const RetrievalFailedStatus = "retrieval_failed"
+
+// appendMemoryUnavailableGuidance states the one thing the model cannot
+// work out for itself: memory was not consulted this turn.
+//
+// This is deliberately not the no-match text. "I searched and found
+// nothing" invites a confident "we never discussed that"; "I could not
+// look" must not. Collapsing the two is how a timeout became an answer
+// from priors delivered in the voice of recollection.
+func appendMemoryUnavailableGuidance(guidance *strings.Builder) {
+	if guidance == nil {
+		return
+	}
+	if guidance.Len() > 0 {
+		guidance.WriteString("\n\n")
+	}
+	guidance.WriteString("[memory unavailable]\n")
+	guidance.WriteString("The memory lookup failed this turn — it did not run to completion, so nothing was retrieved and nothing can be concluded from that. This is NOT the same as finding nothing: do not say the event did not happen, do not say you have no record of it, and do not state or imply that memory is empty on this subject. If the answer needs history, say plainly that you cannot reach your memory right now and offer to try again; keep it to one short sentence, the way a person says it, with no report about systems, databases or coverage. Do not fill the gap from general knowledge and present it as something you remember about the user. Direct transcript excerpts and successful tool evidence remain valid and outrank this.\n")
+	guidance.WriteString("[/memory unavailable]")
+}
+
 func appendMemoryGroundingGuidance(guidance *strings.Builder, formattedTraces string) {
 	if guidance == nil || !memoryNoMatch(formattedTraces) {
 		return
@@ -430,18 +454,30 @@ func (g *Gateway) runReflexPipeline(
 		if hasRules {
 			guidance.WriteString("[/active rules]")
 		}
-		var injectedCtx, strategy string
+		var injectedCtx, strategy, retrievalStatus string
 		var memoriesCount int
 		if rc != nil {
 			injectedCtx = rc.FormattedTraces
 			strategy = rc.Strategy
 			memoriesCount = rc.MemoriesCount
+			retrievalStatus = rc.RetrievalStatus
 			if len(disambiguationOptions) == 0 && !turnPolicy.SuppressToolDirectives {
 				actions := g.hostReflexPreActions(ctx, us, msgText, priorContext, "", rc)
 				g.runReflexPreActions(ctx, us, timings, actions, &preTraces, &researchBlock, &actionsBlock)
 				appendResearchGuidance(&guidance, &researchBlock)
 				appendActionsGuidance(&guidance, &actionsBlock)
 			}
+		}
+
+		// The epistemic floor sits OUTSIDE the rc != nil branch on purpose.
+		// It used to live inside it, so the guidance was attached only when
+		// the host returned a context — that is, on every turn except the
+		// ones where retrieval broke. A nil context and a failed status are
+		// the two shapes "memory did not answer" takes, and both are the
+		// case where the model most needs to be told.
+		if rc == nil || retrievalStatus == RetrievalFailedStatus {
+			appendMemoryUnavailableGuidance(&guidance)
+		} else {
 			appendMemoryGroundingGuidance(&guidance, injectedCtx)
 		}
 		return reflexPipelineResult{
