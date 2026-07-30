@@ -564,7 +564,7 @@ func effectiveDialogBudgetDecision(totalPromptBudget int, systemPrompt, compactS
 func maxToolTurnsForRole(role string) int {
 	switch role {
 	case "cortex":
-		return 3
+		return 6
 	case "background":
 		return 8
 	default:
@@ -577,7 +577,7 @@ func appendFinalAnswerDirective(msg *bs.Message) {
 		return
 	}
 	blocks := bs.NormalizeContent(msg.Content)
-	directive := bs.ContentBlock{Type: "text", Text: "\n\n[tool_limit]\nNo more tools are available for this turn. Use the tool results already provided and answer the user's request now. Do not ask to run another search.\n[/tool_limit]"}
+	directive := bs.ContentBlock{Type: "text", Text: "\n\n[tool_limit]\nYou hit this turn's tool-call budget, so tools are withheld while you write the final answer. This is a per-turn harness limit — your access and permissions are unchanged, and every tool returns on the next user message. Answer now from the results already gathered; do not stall asking to run more lookups. If the task is unfinished, say plainly that you hit the per-turn tool limit and offer to continue — never claim you lack access, rights, or write capability.\n[/tool_limit]"}
 	msg.Content = append(blocks, directive)
 }
 
