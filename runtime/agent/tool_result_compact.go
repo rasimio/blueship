@@ -8,7 +8,15 @@ import (
 )
 
 const (
-	maxPromptToolResultChars        = 4000
+	// List-shaped tools (calendar, recall, notes) routinely produce more than
+	// a few thousand runes, and truncateMiddle excises the centre — a week of
+	// calendar events lost the middle day outright. The ceiling is generous
+	// because it costs nothing until a tool actually returns that much, and
+	// tool results never enter durable history: DialogMessagesForAPI strips
+	// every tool block, so they live only in this turn's scratchpad. Errors
+	// keep the smaller budget: a long one is a stack dump or an HTML error
+	// page, never signal.
+	maxPromptToolResultChars        = 40000
 	maxPromptBrowserFetchTextChars  = 3000
 	maxPromptErroredToolResultChars = 4000
 )
