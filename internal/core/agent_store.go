@@ -520,12 +520,15 @@ func projectAutonomousTurn(
 	tokens := EstimateTokens(assistantBlocks)
 	boundaryID, assistantID := AutonomousTurnMessageIDs(attemptID)
 
+	// $5 must be cast: subtracting an interval from an unannotated parameter
+	// makes PostgreSQL infer it as an interval too, and the insert then fails
+	// at plan time against a timestamptz column for every input.
 	boundaryResult, err := tx.ExecContext(ctx, `
 		INSERT INTO chat_messages
 		    (id, soul_id, session_id, role, content, token_estimate, created_at,
 		     visible_text, projection_status, projection_reason, projector_version)
 		VALUES ($1, $2, $3, 'turn_boundary', $4, 0,
-		        $5 - interval '1 microsecond', $6, $7, $8, $9)
+		        $5::timestamptz - interval '1 microsecond', $6, $7, $8, $9)
 		ON CONFLICT (id) DO NOTHING`,
 		boundaryID, commit.SoulID, sessionID, boundaryJSON, deliveredAt,
 		boundaryProjection.VisibleText, boundaryProjection.Status,

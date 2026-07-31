@@ -159,12 +159,18 @@ func (s *Store) AppendAutonomousAssistant(
 	// transaction_timestamp() is stable inside a PostgreSQL transaction.
 	// Offset the invisible boundary explicitly so every created_at-only reader
 	// observes boundary before assistant rather than relying on random UUIDs.
+	//
+	// The cast on $5 is load-bearing. Subtracting an interval from an
+	// unannotated parameter makes PostgreSQL infer that parameter as an
+	// interval as well, and the statement then fails at plan time against a
+	// timestamptz column — for every input, so the whole autonomous append
+	// aborted and no boundary row was ever written.
 	boundaryResult, err := tx.ExecContext(ctx,
 		`INSERT INTO chat_messages
 		    (id, soul_id, session_id, role, content, token_estimate, created_at,
 		     visible_text, projection_status, projection_reason, projector_version)
 		 VALUES ($1, $4::uuid, $2, 'turn_boundary', $3, 0,
-		         $5 - interval '1 microsecond', $6, $7, $8, $9)
+		         $5::timestamptz - interval '1 microsecond', $6, $7, $8, $9)
 		 ON CONFLICT (id) DO NOTHING`,
 		boundaryID, sessionID, boundaryJSON, bs.SoulIDFromContext(ctx), deliveredAt,
 		boundaryProjection.VisibleText, boundaryProjection.Status,
