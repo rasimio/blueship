@@ -2,14 +2,17 @@ package gateway
 
 import (
 	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"strings"
 	"testing"
 
 	bs "github.com/rasimio/blueship/internal/core"
-	"github.com/rasimio/blueship/runtime/agent"
 )
 
 // stubModelStore serves a fixed role→ModelRef map, so these cases exercise the
-// routing decision without a database.
+// vision decision without a database.
 type stubModelStore struct {
 	refs map[string]bs.ModelRef
 }
@@ -36,123 +39,224 @@ func (s *stubModelStore) Roles() []string {
 	return roles
 }
 
-func visionGateway(refs map[string]bs.ModelRef) *Gateway {
-	return &Gateway{deps: &bs.Deps{
-		ModelStore: &stubModelStore{refs: refs},
-		Config:     &bs.Config{},
-	}}
+// stubReader records what the vision model was asked and replies with a canned
+// description (or an error).
+type stubReader struct {
+	reply    string
+	err      error
+	requests []bs.CompletionRequest
 }
 
-// A text-only cortex cannot answer a turn carrying an image, so such a turn
-// must land on the vision model instead.
-func TestApplyVisionModelRoutesImageTurns(t *testing.T) {
-	g := visionGateway(map[string]bs.ModelRef{
+func (s *stubReader) Complete(_ context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
+	s.requests = append(s.requests, req)
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &bs.CompletionResponse{
+		Content:    []bs.ContentBlock{{Type: "text", Text: s.reply}},
+		StopReason: "end_turn",
+	}, nil
+}
+
+func visionGateway(refs map[string]bs.ModelRef, reader bs.CompletionProvider) *Gateway {
+	return &Gateway{
+		deps:     &bs.Deps{ModelStore: &stubModelStore{refs: refs}, Config: &bs.Config{}},
+		provider: reader,
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+}
+
+func imageBlock(data string) bs.ContentBlock {
+	return bs.ContentBlock{Type: "image", Source: &bs.ImageSource{Type: "base64", MediaType: "image/png", Data: data}}
+}
+
+func visionRefs() map[string]bs.ModelRef {
+	return map[string]bs.ModelRef{
 		"cortex": {Provider: "deepseek", Name: "deepseek-v4-flash"},
-		"vision": {Provider: "anthropic-oauth", Name: "claude-opus-5", MaxTokens: 32000, ContextWindow: 262144, Temperature: 0.7},
-	})
+		"vision": {Provider: "anthropic-oauth", Name: "claude-haiku-4-5-20251001", MaxTokens: 1500, Temperature: 0.3},
+	}
+}
 
-	cfg := agent.RunConfig{Model: "deepseek:deepseek-v4-flash", MaxTokens: 8192}
-	content := []bs.ContentBlock{
-		{Type: "text", Text: "что на фото?"},
-		{Type: "image", Source: &bs.ImageSource{Type: "base64", MediaType: "image/png", Data: "AAAA"}},
+// The image is read into text and cortex answers from that text — the reply is
+// never written by the vision model.
+func TestDescribeImagesReplacesImagesWithText(t *testing.T) {
+	reader := &stubReader{reply: "A blue square, RGB roughly (0,140,255)."}
+	g := visionGateway(visionRefs(), reader)
+
+	content := []bs.ContentBlock{{Type: "text", Text: "какого цвета квадрат?"}, imageBlock("AAAA")}
+	out, ok := g.describeImages(context.Background(), content)
+	if !ok {
+		t.Fatal("an image turn should be read into text")
 	}
 
-	if !g.applyVisionModel(&cfg, content) {
-		t.Fatal("image turn should route to the vision model")
+	blocks, isBlocks := out.([]bs.ContentBlock)
+	if !isBlocks {
+		t.Fatalf("content should stay a block slice, got %T", out)
 	}
-	if cfg.Model != "anthropic-oauth:claude-opus-5" {
-		t.Fatalf("model = %q, want the vision model", cfg.Model)
+	for _, b := range blocks {
+		if b.Type == "image" {
+			t.Fatalf("image survived into the cortex turn: %#v", blocks)
+		}
 	}
-	if cfg.MaxTokens != 32000 || cfg.ContextWindow != 262144 {
-		t.Fatalf("generation limits should come from the vision row, got max=%d ctx=%d", cfg.MaxTokens, cfg.ContextWindow)
+	if blocks[0].Text != "какого цвета квадрат?" {
+		t.Fatalf("the user's own words must be preserved first, got %#v", blocks)
+	}
+	if !strings.Contains(blocks[1].Text, "[image_description]") || !strings.Contains(blocks[1].Text, "blue square") {
+		t.Fatalf("description block missing or unwrapped: %#v", blocks[1])
+	}
+}
+
+// The reader is given the user's message, so it can extract what is actually
+// being asked about instead of producing a generic caption.
+func TestDescribeImagesAsksTheReaderTheUsersQuestion(t *testing.T) {
+	reader := &stubReader{reply: "ok"}
+	g := visionGateway(visionRefs(), reader)
+
+	content := []bs.ContentBlock{{Type: "text", Text: "что написано в правом нижнем углу?"}, imageBlock("AAAA")}
+	if _, ok := g.describeImages(context.Background(), content); !ok {
+		t.Fatal("an image turn should be read into text")
+	}
+	if len(reader.requests) != 1 {
+		t.Fatalf("want a single reader call, got %d", len(reader.requests))
+	}
+
+	req := reader.requests[0]
+	if req.Model != "anthropic-oauth:claude-haiku-4-5-20251001" {
+		t.Fatalf("reader model = %q, want the vision row's model", req.Model)
+	}
+	sent := bs.NormalizeContent(req.Messages[0].Content)
+	var sawQuestion, sawImage bool
+	for _, b := range sent {
+		if b.Type == "text" && strings.Contains(b.Text, "правом нижнем углу") {
+			sawQuestion = true
+		}
+		if b.Type == "image" {
+			sawImage = true
+		}
+	}
+	if !sawQuestion {
+		t.Fatalf("the reader must receive the user's question, got %#v", sent)
+	}
+	if !sawImage {
+		t.Fatalf("the reader must receive the image, got %#v", sent)
+	}
+	// A reader that answers would speak in a voice the user never chose.
+	if !strings.Contains(req.System, "describe rather than answer") {
+		t.Fatalf("reader prompt should keep it describing, got %q", req.System)
 	}
 }
 
 // Reasoning controls are not portable between models: inheriting them across
-// tiers has already broken chat once with a 400. Every one of them must come
-// from the row that owns the model actually being called.
-func TestApplyVisionModelNeverInheritsReasoningControls(t *testing.T) {
-	g := visionGateway(map[string]bs.ModelRef{
-		"vision": {Provider: "anthropic-oauth", Name: "claude-opus-5", Effort: "high", ThinkingMode: "adaptive"},
-	})
+// tiers has broken chat before with a 400.
+func TestDescribeImagesUsesTheVisionRowsOwnControls(t *testing.T) {
+	reader := &stubReader{reply: "ok"}
+	refs := visionRefs()
+	refs["vision"] = bs.ModelRef{
+		Provider: "anthropic-oauth", Name: "claude-haiku-4-5-20251001",
+		MaxTokens: 1500, Temperature: 0.3, Effort: "low", ThinkingMode: "off",
+	}
+	g := visionGateway(refs, reader)
 
-	cfg := agent.RunConfig{
-		Model:        "deepseek:deepseek-v4-flash",
-		Effort:       "xhigh",
-		ThinkingMode: "off",
-		Temperature:  0.9,
+	if _, ok := g.describeImages(context.Background(), []bs.ContentBlock{imageBlock("AAAA")}); !ok {
+		t.Fatal("an image turn should be read into text")
 	}
-	content := []bs.ContentBlock{{Type: "image", Source: &bs.ImageSource{Type: "base64", MediaType: "image/png", Data: "AAAA"}}}
-
-	if !g.applyVisionModel(&cfg, content) {
-		t.Fatal("image turn should route to the vision model")
+	req := reader.requests[0]
+	if req.Effort != "low" || req.ThinkingMode != "off" {
+		t.Fatalf("reader effort/thinking = %q/%q, want the vision row's own", req.Effort, req.ThinkingMode)
 	}
-	if cfg.Effort != "high" {
-		t.Errorf("effort = %q, want the vision row's own value", cfg.Effort)
-	}
-	if cfg.ThinkingMode != "adaptive" {
-		t.Errorf("thinking_mode = %q, want the vision row's own value", cfg.ThinkingMode)
-	}
-	if cfg.Temperature != 0 {
-		t.Errorf("temperature = %v, want the vision row's own value, not the previous tier's", cfg.Temperature)
+	if req.MaxTokens != 1500 || req.Temperature != 0.3 {
+		t.Fatalf("reader limits = %d/%v, want the vision row's own", req.MaxTokens, req.Temperature)
 	}
 }
 
-// Text turns are the common case and must not be diverted — the vision model
-// is typically the slower, costlier one.
-func TestApplyVisionModelLeavesTextTurnsAlone(t *testing.T) {
+// No vision row means the deployment wants cortex to read images itself, so the
+// turn must reach it untouched.
+func TestDescribeImagesPassesThroughWithoutTheRole(t *testing.T) {
+	reader := &stubReader{reply: "should not be called"}
 	g := visionGateway(map[string]bs.ModelRef{
-		"vision": {Provider: "anthropic-oauth", Name: "claude-opus-5"},
-	})
+		"cortex": {Provider: "anthropic-oauth", Name: "claude-opus-5"},
+	}, reader)
 
-	cfg := agent.RunConfig{Model: "deepseek:deepseek-v4-flash", Effort: "medium"}
-	before := cfg
+	content := []bs.ContentBlock{{Type: "text", Text: "что тут?"}, imageBlock("AAAA")}
+	out, ok := g.describeImages(context.Background(), content)
+	if ok {
+		t.Fatal("without a vision row the turn must be left alone")
+	}
+	if len(reader.requests) != 0 {
+		t.Fatalf("no vision row: the reader must not be called, got %d calls", len(reader.requests))
+	}
+	if blocks, _ := out.([]bs.ContentBlock); len(blocks) != 2 || blocks[1].Type != "image" {
+		t.Fatalf("image must reach cortex untouched, got %#v", out)
+	}
+}
 
+// A failed or empty reading falls through to the original content: a worse
+// answer beats no answer, and a vision-capable cortex may still cope.
+func TestDescribeImagesFallsThroughOnReaderFailure(t *testing.T) {
+	for name, reader := range map[string]*stubReader{
+		"error":       {err: errors.New("upstream exploded")},
+		"empty reply": {reply: "   "},
+	} {
+		g := visionGateway(visionRefs(), reader)
+		content := []bs.ContentBlock{{Type: "text", Text: "что тут?"}, imageBlock("AAAA")}
+
+		out, ok := g.describeImages(context.Background(), content)
+		if ok {
+			t.Fatalf("%s: a failed reading must not report success", name)
+		}
+		if blocks, _ := out.([]bs.ContentBlock); len(blocks) != 2 || blocks[1].Type != "image" {
+			t.Fatalf("%s: original content must survive, got %#v", name, out)
+		}
+	}
+}
+
+// Text turns are the common case: no reader call, nothing rewritten.
+func TestDescribeImagesLeavesTextTurnsAlone(t *testing.T) {
 	for name, content := range map[string]any{
 		"plain string": "просто текст",
 		"text blocks":  []bs.ContentBlock{{Type: "text", Text: "просто текст"}},
 		"tool result":  []bs.ContentBlock{{Type: "tool_result", ToolUseID: "call_1", Content: "ok"}},
 	} {
-		cfg = before
-		if g.applyVisionModel(&cfg, content) {
-			t.Fatalf("%s: text-only turn should not be rerouted", name)
+		reader := &stubReader{reply: "should not be called"}
+		g := visionGateway(visionRefs(), reader)
+
+		if _, ok := g.describeImages(context.Background(), content); ok {
+			t.Fatalf("%s: a text turn must not be rewritten", name)
 		}
-		if !sameRunConfig(cfg, before) {
-			t.Fatalf("%s: config mutated on a text turn: %#v", name, cfg)
+		if len(reader.requests) != 0 {
+			t.Fatalf("%s: the reader must not be called on a text turn", name)
 		}
 	}
 }
 
-// The role is optional. A deployment that never configures it keeps running
-// every turn on its normal model rather than losing images to an empty model
-// name.
-func TestApplyVisionModelIsInertWithoutTheRole(t *testing.T) {
-	g := visionGateway(map[string]bs.ModelRef{
-		"cortex": {Provider: "anthropic-oauth", Name: "claude-opus-5"},
-	})
+// Several images are read in one call so they can be described in relation to
+// each other, and collapse to a single description at the first image's spot.
+func TestDescribeImagesHandlesSeveralImagesInOneCall(t *testing.T) {
+	reader := &stubReader{reply: "First: a chart. Second: a receipt."}
+	g := visionGateway(visionRefs(), reader)
 
-	cfg := agent.RunConfig{Model: "anthropic-oauth:claude-opus-5", Effort: "xhigh"}
-	before := cfg
-	content := []bs.ContentBlock{{Type: "image", Source: &bs.ImageSource{Type: "base64", MediaType: "image/png", Data: "AAAA"}}}
-
-	if g.applyVisionModel(&cfg, content) {
-		t.Fatal("no vision row configured: the turn must be left alone")
+	content := []bs.ContentBlock{
+		{Type: "text", Text: "сравни"},
+		imageBlock("AAAA"),
+		imageBlock("BBBB"),
+		{Type: "text", Text: "и что скажешь?"},
 	}
-	if !sameRunConfig(cfg, before) {
-		t.Fatalf("config mutated without a vision row: %#v", cfg)
+	out, ok := g.describeImages(context.Background(), content)
+	if !ok {
+		t.Fatal("an image turn should be read into text")
 	}
-}
+	if len(reader.requests) != 1 {
+		t.Fatalf("want one reader call for all images, got %d", len(reader.requests))
+	}
 
-// sameRunConfig compares the fields vision routing is allowed to touch.
-// RunConfig holds slices, so it is not directly comparable.
-func sameRunConfig(a, b agent.RunConfig) bool {
-	return a.Model == b.Model &&
-		a.MaxTokens == b.MaxTokens &&
-		a.ContextWindow == b.ContextWindow &&
-		a.Temperature == b.Temperature &&
-		a.ThinkingBudget == b.ThinkingBudget &&
-		a.ThinkingMode == b.ThinkingMode &&
-		a.Effort == b.Effort &&
-		a.MessageBudget == b.MessageBudget &&
-		a.MessageBudgetSource == b.MessageBudgetSource
+	blocks, _ := out.([]bs.ContentBlock)
+	if len(blocks) != 3 {
+		t.Fatalf("two images should collapse to one description block, got %#v", blocks)
+	}
+	if blocks[0].Text != "сравни" || blocks[2].Text != "и что скажешь?" {
+		t.Fatalf("surrounding text must keep its order, got %#v", blocks)
+	}
+	if !strings.Contains(blocks[1].Text, "receipt") {
+		t.Fatalf("description should sit where the first image was, got %#v", blocks)
+	}
 }

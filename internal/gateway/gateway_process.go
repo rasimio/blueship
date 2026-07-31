@@ -824,12 +824,14 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	loop := prepared.loop
 	now := prepared.now
 	runCfg := prepared.config
-	if g.applyVisionModel(&runCfg, content) {
-		g.logger.Info("cortex: turn carries images, routed to the vision model",
+	// Read any images into text before the turn runs, so cortex answers from a
+	// description instead of pixels it may not be able to see. Cortex still
+	// writes the reply — persona, memory and tools are unaffected.
+	if described, ok := g.describeImages(ctx, content); ok {
+		content = described
+		g.logger.Info("vision: images read into the turn as text",
 			"session_id", runCfg.SessionID,
-			"model", runCfg.Model,
-			"effort", runCfg.Effort,
-			"thinking_mode", runCfg.ThinkingMode,
+			"model", g.deps.ModelStore.ForRouter(visionRole),
 		)
 	}
 
