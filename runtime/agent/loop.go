@@ -477,30 +477,61 @@ func turnContextEnvelope(turnContext string) string {
 	return "## Turn context\n[turn_context]\n" + turnContext + "\n[/turn_context]"
 }
 
-// appendTurnContext attaches the per-turn context to the end of the message
-// array, keeping tools + system + dialog history byte-stable so prefix caches
-// survive between calls. The newest turn is a cache miss no matter what, so the
-// context is free to ride there.
+// turnContextAnchor is the index the per-turn context is pinned to: the current
+// user turn, as it stands when the tool loop starts.
 //
-// It joins the trailing user turn when there is one and otherwise becomes its
-// own user turn, which also keeps the wire array ending on a user message —
-// required by the Anthropic OAuth surface. The message structs are expected to
-// be a clone (see cloneMessages); the content slice is rebuilt rather than
-// appended in place so a shared backing array can never be written through.
-func appendTurnContext(messages []bs.Message, turnContext string) []bs.Message {
+// Pinning matters. A tool loop grows the conversation by appending, so "the
+// last message" names a different message on every turn — and moving the
+// context along with it rewrites a message the previous turn already sent,
+// breaking the prefix exactly where the loop needs it intact. Anchored, every
+// later turn is a strict extension of the one before it and a prefix cache
+// keeps matching right up to the newly appended tool traffic.
+//
+// This holds because the context is loop-invariant: reflex guidance, injected
+// context, felt time and tool observations are all computed before the first
+// turn. Only the available-tools shelf changes, and only on the forced-final
+// turn, which gives up the cache from the anchor onward — once, at the end of a
+// loop that has already paid for itself.
+func turnContextAnchor(convo []bs.Message) int {
+	return len(convo) - 1
+}
+
+// withTurnContext places the per-turn context at anchor, keeping tools, system
+// and dialog history byte-stable ahead of it.
+//
+// It joins the anchored turn when that turn is the user's, and otherwise
+// becomes its own user turn directly after it — which also leaves the wire
+// array ending on a user message, as the Anthropic OAuth surface requires. The
+// anchored turn is the user's own message, never one carrying tool results, so
+// the context can never wedge between a tool call and its replies.
+//
+// messages is expected to be a clone (see cloneMessages); content slices are
+// rebuilt rather than appended in place so a shared backing array is never
+// written through.
+func withTurnContext(messages []bs.Message, anchor int, turnContext string) []bs.Message {
 	if strings.TrimSpace(turnContext) == "" {
 		return messages
 	}
 	block := bs.ContentBlock{Type: "text", Text: turnContextEnvelope(turnContext)}
-	if n := len(messages); n > 0 && messages[n-1].Role == "user" {
-		blocks := bs.NormalizeContent(messages[n-1].Content)
+
+	if anchor >= 0 && anchor < len(messages) && messages[anchor].Role == "user" {
+		blocks := bs.NormalizeContent(messages[anchor].Content)
 		combined := make([]bs.ContentBlock, 0, len(blocks)+1)
 		combined = append(combined, blocks...)
 		combined = append(combined, block)
-		messages[n-1].Content = combined
+		messages[anchor].Content = combined
 		return messages
 	}
-	return append(messages, bs.Message{Role: "user", Content: []bs.ContentBlock{block}})
+
+	ctxMsg := bs.Message{Role: "user", Content: []bs.ContentBlock{block}}
+	if anchor < 0 || anchor+1 >= len(messages) {
+		return append(messages, ctxMsg)
+	}
+	out := make([]bs.Message, 0, len(messages)+1)
+	out = append(out, messages[:anchor+1]...)
+	out = append(out, ctxMsg)
+	out = append(out, messages[anchor+1:]...)
+	return out
 }
 
 func buildTurnContextForTools(reflexGuidance, injectedContext string, tools []bs.ToolDefinition, extraContext ...string) string {

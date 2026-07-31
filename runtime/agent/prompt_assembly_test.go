@@ -249,17 +249,16 @@ func assertPromptOnlyRequest(t *testing.T, requests []bs.CompletionRequest, want
 	}
 }
 
-// turnContextOf returns the [turn_context] block carried by a request's last
-// message — where prompt assembly puts per-turn material so the system prompt
-// and dialog stay a stable, cacheable prefix.
+// turnContextOf returns the [turn_context] block a request carries in its
+// messages. Which message holds it is an implementation detail — it is anchored
+// to the current user turn, not the tail — so this scans from the back.
 func turnContextOf(req bs.CompletionRequest) string {
-	if len(req.Messages) == 0 {
-		return ""
-	}
-	blocks := bs.NormalizeContent(req.Messages[len(req.Messages)-1].Content)
-	for i := len(blocks) - 1; i >= 0; i-- {
-		if blocks[i].Type == "text" && strings.Contains(blocks[i].Text, "[turn_context]") {
-			return blocks[i].Text
+	for m := len(req.Messages) - 1; m >= 0; m-- {
+		blocks := bs.NormalizeContent(req.Messages[m].Content)
+		for i := len(blocks) - 1; i >= 0; i-- {
+			if blocks[i].Type == "text" && strings.Contains(blocks[i].Text, "[turn_context]") {
+				return blocks[i].Text
+			}
 		}
 	}
 	return ""
@@ -358,6 +357,11 @@ func TestRunTrackedUsesVisibleDialogAndCurrentToolScratchpad(t *testing.T) {
 		t.Fatalf("system prompt must be byte-stable across turns: %q vs %q",
 			provider.requests[0].System, provider.requests[1].System)
 	}
+	// And the property that actually buys the cache: a later turn must EXTEND
+	// the earlier one, never rewrite it. If the turn context travelled with the
+	// tail of the array it would rewrite the message the previous turn already
+	// sent, and the prefix would stop matching right there.
+	assertPrefixExtension(t, provider.requests[0].Messages, provider.requests[1].Messages)
 	if len(provider.requests[1].Messages) != 3 {
 		t.Fatalf("turn 2 should include dialog + assistant tool_use + tool_result scratchpad, got %#v", provider.requests[1].Messages)
 	}
@@ -1020,4 +1024,32 @@ func (s *fakeMessageStore) RecordLastInputTokens(context.Context, string, int) e
 
 func (s *fakeMessageStore) RecordLLMUsage(context.Context, bs.LLMUsageRecord) error {
 	return nil
+}
+
+// assertPrefixExtension fails unless `next` starts with exactly `prev`: same
+// messages, same order, byte-identical content. This is the invariant every
+// prefix cache is priced on — the first message that differs ends the match and
+// everything behind it is re-read at full price.
+func assertPrefixExtension(t *testing.T, prev, next []bs.Message) {
+	t.Helper()
+	if len(next) < len(prev) {
+		t.Fatalf("later turn shrank the prompt: %d messages after %d", len(next), len(prev))
+	}
+	for i := range prev {
+		if prev[i].Role != next[i].Role {
+			t.Fatalf("message %d changed role between turns: %q -> %q", i, prev[i].Role, next[i].Role)
+		}
+		before, err := json.Marshal(bs.NormalizeContent(prev[i].Content))
+		if err != nil {
+			t.Fatalf("marshal message %d: %v", i, err)
+		}
+		after, err := json.Marshal(bs.NormalizeContent(next[i].Content))
+		if err != nil {
+			t.Fatalf("marshal message %d: %v", i, err)
+		}
+		if string(before) != string(after) {
+			t.Fatalf("message %d was rewritten between turns, breaking the cacheable prefix:\n before: %s\n after:  %s",
+				i, before, after)
+		}
+	}
 }

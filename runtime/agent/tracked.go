@@ -109,6 +109,9 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 	if cfg.PromptOnlyInput {
 		convo = append(convo, bs.Message{Role: "user", Content: userMessage})
 	}
+	// Fixed for the whole loop: convo only ever grows at the tail, so this keeps
+	// pointing at the current user turn while tool traffic accumulates behind it.
+	ctxAnchor := turnContextAnchor(convo)
 
 	// Accumulate text and tool traces across all turns.
 	var accumulated strings.Builder
@@ -127,7 +130,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			turnTools = nil
 		}
 		turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, turnTools, feltTime, toolObservationContext)
-		messages = appendTurnContext(messages, turnContext)
+		messages = withTurnContext(messages, ctxAnchor, turnContext)
 		if forceFinal && len(messages) > 0 {
 			// After the turn context, so the directive stays the last thing read.
 			appendFinalAnswerDirective(&messages[len(messages)-1])
