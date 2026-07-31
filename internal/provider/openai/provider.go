@@ -107,11 +107,43 @@ type chatCompletionResponse struct {
 		FinishReason string      `json:"finish_reason"`
 		Message      chatMessage `json:"message"`
 	} `json:"choices"`
-	Usage struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-	} `json:"usage"`
-	Error *apiError `json:"error,omitempty"`
+	Usage usageReport `json:"usage"`
+	Error *apiError   `json:"error,omitempty"`
+}
+
+// usageReport covers both spellings of prompt-cache accounting seen on
+// OpenAI-compatible backends: the standard nested
+// prompt_tokens_details.cached_tokens, and DeepSeek's flat
+// prompt_cache_hit_tokens. Backends without caching report neither, read as
+// zero, and behave exactly as before.
+type usageReport struct {
+	PromptTokens         int `json:"prompt_tokens"`
+	CompletionTokens     int `json:"completion_tokens"`
+	PromptCacheHitTokens int `json:"prompt_cache_hit_tokens"`
+	PromptTokensDetails  struct {
+		CachedTokens int `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+}
+
+// usage normalizes to the accounting the rest of the stack assumes, which is
+// Anthropic's: input tokens and cache reads are disjoint. OpenAI-compatible
+// backends instead fold cached tokens into prompt_tokens, so they are
+// subtracted back out here — otherwise every cache hit would be double-counted
+// in any cost or hit-rate math over llm_usage.
+func (u usageReport) usage() bs.Usage {
+	cached := u.PromptTokensDetails.CachedTokens
+	if cached == 0 {
+		cached = u.PromptCacheHitTokens
+	}
+	input := u.PromptTokens - cached
+	if input < 0 {
+		input, cached = u.PromptTokens, 0
+	}
+	return bs.Usage{
+		InputTokens:     input,
+		OutputTokens:    u.CompletionTokens,
+		CacheReadTokens: cached,
+	}
 }
 
 // Complete sends a completion request to an OpenAI-compatible endpoint.
@@ -180,10 +212,7 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 	return &bs.CompletionResponse{
 		Content:    contentBlocks,
 		StopReason: mapStopReason(choice.FinishReason),
-		Usage: bs.Usage{
-			InputTokens:  result.Usage.PromptTokens,
-			OutputTokens: result.Usage.CompletionTokens,
-		},
+		Usage:      result.Usage.usage(),
 	}, nil
 }
 
@@ -205,10 +234,7 @@ type streamChunk struct {
 		Delta        streamChunkDelta `json:"delta"`
 		FinishReason *string          `json:"finish_reason"`
 	} `json:"choices"`
-	Usage *struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-	} `json:"usage,omitempty"`
+	Usage *usageReport `json:"usage,omitempty"`
 }
 
 // StreamComplete sends a streaming completion request. Dispatches per-event
@@ -337,10 +363,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		}
 
 		if chunk.Usage != nil {
-			usage = bs.Usage{
-				InputTokens:  chunk.Usage.PromptTokens,
-				OutputTokens: chunk.Usage.CompletionTokens,
-			}
+			usage = chunk.Usage.usage()
 		}
 	}
 
