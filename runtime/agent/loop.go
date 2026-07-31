@@ -454,15 +454,53 @@ func toolboxUnlockedResult(tools []bs.ToolDefinition) string {
 	return "Toolbox unlocked for this turn. Available tools now: " + strings.Join(names, ", ") + ". Make the call you need now."
 }
 
-func effectiveSystemPrompt(systemPrompt, compactSummary, turnContext string) string {
+// effectiveSystemPrompt returns the cacheable head of the prompt: the system
+// prompt plus any compaction summary, and nothing that varies per turn.
+//
+// Per-turn material (memory traces, reflex guidance, felt time, tool
+// observations) rides at the tail of the message array instead — see
+// appendTurnContext. Providers cache by prefix, so anything dynamic placed here
+// would invalidate not just the system block but the whole dialog behind it,
+// which is otherwise byte-identical between calls.
+func effectiveSystemPrompt(systemPrompt, compactSummary string) string {
 	effective := systemPrompt
 	if compactSummary != "" {
 		effective += SummaryHeader + compactSummary
 	}
-	if turnContext != "" {
-		effective += "\n\n## Turn context\n[turn_context]\n" + turnContext + "\n[/turn_context]"
-	}
 	return effective
+}
+
+// turnContextEnvelope wraps the per-turn context in the same delimiters it
+// carried when it lived in the system prompt, so relocating it changes where
+// the model reads it, not what it reads.
+func turnContextEnvelope(turnContext string) string {
+	return "## Turn context\n[turn_context]\n" + turnContext + "\n[/turn_context]"
+}
+
+// appendTurnContext attaches the per-turn context to the end of the message
+// array, keeping tools + system + dialog history byte-stable so prefix caches
+// survive between calls. The newest turn is a cache miss no matter what, so the
+// context is free to ride there.
+//
+// It joins the trailing user turn when there is one and otherwise becomes its
+// own user turn, which also keeps the wire array ending on a user message —
+// required by the Anthropic OAuth surface. The message structs are expected to
+// be a clone (see cloneMessages); the content slice is rebuilt rather than
+// appended in place so a shared backing array can never be written through.
+func appendTurnContext(messages []bs.Message, turnContext string) []bs.Message {
+	if strings.TrimSpace(turnContext) == "" {
+		return messages
+	}
+	block := bs.ContentBlock{Type: "text", Text: turnContextEnvelope(turnContext)}
+	if n := len(messages); n > 0 && messages[n-1].Role == "user" {
+		blocks := bs.NormalizeContent(messages[n-1].Content)
+		combined := make([]bs.ContentBlock, 0, len(blocks)+1)
+		combined = append(combined, blocks...)
+		combined = append(combined, block)
+		messages[n-1].Content = combined
+		return messages
+	}
+	return append(messages, bs.Message{Role: "user", Content: []bs.ContentBlock{block}})
 }
 
 func buildTurnContextForTools(reflexGuidance, injectedContext string, tools []bs.ToolDefinition, extraContext ...string) string {
@@ -541,7 +579,13 @@ func effectiveDialogBudgetDecision(totalPromptBudget int, systemPrompt, compactS
 	if totalPromptBudget <= 0 {
 		return dialogBudgetDecision{DialogBudget: totalPromptBudget, Mode: dialogBudgetModeUnbounded}
 	}
-	promptOverhead := estimateTextTokens(effectiveSystemPrompt(systemPrompt, compactSummary, turnContext)) + estimateToolSchemaTokens(tools)
+	// The turn context now travels with the messages rather than the system
+	// prompt, but it still occupies prompt space, so it stays part of the
+	// overhead the dialog budget has to make room for.
+	promptOverhead := estimateTextTokens(effectiveSystemPrompt(systemPrompt, compactSummary)) + estimateToolSchemaTokens(tools)
+	if strings.TrimSpace(turnContext) != "" {
+		promptOverhead += estimateTextTokens(turnContextEnvelope(turnContext))
+	}
 	if promptOverhead >= totalPromptBudget {
 		return dialogBudgetDecision{
 			DialogBudget:                totalPromptBudget,

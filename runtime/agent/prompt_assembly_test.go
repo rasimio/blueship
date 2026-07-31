@@ -243,9 +243,26 @@ func assertPromptOnlyRequest(t *testing.T, requests []bs.CompletionRequest, want
 		t.Fatalf("want persisted dialog plus prompt-only input, got %#v", messages)
 	}
 	got := messages[1]
-	if got.Role != "user" || got.Content != wantInput {
-		t.Fatalf("prompt-only input = %#v, want role=user content=%q", got, wantInput)
+	blocks := bs.NormalizeContent(got.Content)
+	if got.Role != "user" || len(blocks) == 0 || blocks[0].Text != wantInput {
+		t.Fatalf("prompt-only input = %#v, want role=user leading text=%q", got, wantInput)
 	}
+}
+
+// turnContextOf returns the [turn_context] block carried by a request's last
+// message — where prompt assembly puts per-turn material so the system prompt
+// and dialog stay a stable, cacheable prefix.
+func turnContextOf(req bs.CompletionRequest) string {
+	if len(req.Messages) == 0 {
+		return ""
+	}
+	blocks := bs.NormalizeContent(req.Messages[len(req.Messages)-1].Content)
+	for i := len(blocks) - 1; i >= 0; i-- {
+		if blocks[i].Type == "text" && strings.Contains(blocks[i].Text, "[turn_context]") {
+			return blocks[i].Text
+		}
+	}
+	return ""
 }
 
 func assertOnlyAssistantPersisted(t *testing.T, appended []bs.Message, wantText string) {
@@ -315,14 +332,31 @@ func TestRunTrackedUsesVisibleDialogAndCurrentToolScratchpad(t *testing.T) {
 	if len(provider.requests) != 2 {
 		t.Fatalf("want two provider calls, got %d", len(provider.requests))
 	}
-	if got := provider.requests[0].Messages[0].Content; got != "hello" {
-		t.Fatalf("turn 1 should get visible dialog only, got %#v", got)
+	// The turn context rides at the tail of the message array, never in the
+	// system prompt: anything per-turn in the system block invalidates the
+	// prefix cache for the whole dialog behind it.
+	if strings.Contains(provider.requests[0].System, "[turn_context]") {
+		t.Fatalf("turn context must not be in the system prompt, got %q", provider.requests[0].System)
 	}
-	if strings.Contains(provider.requests[0].Messages[0].Content.(string), "[context]") {
-		t.Fatalf("turn context leaked into user message: %#v", provider.requests[0].Messages[0])
+	if provider.requests[0].System != "base system" {
+		t.Fatalf("system prompt should be the bare cacheable head, got %q", provider.requests[0].System)
 	}
-	if !strings.Contains(provider.requests[0].System, "[turn_context]") {
-		t.Fatalf("turn context should be in system prompt, got %q", provider.requests[0].System)
+	lastTurn1 := provider.requests[0].Messages[len(provider.requests[0].Messages)-1]
+	if lastTurn1.Role != "user" {
+		t.Fatalf("turn context should ride a user turn, got role %q", lastTurn1.Role)
+	}
+	turn1Blocks := bs.NormalizeContent(lastTurn1.Content)
+	if len(turn1Blocks) < 2 || turn1Blocks[0].Text != "hello" {
+		t.Fatalf("visible dialog should be preserved ahead of the turn context, got %#v", turn1Blocks)
+	}
+	if !strings.Contains(turn1Blocks[len(turn1Blocks)-1].Text, "[turn_context]") {
+		t.Fatalf("turn context should be the trailing block, got %#v", turn1Blocks)
+	}
+	// The whole point of the move: the cacheable head is byte-identical across
+	// turns even though the turn context changes between them.
+	if provider.requests[0].System != provider.requests[1].System {
+		t.Fatalf("system prompt must be byte-stable across turns: %q vs %q",
+			provider.requests[0].System, provider.requests[1].System)
 	}
 	if len(provider.requests[1].Messages) != 3 {
 		t.Fatalf("turn 2 should include dialog + assistant tool_use + tool_result scratchpad, got %#v", provider.requests[1].Messages)
@@ -385,10 +419,17 @@ func TestRunTrackedCompactsToolResultOnlyForPrompt(t *testing.T) {
 		t.Fatalf("want two provider calls, got %d", len(provider.requests))
 	}
 	promptBlocks := bs.NormalizeContent(provider.requests[1].Messages[2].Content)
-	if len(promptBlocks) != 1 {
+	toolResults := 0
+	var promptResult string
+	for _, block := range promptBlocks {
+		if block.Type == "tool_result" {
+			toolResults++
+			promptResult, _ = block.Content.(string)
+		}
+	}
+	if toolResults != 1 {
 		t.Fatalf("want one prompt tool result, got %#v", promptBlocks)
 	}
-	promptResult, _ := promptBlocks[0].Content.(string)
 	if strings.Contains(promptResult, longText) {
 		t.Fatalf("prompt tool result should be compacted")
 	}
@@ -445,14 +486,23 @@ func TestRunTrackedInjectsRecentToolObservationsInTurnContext(t *testing.T) {
 	if len(provider.requests) != 1 {
 		t.Fatalf("want one provider call, got %d", len(provider.requests))
 	}
-	system := provider.requests[0].System
+	turnCtx := turnContextOf(provider.requests[0])
 	for _, want := range []string{"[recent tool observations]", "calendar_week", "2026-07-08T14:32:00Z", "Обучение ИИ", "Школа ИИ"} {
-		if !strings.Contains(system, want) {
-			t.Fatalf("system prompt missing %q:\n%s", want, system)
+		if !strings.Contains(turnCtx, want) {
+			t.Fatalf("turn context missing %q:\n%s", want, turnCtx)
 		}
 	}
-	if len(provider.requests[0].Messages) != 1 || provider.requests[0].Messages[0].Content != "is this a notes conflict?" {
-		t.Fatalf("tool observation should not enter visible dialogue: %#v", provider.requests[0].Messages)
+	// The observation is allowed to ride the trailing turn-context block, but it
+	// must never be merged into the visible dialogue text itself.
+	if len(provider.requests[0].Messages) != 1 {
+		t.Fatalf("tool observation should not add dialogue turns: %#v", provider.requests[0].Messages)
+	}
+	dialogBlocks := bs.NormalizeContent(provider.requests[0].Messages[0].Content)
+	if len(dialogBlocks) == 0 || dialogBlocks[0].Text != "is this a notes conflict?" {
+		t.Fatalf("visible dialogue text should be untouched: %#v", dialogBlocks)
+	}
+	if strings.Contains(dialogBlocks[0].Text, "[recent tool observations]") {
+		t.Fatalf("tool observation leaked into visible dialogue: %#v", dialogBlocks)
 	}
 }
 
@@ -554,8 +604,8 @@ func TestRunTrackedAutoContinuesVisibleMaxTokensAndPersistsMergedAnswer(t *testi
 	if len(provider.requests[1].Tools) != 0 {
 		t.Fatalf("continuation request should disable tools, got %#v", provider.requests[1].Tools)
 	}
-	if !strings.Contains(provider.requests[1].System, "none. No native tool_use calls are available") {
-		t.Fatalf("continuation system prompt should expose no-tools shelf: %q", provider.requests[1].System)
+	if !strings.Contains(turnContextOf(provider.requests[1]), "none. No native tool_use calls are available") {
+		t.Fatalf("continuation turn context should expose no-tools shelf: %q", turnContextOf(provider.requests[1]))
 	}
 	messages := provider.requests[1].Messages
 	if len(messages) != 3 {
@@ -801,15 +851,15 @@ func TestRunTrackedTurnContextListsOnlyActualTools(t *testing.T) {
 	if len(provider.requests[0].Tools) != 1 || provider.requests[0].Tools[0].Name != "browser_search" {
 		t.Fatalf("provider tools = %#v, want only browser_search", provider.requests[0].Tools)
 	}
-	system := provider.requests[0].System
+	turnCtx := turnContextOf(provider.requests[0])
 	// The block now defers to the tool definitions instead of re-listing
 	// names (the list was pure duplication of the schema surface); it must
 	// still exist to scope tool availability to this turn.
-	if !strings.Contains(system, "[available_tools]") || !strings.Contains(system, "in your tool definitions") {
-		t.Fatalf("system prompt missing available_tools contract: %q", system)
+	if !strings.Contains(turnCtx, "[available_tools]") || !strings.Contains(turnCtx, "in your tool definitions") {
+		t.Fatalf("turn context missing available_tools contract: %q", turnCtx)
 	}
-	if strings.Contains(system, "- memory_search") || strings.Contains(system, "- browser_search") {
-		t.Fatalf("system prompt re-listed tool names: %q", system)
+	if strings.Contains(turnCtx, "- memory_search") || strings.Contains(turnCtx, "- browser_search") {
+		t.Fatalf("turn context re-listed tool names: %q", turnCtx)
 	}
 }
 
@@ -849,14 +899,14 @@ func TestRunTrackedTurnContextSaysNoToolsWhenOverrideEmpty(t *testing.T) {
 	if len(provider.requests[0].Tools) != 0 {
 		t.Fatalf("provider tools = %#v, want none", provider.requests[0].Tools)
 	}
-	system := provider.requests[0].System
-	toolShelf := strings.LastIndex(system, "[available_tools]")
-	staleHint := strings.Index(system, "memory_search")
+	turnCtx := turnContextOf(provider.requests[0])
+	toolShelf := strings.LastIndex(turnCtx, "[available_tools]")
+	staleHint := strings.Index(turnCtx, "memory_search")
 	if toolShelf < 0 || staleHint < 0 || toolShelf <= staleHint {
-		t.Fatalf("available tool shelf should follow stale context hints: %q", system)
+		t.Fatalf("available tool shelf should follow stale context hints: %q", turnCtx)
 	}
-	if !strings.Contains(system, "none. No native tool_use calls are available") {
-		t.Fatalf("system prompt missing no-tools directive: %q", system)
+	if !strings.Contains(turnCtx, "none. No native tool_use calls are available") {
+		t.Fatalf("turn context missing no-tools directive: %q", turnCtx)
 	}
 }
 

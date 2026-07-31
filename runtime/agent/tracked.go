@@ -120,17 +120,19 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 	pendingMaxTokenOutputTokens := 0
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
-		baseSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, "")
+		baseSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary)
 		messages := cloneMessages(convo)
 		turnTools := tools
 		if forceFinal {
 			turnTools = nil
-			if len(messages) > 0 {
-				appendFinalAnswerDirective(&messages[len(messages)-1])
-			}
 		}
 		turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, turnTools, feltTime, toolObservationContext)
-		effectiveSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary, turnContext)
+		messages = appendTurnContext(messages, turnContext)
+		if forceFinal && len(messages) > 0 {
+			// After the turn context, so the directive stays the last thing read.
+			appendFinalAnswerDirective(&messages[len(messages)-1])
+		}
+		effectiveSystem := baseSystem
 		scratchpadTokens := estimateMessagesTokens(convo) - dialogTokens
 		if scratchpadTokens < 0 {
 			scratchpadTokens = 0
