@@ -824,6 +824,14 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	loop := prepared.loop
 	now := prepared.now
 	runCfg := prepared.config
+	if g.applyVisionModel(&runCfg, content) {
+		g.logger.Info("cortex: turn carries images, routed to the vision model",
+			"session_id", runCfg.SessionID,
+			"model", runCfg.Model,
+			"effort", runCfg.Effort,
+			"thinking_mode", runCfg.ThinkingMode,
+		)
+	}
 
 	// Interaction tier needs a focused system prompt (preamble + persona, no
 	// cortex agents layer) AND a registry subset so the fast tier cannot

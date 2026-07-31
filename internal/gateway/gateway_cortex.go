@@ -38,6 +38,47 @@ func (g *Gateway) cortexTurnRegistry(ctx context.Context, us *UserState, noTools
 // by both inbound and assistant-initiated chat turns. Context preparation is
 // intentionally outside: interactive and autonomous origins have different
 // rule/tool admission, but reach the same soul, Cortex model, and budgets.
+// visionRole is the optional model_config role a turn is routed to when it
+// carries images. Leaving the row out keeps every deployment on its normal
+// cortex model — the override exists, it just never fires.
+const visionRole = "vision"
+
+// applyVisionModel re-points a turn at the vision role when it carries image
+// content. A text-only cortex cannot answer such a turn at all: depending on
+// the provider it either rejects the request outright or has the image stripped
+// and answers blind.
+//
+// Every generation control is taken from the vision row, never inherited from
+// cortex. Reasoning settings are not portable between models — a tier that
+// inherited another tier's effort and thinking mode once broke chat with a 400.
+// Reported as a bool so the caller can log the swap rather than have models
+// change silently underfoot.
+func (g *Gateway) applyVisionModel(cfg *agent.RunConfig, content any) bool {
+	if g.deps.ModelStore == nil || cfg == nil || !hasImageContent(content) {
+		return false
+	}
+	ref := g.deps.ModelStore.Get(visionRole)
+	model := g.deps.ModelStore.ForRouter(visionRole)
+	if ref.Name == "" || model == "" {
+		return false
+	}
+
+	cfg.Model = model
+	if ref.MaxTokens > 0 {
+		cfg.MaxTokens = ref.MaxTokens
+	}
+	cfg.ContextWindow = ref.ContextWindow
+	cfg.Temperature = ref.Temperature
+	cfg.ThinkingBudget = bs.ThinkingBudgetForModelRef(ref)
+	cfg.ThinkingMode = ref.ThinkingMode
+	cfg.Effort = ref.Effort
+
+	budget := g.messageBudgetForRole(visionRole, ref)
+	cfg.MessageBudget = budget.Budget
+	cfg.MessageBudgetSource = budget.Source
+	return true
+}
+
 func (g *Gateway) prepareCortexTurn(
 	ctx context.Context,
 	us *UserState,

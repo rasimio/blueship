@@ -281,6 +281,23 @@ func (g *Gateway) scanAndSaveLinks(ctx context.Context, us *UserState, sessionID
 // Either way the right move is to skip the fast tier and run cortex
 // (claude-opus-4-8) directly — it has the context budget for the
 // turn and would have been called via escalation anyway.
+// hasImageContent reports whether a turn carries image blocks. This is a
+// sharper question than hasHeavyContent's size heuristic: against a text-only
+// model an image does not merely degrade the answer, it fails the whole
+// request, so this decides which model the turn is routed to.
+func hasImageContent(content any) bool {
+	blocks, ok := content.([]bs.ContentBlock)
+	if !ok {
+		return false
+	}
+	for _, b := range blocks {
+		if b.Type == "image" {
+			return true
+		}
+	}
+	return false
+}
+
 func hasHeavyContent(content any) bool {
 	const heavyTextBytes = 16 << 10 // 16 KiB ≈ 4K tokens
 	switch v := content.(type) {
