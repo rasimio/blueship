@@ -412,11 +412,16 @@ func buildMessages(system string, messages []bs.Message, dropImages bool) []chat
 		blocks := bs.NormalizeContent(msg.Content)
 		switch msg.Role {
 		case "user":
+			// Tool results must come first: the API rejects the request unless
+			// every tool_call_id in the preceding assistant message is answered
+			// immediately after it. Text riding the same turn — a turn context
+			// block, a final-answer directive — becomes a user message behind
+			// them rather than wedging between the call and its results.
 			userMsg, toolMsgs := buildUserMessages(blocks, dropImages)
+			out = append(out, toolMsgs...)
 			if userMsg != nil {
 				out = append(out, *userMsg)
 			}
-			out = append(out, toolMsgs...)
 		case "assistant":
 			out = append(out, buildAssistantMessage(blocks))
 		default:

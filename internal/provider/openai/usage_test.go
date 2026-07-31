@@ -3,6 +3,8 @@ package openai
 import (
 	"encoding/json"
 	"testing"
+
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // OpenAI-compatible backends fold cached tokens into prompt_tokens, while the
@@ -75,5 +77,55 @@ func TestUsageReportNormalizesCacheAccounting(t *testing.T) {
 				t.Errorf("input+cached = %d, want prompt_tokens %d", total, report.PromptTokens)
 			}
 		})
+	}
+}
+
+// A turn that carries both tool results and text (a turn-context block, a
+// final-answer directive) must still emit the tool replies immediately after
+// the assistant tool_calls they answer. Anything between them fails the whole
+// request with "insufficient tool messages following tool_calls message".
+func TestBuildMessagesPutsToolResultsBeforeAccompanyingText(t *testing.T) {
+	messages := []bs.Message{
+		{Role: "user", Content: "what is the weather?"},
+		{Role: "assistant", Content: []bs.ContentBlock{
+			{Type: "tool_use", ID: "call_1", Name: "get_weather", Input: json.RawMessage(`{}`)},
+			{Type: "tool_use", ID: "call_2", Name: "get_time", Input: json.RawMessage(`{}`)},
+		}},
+		{Role: "user", Content: []bs.ContentBlock{
+			{Type: "tool_result", ToolUseID: "call_1", Content: "sunny"},
+			{Type: "tool_result", ToolUseID: "call_2", Content: "noon"},
+			{Type: "text", Text: "## Turn context\n[turn_context]\ntraces\n[/turn_context]"},
+		}},
+	}
+
+	out := buildMessages("system prompt", messages, false)
+
+	var gotRoles []string
+	for _, m := range out {
+		gotRoles = append(gotRoles, m.Role)
+	}
+	wantRoles := []string{"system", "user", "assistant", "tool", "tool", "user"}
+	if len(gotRoles) != len(wantRoles) {
+		t.Fatalf("role sequence = %v, want %v", gotRoles, wantRoles)
+	}
+	for i := range wantRoles {
+		if gotRoles[i] != wantRoles[i] {
+			t.Fatalf("role sequence = %v, want %v", gotRoles, wantRoles)
+		}
+	}
+
+	// Every tool_call_id must be answered before any other role intervenes.
+	assistantIdx := 2
+	if len(out[assistantIdx].ToolCalls) != 2 {
+		t.Fatalf("assistant should carry two tool calls, got %#v", out[assistantIdx].ToolCalls)
+	}
+	for offset, wantID := range []string{"call_1", "call_2"} {
+		reply := out[assistantIdx+1+offset]
+		if reply.Role != "tool" || reply.ToolCallID != wantID {
+			t.Fatalf("reply %d = %#v, want tool message for %q", offset, reply, wantID)
+		}
+	}
+	if trailing := out[len(out)-1]; trailing.Role != "user" {
+		t.Fatalf("accompanying text should trail the tool replies, got %#v", trailing)
 	}
 }
