@@ -56,6 +56,7 @@ type (
 	MessageProjection             = core.MessageProjection
 	MessageProjectionStatus       = core.MessageProjectionStatus
 	ContentBlock                  = core.ContentBlock
+	ImageSource                   = core.ImageSource
 	ToolDefinition                = core.ToolDefinition
 	ToolHandler                   = core.ToolHandler
 	ToolRegistry                  = core.ToolRegistry
@@ -90,9 +91,12 @@ type (
 
 // --- Providers: LLM + capability ports ---
 type (
-	CompletionProvider    = core.CompletionProvider
-	CompletionRequest     = core.CompletionRequest
-	CompletionResponse    = core.CompletionResponse
+	CompletionProvider       = core.CompletionProvider
+	CompletionRequest        = core.CompletionRequest
+	CompletionResponse       = core.CompletionResponse
+	StreamCompletionProvider = core.StreamCompletionProvider
+	StreamCallbacks          = core.StreamCallbacks
+
 	EmbeddingProvider     = core.EmbeddingProvider
 	SearchEngine          = core.SearchEngine
 	SearchResult          = core.SearchResult
