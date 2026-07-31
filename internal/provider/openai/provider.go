@@ -211,7 +211,7 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 
 	return &bs.CompletionResponse{
 		Content:    contentBlocks,
-		StopReason: mapStopReason(choice.FinishReason),
+		StopReason: stopReasonForBlocks(choice.FinishReason, contentBlocks),
 		Usage:      result.Usage.usage(),
 	}, nil
 }
@@ -397,7 +397,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 
 	return &bs.CompletionResponse{
 		Content:    blocks,
-		StopReason: mapStopReason(stopReason),
+		StopReason: stopReasonForBlocks(stopReason, blocks),
 		Usage:      usage,
 	}, nil
 }
@@ -408,8 +408,15 @@ func buildMessages(system string, messages []bs.Message, dropImages bool) []chat
 		out = append(out, chatMessage{Role: "system", Content: system})
 	}
 
+	answered := answeredToolUseIDs(messages)
 	for _, msg := range messages {
 		blocks := bs.NormalizeContent(msg.Content)
+		if msg.Role == "assistant" {
+			blocks = dropUnansweredToolUses(blocks, answered)
+			if len(blocks) == 0 {
+				continue
+			}
+		}
 		switch msg.Role {
 		case "user":
 			// Tool results must come first: the API rejects the request unless
@@ -431,6 +438,35 @@ func buildMessages(system string, messages []bs.Message, dropImages bool) []chat
 		}
 	}
 	return out
+}
+
+// answeredToolUseIDs collects every tool_use id the history answers. The wire
+// format requires each one to be followed by its result; a turn that ended
+// before its tools ran — a truncated call, a crash, a barge-in — leaves a call
+// that never will be, and the API then rejects the whole conversation on every
+// later turn rather than just the turn that broke. Reconciling here keeps the
+// invariant a property of the request instead of a hope about the history.
+func answeredToolUseIDs(messages []bs.Message) map[string]bool {
+	answered := map[string]bool{}
+	for _, msg := range messages {
+		for _, b := range bs.NormalizeContent(msg.Content) {
+			if b.Type == "tool_result" && b.ToolUseID != "" {
+				answered[b.ToolUseID] = true
+			}
+		}
+	}
+	return answered
+}
+
+func dropUnansweredToolUses(blocks []bs.ContentBlock, answered map[string]bool) []bs.ContentBlock {
+	kept := make([]bs.ContentBlock, 0, len(blocks))
+	for _, b := range blocks {
+		if b.Type == "tool_use" && !answered[b.ID] {
+			continue
+		}
+		kept = append(kept, b)
+	}
+	return kept
 }
 
 func buildUserMessages(blocks []bs.ContentBlock, dropImages bool) (*chatMessage, []chatMessage) {
@@ -563,6 +599,26 @@ func mapStopReason(reason string) string {
 	default:
 		return "end_turn"
 	}
+}
+
+// stopReasonForBlocks reconciles the reported finish reason with what the
+// model actually emitted. Only "tool_calls" is specified to accompany tool
+// calls, but OpenAI-compatible backends also return them under "stop" and
+// truncate one under "length". A caller that trusts the reason then ends the
+// turn with the calls already persisted and no results, and the API refuses
+// that history from then on: "an assistant message with 'tool_calls' must be
+// followed by tool messages responding to each 'tool_call_id'".
+func stopReasonForBlocks(reason string, blocks []bs.ContentBlock) string {
+	mapped := mapStopReason(reason)
+	if mapped == "tool_use" {
+		return mapped
+	}
+	for _, b := range blocks {
+		if b.Type == "tool_use" {
+			return "tool_use"
+		}
+	}
+	return mapped
 }
 
 func extractText(blocks []bs.ContentBlock) string {
