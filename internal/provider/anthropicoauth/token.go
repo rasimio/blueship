@@ -19,7 +19,14 @@ import (
 
 const (
 	// TokenURL is the Anthropic OAuth token endpoint (also used for refresh).
-	TokenURL = "https://console.anthropic.com/v1/oauth/token"
+	//
+	// Was console.anthropic.com until 2026-07-31, when that host stopped
+	// serving this path: it answers 429 rate_limit_error to a plain client
+	// and 404 not_found_error to one sending a claude-cli User-Agent, for
+	// both the authorization_code and refresh_token grants. The 429 is not a
+	// real rate limit — it is not IP-scoped and does not decay, so a refresh
+	// failure here reads as throttling when the host is simply gone.
+	TokenURL = "https://claude.ai/v1/oauth/token"
 
 	// ClientID is the public Claude Code OAuth client_id. This is the same
 	// id Claude Code's CLI uses — Anthropic publishes it as the well-known
