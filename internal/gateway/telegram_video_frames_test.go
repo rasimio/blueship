@@ -229,15 +229,41 @@ func TestExtractVideoFramesSamplesAcrossTheRecording(t *testing.T) {
 	}
 }
 
-func TestAppendVideoDescriptionTagsTheReading(t *testing.T) {
-	got := appendVideoDescription("[video transcript]\nпривет", "Человек машет рукой.")
-	if !strings.Contains(got, videoDescriptionOpen) || !strings.Contains(got, videoDescriptionClose) {
-		t.Fatalf("description must be tagged so cortex can tell it from the user's words, got %q", got)
+// Speech and picture must arrive as one artifact. Shipped as two sibling
+// blocks, the model read the transcript as the user's words and skipped the
+// description as metadata — a recording whose point was on screen came back
+// answered from the soundtrack alone.
+func TestVideoTurnBlockJoinsSpeechAndPicture(t *testing.T) {
+	got := videoTurnBlock("привет", "Человек машет рукой.")
+	if !strings.HasPrefix(got, videoBlockOpen) || !strings.HasSuffix(got, videoBlockClose) {
+		t.Fatalf("the recording must be bracketed as one block, got %q", got)
 	}
-	if !strings.Contains(got, "привет") {
-		t.Fatalf("existing text must be preserved, got %q", got)
+	if strings.Count(got, videoBlockOpen) != 1 {
+		t.Fatalf("speech and picture must share a single block, got %q", got)
 	}
-	if unchanged := appendVideoDescription("только речь", "   "); unchanged != "только речь" {
-		t.Fatalf("an empty description must not add a block, got %q", unchanged)
+	said, seen := strings.Index(got, "said: привет"), strings.Index(got, "seen: Человек машет рукой.")
+	if said < 0 || seen < 0 {
+		t.Fatalf("both halves must be present and named, got %q", got)
+	}
+	if said > seen {
+		t.Fatalf("speech should come before the picture, got %q", got)
+	}
+}
+
+// Each half stands alone: a silent recording still has a picture worth
+// describing, and a video the reader cannot see still has its speech.
+func TestVideoTurnBlockHandlesAHalfOnItsOwn(t *testing.T) {
+	if got := videoTurnBlock("", "Человек машет рукой."); strings.Contains(got, "said:") {
+		t.Fatalf("a silent recording must not claim speech, got %q", got)
+	} else if !strings.Contains(got, "seen: Человек машет рукой.") {
+		t.Fatalf("the picture must survive on its own, got %q", got)
+	}
+	if got := videoTurnBlock("только речь", "  "); strings.Contains(got, "seen:") {
+		t.Fatalf("an unread picture must not claim a description, got %q", got)
+	} else if !strings.Contains(got, "said: только речь") {
+		t.Fatalf("the speech must survive on its own, got %q", got)
+	}
+	if got := videoTurnBlock(" ", ""); got != "" {
+		t.Fatalf("nothing read means no block at all, got %q", got)
 	}
 }

@@ -73,14 +73,17 @@ The images are frames sampled in order from a single recording, each preceded by
 
 You may also be given the speech from the recording. Use it to make sense of what you see, and point out where the two meet: someone showing the thing they are talking about. Do not repeat the speech back — the assistant already has it.
 
-Do not address the user, do not offer advice, opinions or next steps, and do not guess at anything the frames do not show. If something is unreadable or ambiguous, say so plainly instead of inventing it. Write in the language of the user's message.`
+Do not address the user, do not offer advice, opinions or next steps, and do not guess at anything the frames do not show. If something is unreadable or ambiguous, say so plainly instead of inventing it.
 
-// videoDescriptionOpen/Close bracket the reading in the same tag style as the
-// image description, so cortex can tell a machine-made account of a recording
-// from the user's own words and from the transcript next to it.
+Write in the language the user is using: take it from their message, and when there is none — a recording sent with no caption — take it from the speech instead. Only fall back to English when there is neither, since your description is read alongside the rest of a conversation and a sudden switch of language reads as noise.`
+
+// videoBlockOpen/Close bracket a whole recording — speech and picture
+// together. The header names both halves because the two arriving as separate
+// tagged blocks read as an utterance plus some metadata, and the metadata is
+// the part that gets skipped.
 const (
-	videoDescriptionOpen  = "[video_description]\n"
-	videoDescriptionClose = "\n[/video_description]"
+	videoBlockOpen  = "[video — one recording the user sent: `said` is their speech, `seen` is what the camera showed]"
+	videoBlockClose = "\n[/video]"
 )
 
 // describeImages replaces image blocks with a textual reading of them produced

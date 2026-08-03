@@ -70,33 +70,34 @@ func videoTranscriptionFilename(mimeType string) string {
 	}
 }
 
-func appendVideoTranscript(text, transcript string) string {
-	transcript = strings.TrimSpace(transcript)
-	if transcript == "" {
-		return text
-	}
-	block := "[video transcript]\n" + transcript
-	if strings.TrimSpace(text) == "" {
-		return block
-	}
-	return strings.TrimSpace(text) + "\n\n" + block
-}
-
-// appendVideoDescription folds the reader's account of the frames into the
-// turn. Unlike a photo, a video leaves nothing behind — the bytes are never
-// stored and the frames are gone once the turn ends — so this text is the only
-// record that the recording showed anything at all, and it belongs in the
-// durable message rather than only in the live turn.
-func appendVideoDescription(text, description string) string {
+// videoTurnBlock renders a recording as one artifact instead of two loose
+// fragments. Shipping a `[video transcript]` and a separate machine-written
+// description side by side taught the model to read the first as the user's
+// words and the second as trailing metadata it could skip — a recording whose
+// point was on the screen came back answered from the soundtrack alone. One
+// block, with both halves named, says they are the same message.
+//
+// This text is also the only lasting record of the recording: the bytes are
+// never stored and the frames are gone when the turn ends, so it goes into the
+// durable message and not just the live turn.
+func videoTurnBlock(speech, description string) string {
+	speech = strings.TrimSpace(speech)
 	description = strings.TrimSpace(description)
-	if description == "" {
-		return text
+	if speech == "" && description == "" {
+		return ""
 	}
-	block := videoDescriptionOpen + description + videoDescriptionClose
-	if strings.TrimSpace(text) == "" {
-		return block
+	var block strings.Builder
+	block.WriteString(videoBlockOpen)
+	if speech != "" {
+		block.WriteString("\nsaid: ")
+		block.WriteString(speech)
 	}
-	return strings.TrimSpace(text) + "\n\n" + block
+	if description != "" {
+		block.WriteString("\nseen: ")
+		block.WriteString(description)
+	}
+	block.WriteString(videoBlockClose)
+	return block.String()
 }
 
 func isTranscribableVideoDocument(name, mimeType string) bool {
@@ -162,6 +163,9 @@ func (g *Gateway) readVideoIntoTurn(
 		return appendDocInline(text, "[video: could not be read]"), visibleText
 	}
 
+	// Notices for what could not be read stay their own lines: they are
+	// diagnostics about the pipeline, not part of what the user sent.
+	var speech string
 	switch {
 	case errors.Is(reading.transcriptErr, errTranscriptionUnavailable):
 		text = appendDocInline(text, "[video: audio transcription unavailable]")
@@ -171,30 +175,31 @@ func (g *Gateway) readVideoIntoTurn(
 	case strings.TrimSpace(reading.transcript) == "":
 		text = appendDocInline(text, "[video: no speech detected]")
 	default:
-		text = appendVideoTranscript(text, reading.transcript)
-		visibleText = appendVisibleTranscript(visibleText, reading.transcript)
+		speech = reading.transcript
 	}
 
+	var description string
 	if reading.framesErr != nil {
 		g.logger.Warn("video frames unavailable, reading speech only",
 			"error", reading.framesErr, "kind", kind)
-		return text, visibleText
-	}
-	description, err := g.describeVideoFrames(ctx, reading.frames, reading.transcript, userText)
-	if err != nil {
+	} else if described, describeErr := g.describeVideoFrames(
+		ctx, reading.frames, reading.transcript, userText,
+	); describeErr != nil {
 		g.logger.Error("vision: could not read video frames",
-			"frames", len(reading.frames), "kind", kind, "error", err)
+			"frames", len(reading.frames), "kind", kind, "error", describeErr)
+	} else if description = strings.TrimSpace(described); description != "" {
+		g.logger.Info("vision: video frames read into the turn as text",
+			"frames", len(reading.frames),
+			"kind", kind,
+			"model", g.deps.ModelStore.ForRouter(visionRole),
+		)
+	}
+
+	block := videoTurnBlock(speech, description)
+	if block == "" {
 		return text, visibleText
 	}
-	if strings.TrimSpace(description) == "" {
-		return text, visibleText
-	}
-	g.logger.Info("vision: video frames read into the turn as text",
-		"frames", len(reading.frames),
-		"kind", kind,
-		"model", g.deps.ModelStore.ForRouter(visionRole),
-	)
-	return appendVideoDescription(text, description), appendVideoDescription(visibleText, description)
+	return appendDocInline(text, block), appendDocInline(visibleText, block)
 }
 
 // errTranscriptionUnavailable separates "this deployment has no transcription

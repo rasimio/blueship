@@ -59,11 +59,11 @@ func TestTelegramTranscriptionInputForMOV(t *testing.T) {
 	}
 }
 
-func TestAppendVideoTranscriptKeepsCaption(t *testing.T) {
-	got := appendVideoTranscript("Посмотри и скажи, что думаешь", "Проверка микрофона.")
-	want := "Посмотри и скажи, что думаешь\n\n[video transcript]\nПроверка микрофона."
+func TestVideoTurnBlockKeepsCaption(t *testing.T) {
+	got := appendDocInline("Посмотри и скажи, что думаешь", videoTurnBlock("Проверка микрофона.", ""))
+	want := "Посмотри и скажи, что думаешь\n\n" + videoBlockOpen + "\nsaid: Проверка микрофона." + videoBlockClose
 	if got != want {
-		t.Fatalf("appendVideoTranscript() = %q, want %q", got, want)
+		t.Fatalf("video block with a caption = %q, want %q", got, want)
 	}
 }
 
