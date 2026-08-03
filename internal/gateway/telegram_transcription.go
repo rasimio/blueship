@@ -3,12 +3,14 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/rasimio/blueship/internal/transport/telegram"
 )
@@ -24,6 +26,10 @@ type telegramTranscriptionInput struct {
 	filename string
 	mimeType string
 	kind     string
+	// duration as Telegram reports it. Frame sampling needs it to turn a
+	// frame budget into a frame rate; a video arriving as a document carries
+	// no duration and gets probed from the file instead.
+	duration time.Duration
 }
 
 func telegramTranscriptionInputFor(msg *telegram.Message) (telegramTranscriptionInput, bool) {
@@ -36,6 +42,7 @@ func telegramTranscriptionInputFor(msg *telegram.Message) (telegramTranscription
 			filename: videoTranscriptionFilename(msg.Video.MimeType),
 			mimeType: msg.Video.MimeType,
 			kind:     "video",
+			duration: time.Duration(msg.Video.Duration) * time.Second,
 		}, true
 	case msg.VideoNote != nil && msg.VideoNote.FileID != "":
 		return telegramTranscriptionInput{
@@ -43,6 +50,7 @@ func telegramTranscriptionInputFor(msg *telegram.Message) (telegramTranscription
 			filename: "video-note.mp4",
 			mimeType: "video/mp4",
 			kind:     "video",
+			duration: time.Duration(msg.VideoNote.Duration) * time.Second,
 		}, true
 	default:
 		return telegramTranscriptionInput{}, false
@@ -68,6 +76,23 @@ func appendVideoTranscript(text, transcript string) string {
 		return text
 	}
 	block := "[video transcript]\n" + transcript
+	if strings.TrimSpace(text) == "" {
+		return block
+	}
+	return strings.TrimSpace(text) + "\n\n" + block
+}
+
+// appendVideoDescription folds the reader's account of the frames into the
+// turn. Unlike a photo, a video leaves nothing behind — the bytes are never
+// stored and the frames are gone once the turn ends — so this text is the only
+// record that the recording showed anything at all, and it belongs in the
+// durable message rather than only in the live turn.
+func appendVideoDescription(text, description string) string {
+	description = strings.TrimSpace(description)
+	if description == "" {
+		return text
+	}
+	block := videoDescriptionOpen + description + videoDescriptionClose
 	if strings.TrimSpace(text) == "" {
 		return block
 	}
@@ -101,17 +126,124 @@ func videoDocumentTranscriptionFilename(name, mimeType string) string {
 	}
 }
 
-func (g *Gateway) transcribeTelegramVideo(
+// readVideoIntoTurn folds one video message into the turn: the speech goes in
+// verbatim, the frames become a written description, and both land in the
+// durable copy of the message as well as the live one. Nothing else keeps a
+// record — video bytes are never stored, and the frames are gone once the turn
+// ends — so a reading that reached only the turn would be unrecoverable by the
+// next message.
+//
+// Every failure degrades instead of aborting: a recording the reader cannot
+// see is still worth its transcript, and a silent one is still worth its
+// picture.
+func (g *Gateway) readVideoIntoTurn(
 	ctx context.Context,
 	client *telegram.Client,
 	fileID string,
-) (string, error) {
+	kind string,
+	duration time.Duration,
+	text string,
+	visibleText string,
+) (string, string) {
+	// Nothing on this deployment can read the file — no transcriber and no
+	// vision row. Say so without pulling the bytes down first: a video can be
+	// gigabytes, and the download was skipped here before frames existed.
+	if (g.whisper == nil || !g.whisper.IsConfigured()) && !g.canReadVisual() {
+		return appendDocInline(text, "[video: audio transcription unavailable]"), visibleText
+	}
+
+	// The user's own caption, captured before either copy starts accumulating
+	// machine text. It is the question the reader should be answering.
+	userText := visibleText
+
+	reading, err := g.readTelegramVideo(ctx, client, fileID, duration)
+	if err != nil {
+		g.logger.Warn("failed to download video", "error", err, "kind", kind)
+		return appendDocInline(text, "[video: could not be read]"), visibleText
+	}
+
+	switch {
+	case errors.Is(reading.transcriptErr, errTranscriptionUnavailable):
+		text = appendDocInline(text, "[video: audio transcription unavailable]")
+	case reading.transcriptErr != nil:
+		g.logger.Warn("failed to transcribe video", "error", reading.transcriptErr, "kind", kind)
+		text = appendDocInline(text, "[video: audio transcription failed]")
+	case strings.TrimSpace(reading.transcript) == "":
+		text = appendDocInline(text, "[video: no speech detected]")
+	default:
+		text = appendVideoTranscript(text, reading.transcript)
+		visibleText = appendVisibleTranscript(visibleText, reading.transcript)
+	}
+
+	if reading.framesErr != nil {
+		g.logger.Warn("video frames unavailable, reading speech only",
+			"error", reading.framesErr, "kind", kind)
+		return text, visibleText
+	}
+	description, err := g.describeVideoFrames(ctx, reading.frames, reading.transcript, userText)
+	if err != nil {
+		g.logger.Error("vision: could not read video frames",
+			"frames", len(reading.frames), "kind", kind, "error", err)
+		return text, visibleText
+	}
+	if strings.TrimSpace(description) == "" {
+		return text, visibleText
+	}
+	g.logger.Info("vision: video frames read into the turn as text",
+		"frames", len(reading.frames),
+		"kind", kind,
+		"model", g.deps.ModelStore.ForRouter(visionRole),
+	)
+	return appendVideoDescription(text, description), appendVideoDescription(visibleText, description)
+}
+
+// errTranscriptionUnavailable separates "this deployment has no transcription
+// provider" from "transcribing this file failed" — the first is a
+// configuration fact worth stating plainly to the user, the second is a bug
+// worth logging.
+var errTranscriptionUnavailable = errors.New("transcription provider not configured")
+
+// videoReading is everything one downloaded video yields: the speech in it and
+// a strip of sampled frames. The two are independent — a silent clip still has
+// frames, and a clip whose video stream ffmpeg cannot decode still has speech
+// — so each carries its own error instead of one failure declaring the whole
+// message unreadable.
+type videoReading struct {
+	transcript    string
+	transcriptErr error
+	frames        []videoFrame
+	framesErr     error
+}
+
+// readTelegramVideo downloads the file once and reads both tracks from it.
+// Downloading twice would double the cost of a 100 MB screen recording for
+// nothing.
+func (g *Gateway) readTelegramVideo(
+	ctx context.Context,
+	client *telegram.Client,
+	fileID string,
+	duration time.Duration,
+) (videoReading, error) {
 	sourcePath, cleanup, err := client.DownloadFilePath(ctx, fileID, maxTelegramVideoSourceBytes)
 	if err != nil {
-		return "", err
+		return videoReading{}, err
 	}
 	defer cleanup()
-	return g.transcribeVideoFile(ctx, sourcePath)
+
+	var reading videoReading
+	if g.whisper != nil && g.whisper.IsConfigured() {
+		reading.transcript, reading.transcriptErr = g.transcribeVideoFile(ctx, sourcePath)
+	} else {
+		reading.transcriptErr = errTranscriptionUnavailable
+	}
+
+	if duration <= 0 {
+		duration, reading.framesErr = probeVideoDuration(ctx, sourcePath)
+	}
+	if reading.framesErr == nil {
+		reading.frames, reading.framesErr = extractVideoFrames(ctx, sourcePath, duration)
+	}
+	return reading, nil
 }
 
 func (g *Gateway) transcribeVideoFile(ctx context.Context, sourcePath string) (string, error) {

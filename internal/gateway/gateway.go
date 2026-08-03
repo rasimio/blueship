@@ -872,20 +872,9 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	var docImages []bs.ContentBlock
 	var rawAttachments []rawAttachment
 	if msg.Document != nil && isTranscribableVideoDocument(msg.Document.FileName, msg.Document.MimeType) {
-		if g.whisper == nil || !g.whisper.IsConfigured() {
-			text = appendDocInline(text, "[video: audio transcription unavailable]")
-		} else {
-			transcript, err := g.transcribeTelegramVideo(ctx, bi.client, msg.Document.FileID)
-			if err != nil {
-				g.logger.Warn("failed to transcribe video document", "error", err, "file", msg.Document.FileName)
-				text = appendDocInline(text, "[video: audio transcription failed]")
-			} else if strings.TrimSpace(transcript) == "" {
-				text = appendDocInline(text, "[video: no speech detected]")
-			} else {
-				text = appendVideoTranscript(text, transcript)
-				visibleText = appendVisibleTranscript(visibleText, transcript)
-			}
-		}
+		// A video sent as a file carries no duration in the update, so frame
+		// sampling has to probe the download for it.
+		text, visibleText = g.readVideoIntoTurn(ctx, bi.client, msg.Document.FileID, "document", 0, text, visibleText)
 	}
 	if msg.Document != nil && !isTranscribableVideoDocument(msg.Document.FileName, msg.Document.MimeType) {
 		data, err := bi.client.DownloadFile(ctx, msg.Document.FileID, attachment.MaxAnyBytes)
@@ -1007,20 +996,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	}
 
 	if input, ok := telegramTranscriptionInputFor(msg); ok {
-		if g.whisper == nil || !g.whisper.IsConfigured() {
-			text = appendDocInline(text, "[video: audio transcription unavailable]")
-		} else {
-			transcript, err := g.transcribeTelegramVideo(ctx, bi.client, input.fileID)
-			if err != nil {
-				g.logger.Warn("failed to transcribe video", "error", err, "kind", input.kind)
-				text = appendDocInline(text, "[video: audio transcription failed]")
-			} else if strings.TrimSpace(transcript) == "" {
-				text = appendDocInline(text, "[video: no speech detected]")
-			} else {
-				text = appendVideoTranscript(text, transcript)
-				visibleText = appendVisibleTranscript(visibleText, transcript)
-			}
-		}
+		text, visibleText = g.readVideoIntoTurn(ctx, bi.client, input.fileID, input.kind, input.duration, text, visibleText)
 	}
 
 	if msg.Voice != nil && g.whisper != nil && g.whisper.IsConfigured() {

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
@@ -62,6 +63,26 @@ const (
 	visionDescriptionClose = "\n[/image_description]"
 )
 
+// videoSystemPrompt drives the same reader over a strip of stills cut from one
+// recording rather than over separate pictures. It asks for exactly what a
+// transcript cannot carry: where the person is, what they are doing, what they
+// hold up to the camera, and what changes between the frames.
+const videoSystemPrompt = `You watch videos for another assistant that cannot see them. It will answer the user using only your description, so describe rather than answer.
+
+The images are frames sampled in order from a single recording, each preceded by its timestamp. Read them as one continuous scene, not as unrelated pictures. Say what is going on: who is there, where they are, what they are doing or showing to the camera, any text or objects they hold up, and what changes from frame to frame. If the frames are nearly identical — someone talking to the camera without moving — say that in one line instead of describing each frame in turn.
+
+You may also be given the speech from the recording. Use it to make sense of what you see, and point out where the two meet: someone showing the thing they are talking about. Do not repeat the speech back — the assistant already has it.
+
+Do not address the user, do not offer advice, opinions or next steps, and do not guess at anything the frames do not show. If something is unreadable or ambiguous, say so plainly instead of inventing it. Write in the language of the user's message.`
+
+// videoDescriptionOpen/Close bracket the reading in the same tag style as the
+// image description, so cortex can tell a machine-made account of a recording
+// from the user's own words and from the transcript next to it.
+const (
+	videoDescriptionOpen  = "[video_description]\n"
+	videoDescriptionClose = "\n[/video_description]"
+)
+
 // describeImages replaces image blocks with a textual reading of them produced
 // by the vision model, leaving the answer itself to cortex. Returns the content
 // to send and whether anything was replaced.
@@ -88,7 +109,7 @@ func (g *Gateway) describeImages(ctx context.Context, content any) (any, bool) {
 		return content, false
 	}
 
-	description, err := g.readImages(ctx, blocks, ref, model)
+	description, err := g.readVisual(ctx, blocks, visionSystemPrompt, ref, model)
 	if err != nil {
 		g.logger.Error("vision: could not read images, passing them through",
 			"model", model, "error", err)
@@ -101,10 +122,11 @@ func (g *Gateway) describeImages(ctx context.Context, content any) (any, bool) {
 	return replaceImagesWithDescription(blocks, description), true
 }
 
-// readImages asks the vision model to read every image in the turn in one call,
-// so it can describe them in relation to each other rather than one blind
-// caption at a time.
-func (g *Gateway) readImages(ctx context.Context, blocks []bs.ContentBlock, ref bs.ModelRef, model string) (string, error) {
+// readVisual asks the vision model to read every image in one call, so it can
+// describe them in relation to each other rather than one blind caption at a
+// time. The system prompt is the caller's: the same model reads a photo album
+// and a strip of video frames, but it is told a different thing about them.
+func (g *Gateway) readVisual(ctx context.Context, blocks []bs.ContentBlock, system string, ref bs.ModelRef, model string) (string, error) {
 	prompt := make([]bs.ContentBlock, 0, len(blocks))
 	for _, b := range blocks {
 		if b.Type == "image" || b.Type == "text" {
@@ -120,7 +142,7 @@ func (g *Gateway) readImages(ctx context.Context, blocks []bs.ContentBlock, ref 
 		Model:         model,
 		MaxTokens:     maxTokens,
 		ContextWindow: ref.ContextWindow,
-		System:        visionSystemPrompt,
+		System:        system,
 		Messages:      []bs.Message{{Role: "user", Content: prompt}},
 		// Reasoning controls come from the vision row alone; a tier must never
 		// inherit another tier's, which has broken chat before with a 400.
@@ -162,6 +184,67 @@ func replaceImagesWithDescription(blocks []bs.ContentBlock, description string) 
 		placed = true
 	}
 	return out
+}
+
+// describeVideoFrames reads a sampled recording into text, using the same
+// model row as images: one reader, one place to retune it. Returns an empty
+// description when no vision row is configured, which leaves the turn with the
+// transcript alone — the behaviour before video had a picture at all.
+//
+// The description is query-conditioned like the image one: the user's own
+// words go to the reader, so "что у меня на фоне" gets answered from the
+// background rather than from whoever is talking in the foreground.
+func (g *Gateway) describeVideoFrames(ctx context.Context, frames []videoFrame, transcript, userText string) (string, error) {
+	if len(frames) == 0 || !g.canReadVisual() {
+		return "", nil
+	}
+	ref := g.deps.ModelStore.Get(visionRole)
+	model := g.deps.ModelStore.ForRouter(visionRole)
+	return g.readVisual(ctx, videoFramePrompt(frames, transcript, userText), videoSystemPrompt, ref, model)
+}
+
+// canReadVisual reports whether a model row is configured to read pixels on
+// behalf of a cortex that cannot. Without one, images pass through untouched
+// and frames are not sampled at all.
+func (g *Gateway) canReadVisual() bool {
+	if g.deps == nil || g.deps.ModelStore == nil || g.provider == nil {
+		return false
+	}
+	return g.deps.ModelStore.Get(visionRole).Name != "" && g.deps.ModelStore.ForRouter(visionRole) != ""
+}
+
+// videoFramePrompt lays the recording out for the reader: the user's question
+// first, then the speech, then the stills each behind their own timestamp.
+// Interleaving the timestamps as text blocks is what lets the reader talk
+// about when something happened instead of counting images.
+func videoFramePrompt(frames []videoFrame, transcript, userText string) []bs.ContentBlock {
+	blocks := make([]bs.ContentBlock, 0, len(frames)*2+3)
+	if text := strings.TrimSpace(userText); text != "" {
+		blocks = append(blocks, bs.ContentBlock{Type: "text", Text: "[user message]\n" + text})
+	}
+	if speech := strings.TrimSpace(transcript); speech != "" {
+		blocks = append(blocks, bs.ContentBlock{Type: "text", Text: "[speech in the recording]\n" + speech})
+	}
+	blocks = append(blocks, bs.ContentBlock{
+		Type: "text",
+		Text: fmt.Sprintf("[%d frames from one recording follow, in order]", len(frames)),
+	})
+	for _, frame := range frames {
+		blocks = append(blocks,
+			bs.ContentBlock{Type: "text", Text: formatFrameOffset(frame.offset)},
+			bs.ContentBlock{Type: "image", Source: &bs.ImageSource{
+				Type:      "base64",
+				MediaType: "image/jpeg",
+				Data:      base64.StdEncoding.EncodeToString(frame.jpeg),
+			}},
+		)
+	}
+	return blocks
+}
+
+func formatFrameOffset(offset time.Duration) string {
+	seconds := int(offset.Round(time.Second).Seconds())
+	return fmt.Sprintf("[%02d:%02d]", seconds/60, seconds%60)
 }
 
 func (g *Gateway) prepareCortexTurn(
