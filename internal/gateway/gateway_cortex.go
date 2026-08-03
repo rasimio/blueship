@@ -75,7 +75,7 @@ You may also be given the speech from the recording. Use it to make sense of wha
 
 Do not address the user, do not offer advice, opinions or next steps, and do not guess at anything the frames do not show. If something is unreadable or ambiguous, say so plainly instead of inventing it.
 
-Write in the language the user is using: take it from their message, and when there is none — a recording sent with no caption — take it from the speech instead. Only fall back to English when there is neither, since your description is read alongside the rest of a conversation and a sudden switch of language reads as noise.`
+Write in the language given by [user language], unless the user's own message is written in another language — then match their message. Fall back to English only when neither is given. Never infer the language from the speech: a recording whose whole soundtrack is one word, a product name or somebody's name, says nothing about what language the conversation is in, and a description that switches language reads as machine noise to whoever gets it next.`
 
 // videoBlockOpen/Close bracket a whole recording — speech and picture
 // together. The header names both halves because the two arriving as separate
@@ -197,13 +197,13 @@ func replaceImagesWithDescription(blocks []bs.ContentBlock, description string) 
 // The description is query-conditioned like the image one: the user's own
 // words go to the reader, so "что у меня на фоне" gets answered from the
 // background rather than from whoever is talking in the foreground.
-func (g *Gateway) describeVideoFrames(ctx context.Context, frames []videoFrame, transcript, userText string) (string, error) {
+func (g *Gateway) describeVideoFrames(ctx context.Context, frames []videoFrame, transcript, userText, language string) (string, error) {
 	if len(frames) == 0 || !g.canReadVisual() {
 		return "", nil
 	}
 	ref := g.deps.ModelStore.Get(visionRole)
 	model := g.deps.ModelStore.ForRouter(visionRole)
-	return g.readVisual(ctx, videoFramePrompt(frames, transcript, userText), videoSystemPrompt, ref, model)
+	return g.readVisual(ctx, videoFramePrompt(frames, transcript, userText, language), videoSystemPrompt, ref, model)
 }
 
 // canReadVisual reports whether a model row is configured to read pixels on
@@ -220,8 +220,11 @@ func (g *Gateway) canReadVisual() bool {
 // first, then the speech, then the stills each behind their own timestamp.
 // Interleaving the timestamps as text blocks is what lets the reader talk
 // about when something happened instead of counting images.
-func videoFramePrompt(frames []videoFrame, transcript, userText string) []bs.ContentBlock {
-	blocks := make([]bs.ContentBlock, 0, len(frames)*2+3)
+func videoFramePrompt(frames []videoFrame, transcript, userText, language string) []bs.ContentBlock {
+	blocks := make([]bs.ContentBlock, 0, len(frames)*2+4)
+	if tag := strings.TrimSpace(language); tag != "" {
+		blocks = append(blocks, bs.ContentBlock{Type: "text", Text: "[user language] " + tag})
+	}
 	if text := strings.TrimSpace(userText); text != "" {
 		blocks = append(blocks, bs.ContentBlock{Type: "text", Text: "[user message]\n" + text})
 	}

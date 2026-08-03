@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/rasimio/blueship/internal/transport/telegram"
 )
@@ -41,6 +42,25 @@ func TestTelegramTranscriptionInputForVideoNote(t *testing.T) {
 	}
 	if input.filename != "video-note.mp4" {
 		t.Fatalf("filename = %q, want video-note.mp4", input.filename)
+	}
+}
+
+// Frame sampling needs the duration to pick a frame rate, and the reader needs
+// the sender's language to describe the picture in it. Both ride on the same
+// update and are silently zero if the mapping drops them.
+func TestTelegramTranscriptionInputCarriesDurationAndLanguage(t *testing.T) {
+	input, ok := telegramTranscriptionInputFor(&telegram.Message{
+		VideoNote: &telegram.VideoNote{FileID: "round-video", Duration: 12},
+		From:      &telegram.User{ID: 42, LanguageCode: "ru"},
+	})
+	if !ok {
+		t.Fatal("telegramTranscriptionInputFor() did not recognize video note")
+	}
+	if input.duration != 12*time.Second {
+		t.Fatalf("duration = %v, want 12s", input.duration)
+	}
+	if input.language != "ru" {
+		t.Fatalf("language = %q, want ru", input.language)
 	}
 }
 

@@ -874,7 +874,11 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	if msg.Document != nil && isTranscribableVideoDocument(msg.Document.FileName, msg.Document.MimeType) {
 		// A video sent as a file carries no duration in the update, so frame
 		// sampling has to probe the download for it.
-		text, visibleText = g.readVideoIntoTurn(ctx, bi.client, msg.Document.FileID, "document", 0, text, visibleText)
+		text, visibleText = g.readVideoIntoTurn(ctx, bi.client, telegramTranscriptionInput{
+			fileID:   msg.Document.FileID,
+			kind:     "document",
+			language: senderLanguage(msg),
+		}, text, visibleText)
 	}
 	if msg.Document != nil && !isTranscribableVideoDocument(msg.Document.FileName, msg.Document.MimeType) {
 		data, err := bi.client.DownloadFile(ctx, msg.Document.FileID, attachment.MaxAnyBytes)
@@ -996,7 +1000,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	}
 
 	if input, ok := telegramTranscriptionInputFor(msg); ok {
-		text, visibleText = g.readVideoIntoTurn(ctx, bi.client, input.fileID, input.kind, input.duration, text, visibleText)
+		text, visibleText = g.readVideoIntoTurn(ctx, bi.client, input, text, visibleText)
 	}
 
 	if msg.Voice != nil && g.whisper != nil && g.whisper.IsConfigured() {

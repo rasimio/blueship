@@ -30,6 +30,9 @@ type telegramTranscriptionInput struct {
 	// frame budget into a frame rate; a video arriving as a document carries
 	// no duration and gets probed from the file instead.
 	duration time.Duration
+	// language is the sender's client language, used to write the reading of
+	// the picture in the language they are actually speaking.
+	language string
 }
 
 func telegramTranscriptionInputFor(msg *telegram.Message) (telegramTranscriptionInput, bool) {
@@ -43,6 +46,7 @@ func telegramTranscriptionInputFor(msg *telegram.Message) (telegramTranscription
 			mimeType: msg.Video.MimeType,
 			kind:     "video",
 			duration: time.Duration(msg.Video.Duration) * time.Second,
+			language: senderLanguage(msg),
 		}, true
 	case msg.VideoNote != nil && msg.VideoNote.FileID != "":
 		return telegramTranscriptionInput{
@@ -51,10 +55,18 @@ func telegramTranscriptionInputFor(msg *telegram.Message) (telegramTranscription
 			mimeType: "video/mp4",
 			kind:     "video",
 			duration: time.Duration(msg.VideoNote.Duration) * time.Second,
+			language: senderLanguage(msg),
 		}, true
 	default:
 		return telegramTranscriptionInput{}, false
 	}
+}
+
+func senderLanguage(msg *telegram.Message) string {
+	if msg == nil || msg.From == nil {
+		return ""
+	}
+	return strings.TrimSpace(msg.From.LanguageCode)
 }
 
 func videoTranscriptionFilename(mimeType string) string {
@@ -140,12 +152,11 @@ func videoDocumentTranscriptionFilename(name, mimeType string) string {
 func (g *Gateway) readVideoIntoTurn(
 	ctx context.Context,
 	client *telegram.Client,
-	fileID string,
-	kind string,
-	duration time.Duration,
+	in telegramTranscriptionInput,
 	text string,
 	visibleText string,
 ) (string, string) {
+	fileID, kind := in.fileID, in.kind
 	// Nothing on this deployment can read the file — no transcriber and no
 	// vision row. Say so without pulling the bytes down first: a video can be
 	// gigabytes, and the download was skipped here before frames existed.
@@ -157,7 +168,7 @@ func (g *Gateway) readVideoIntoTurn(
 	// machine text. It is the question the reader should be answering.
 	userText := visibleText
 
-	reading, err := g.readTelegramVideo(ctx, client, fileID, duration)
+	reading, err := g.readTelegramVideo(ctx, client, fileID, in.duration)
 	if err != nil {
 		g.logger.Warn("failed to download video", "error", err, "kind", kind)
 		return appendDocInline(text, "[video: could not be read]"), visibleText
@@ -183,7 +194,7 @@ func (g *Gateway) readVideoIntoTurn(
 		g.logger.Warn("video frames unavailable, reading speech only",
 			"error", reading.framesErr, "kind", kind)
 	} else if described, describeErr := g.describeVideoFrames(
-		ctx, reading.frames, reading.transcript, userText,
+		ctx, reading.frames, reading.transcript, userText, in.language,
 	); describeErr != nil {
 		g.logger.Error("vision: could not read video frames",
 			"frames", len(reading.frames), "kind", kind, "error", describeErr)

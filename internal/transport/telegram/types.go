@@ -74,6 +74,11 @@ type User struct {
 	ID        int64  `json:"id"`
 	FirstName string `json:"first_name"`
 	Username  string `json:"username,omitempty"`
+	// LanguageCode is the IETF tag of the sender's Telegram client
+	// ("ru", "en-GB"). It is the only deterministic language signal an
+	// inbound update carries — a caption may be absent and speech may be a
+	// single word that looks like a language it isn't.
+	LanguageCode string `json:"language_code,omitempty"`
 }
 
 // Chat represents a Telegram chat.

@@ -57,23 +57,26 @@ func TestVideoFramePromptOrdersFramesBehindTimestamps(t *testing.T) {
 		{offset: 0, jpeg: []byte("first")},
 		{offset: 5 * time.Second, jpeg: []byte("second")},
 	}
-	blocks := videoFramePrompt(frames, "и вот тут смотри", "что я показываю?")
+	blocks := videoFramePrompt(frames, "и вот тут смотри", "что я показываю?", "ru")
 
-	if len(blocks) != 3+len(frames)*2 {
+	if len(blocks) != 4+len(frames)*2 {
 		t.Fatalf("blocks = %d, want context + header + one text/image pair per frame: %#v", len(blocks), blocks)
 	}
-	if !strings.Contains(blocks[0].Text, "что я показываю?") {
-		t.Fatalf("the user's question must come first, got %#v", blocks[0])
+	if !strings.Contains(blocks[0].Text, "ru") {
+		t.Fatalf("the reader must be told the user's language, got %#v", blocks[0])
 	}
-	if !strings.Contains(blocks[1].Text, "и вот тут смотри") {
-		t.Fatalf("the speech must reach the reader, got %#v", blocks[1])
+	if !strings.Contains(blocks[1].Text, "что я показываю?") {
+		t.Fatalf("the user's question must reach the reader, got %#v", blocks[1])
 	}
-	if !strings.Contains(blocks[2].Text, "2 frames") {
-		t.Fatalf("the reader must be told how many frames follow, got %#v", blocks[2])
+	if !strings.Contains(blocks[2].Text, "и вот тут смотри") {
+		t.Fatalf("the speech must reach the reader, got %#v", blocks[2])
+	}
+	if !strings.Contains(blocks[3].Text, "2 frames") {
+		t.Fatalf("the reader must be told how many frames follow, got %#v", blocks[3])
 	}
 
 	for i, frame := range frames {
-		label, image := blocks[3+i*2], blocks[4+i*2]
+		label, image := blocks[4+i*2], blocks[5+i*2]
 		if label.Type != "text" || label.Text != formatFrameOffset(frame.offset) {
 			t.Fatalf("frame %d label = %#v, want its timestamp", i, label)
 		}
@@ -89,10 +92,21 @@ func TestVideoFramePromptOrdersFramesBehindTimestamps(t *testing.T) {
 	}
 }
 
+// The language must come from the sender's client and never be inferred from
+// the speech: a video note whose entire soundtrack was one product name —
+// "Gratimo" — once convinced the reader the conversation was Spanish, and the
+// description came back in Spanish in the middle of a Russian chat.
+func TestVideoFramePromptCarriesTheSendersLanguage(t *testing.T) {
+	blocks := videoFramePrompt([]videoFrame{{jpeg: []byte("a")}}, "Gratimo", "", "ru")
+	if !strings.Contains(blocks[0].Text, "[user language] ru") {
+		t.Fatalf("the sender's language must lead the prompt, got %#v", blocks[0])
+	}
+}
+
 // A video note with no caption and no speech is the common case; it must still
 // produce a usable prompt rather than empty context blocks.
 func TestVideoFramePromptOmitsMissingContext(t *testing.T) {
-	blocks := videoFramePrompt([]videoFrame{{jpeg: []byte("only")}}, "  ", "")
+	blocks := videoFramePrompt([]videoFrame{{jpeg: []byte("only")}}, "  ", "", "")
 	if len(blocks) != 3 {
 		t.Fatalf("blocks = %d, want header + one pair: %#v", len(blocks), blocks)
 	}
@@ -112,6 +126,7 @@ func TestDescribeVideoFramesUsesTheVideoPrompt(t *testing.T) {
 		[]videoFrame{{offset: 0, jpeg: []byte("a")}, {offset: 5 * time.Second, jpeg: []byte("b")}},
 		"смотри что нашёл",
 		"что там у меня?",
+		"ru",
 	)
 	if err != nil {
 		t.Fatalf("describeVideoFrames() error = %v", err)
@@ -148,7 +163,7 @@ func TestDescribeVideoFramesWithoutVisionRowStaysSilent(t *testing.T) {
 	refs := map[string]bs.ModelRef{"cortex": {Provider: "deepseek", Name: "deepseek-v4-flash"}}
 	g := visionGateway(refs, reader)
 
-	description, err := g.describeVideoFrames(context.Background(), []videoFrame{{jpeg: []byte("a")}}, "", "")
+	description, err := g.describeVideoFrames(context.Background(), []videoFrame{{jpeg: []byte("a")}}, "", "", "ru")
 	if err != nil {
 		t.Fatalf("describeVideoFrames() error = %v", err)
 	}
@@ -164,7 +179,7 @@ func TestDescribeVideoFramesWithoutFramesStaysSilent(t *testing.T) {
 	reader := &stubReader{reply: "should not be called"}
 	g := visionGateway(visionRefs(), reader)
 
-	description, err := g.describeVideoFrames(context.Background(), nil, "речь есть, картинки нет", "")
+	description, err := g.describeVideoFrames(context.Background(), nil, "речь есть, картинки нет", "", "ru")
 	if err != nil {
 		t.Fatalf("describeVideoFrames() error = %v", err)
 	}

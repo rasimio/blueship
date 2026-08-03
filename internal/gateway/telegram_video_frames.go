@@ -23,7 +23,13 @@ const (
 	videoFrameSecondsPerFrame = 5
 	videoFrameMinCount        = 3
 	videoFrameMaxCount        = 8
-	videoFrameMaxEdgePixels   = 448
+	// videoFrameMaxEdgePixels only ever shrinks a frame, and it is set high
+	// enough to leave a video note untouched: a Telegram circle is 384-640px
+	// square, and the thing people film with one is usually something held up
+	// to the camera with writing on it. Downscaling those to a thumbnail cost
+	// the reader the text it was being asked to read. A screen recording still
+	// gets cut down from 1080p.
+	videoFrameMaxEdgePixels = 1024
 )
 
 // videoFrame is one sampled still together with the position it was taken
