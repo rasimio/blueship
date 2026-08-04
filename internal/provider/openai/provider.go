@@ -437,7 +437,81 @@ func buildMessages(system string, messages []bs.Message, dropImages bool) []chat
 			}
 		}
 	}
+	return pruneOrphanToolCalls(out)
+}
+
+// pruneOrphanToolCalls drops every tool_call whose reply is not sitting where
+// the backend looks for it, and every tool reply whose call is not there. The
+// API checks position, not presence: a call must be answered by the tool
+// message directly behind its own, one per call, in order — anything else fails
+// the whole request with "insufficient tool messages following tool_calls
+// message", losing the turn.
+//
+// The dialog arrives that way for ordinary reasons, not corruption. A message
+// that lands while a tool is still running separates the call from its result.
+// A history window trimmed to a token budget opens or closes mid-round, leaving
+// a call whose reply was cut or a reply whose call was. And a backend that
+// streams a call without an id gives both halves an empty tool_call_id, so the
+// pair can never be matched at all.
+//
+// Dropping loses the record that a tool ran, which is the cheaper loss: the
+// turn still happens, and the results usually survive as text elsewhere in the
+// answer.
+func pruneOrphanToolCalls(msgs []chatMessage) []chatMessage {
+	keepReply := make([]bool, len(msgs))
+	keptCalls := make([][]toolCall, len(msgs))
+
+	for i, msg := range msgs {
+		if msg.Role == "tool" || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		for k, call := range msg.ToolCalls {
+			reply := i + 1 + k
+			if call.ID == "" ||
+				reply >= len(msgs) ||
+				msgs[reply].Role != "tool" ||
+				msgs[reply].ToolCallID != call.ID {
+				// Once the run breaks, every later call is out of position
+				// too — their replies could only have followed this one.
+				break
+			}
+			keptCalls[i] = append(keptCalls[i], call)
+			keepReply[reply] = true
+		}
+	}
+
+	out := make([]chatMessage, 0, len(msgs))
+	for i, msg := range msgs {
+		if msg.Role == "tool" {
+			if keepReply[i] {
+				out = append(out, msg)
+			}
+			continue
+		}
+		if len(msg.ToolCalls) > 0 {
+			msg.ToolCalls = keptCalls[i]
+			// An assistant turn that was nothing but a dropped call has
+			// nothing left to say.
+			if len(msg.ToolCalls) == 0 && isBlankContent(msg.Content) {
+				continue
+			}
+		}
+		out = append(out, msg)
+	}
 	return out
+}
+
+func isBlankContent(content any) bool {
+	switch v := content.(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(v) == ""
+	case []map[string]any:
+		return len(v) == 0
+	default:
+		return false
+	}
 }
 
 // answeredToolUseIDs collects every tool_use id the history answers. The wire
