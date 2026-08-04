@@ -605,7 +605,19 @@ func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID) (st
 	if err != nil {
 		return "", err
 	}
-	return strings.Join([]string{preamble, persona, agents}, "\n\n"), nil
+	// Persona goes last, after the platform layers, for two reasons.
+	//
+	// Attention: between a short preamble and a long operating manual it sat in
+	// the weakest part of the prompt, with the voice buried under thousands of
+	// tokens of tool discipline. Trailing the system prompt puts it where the
+	// model reads it best.
+	//
+	// Cache: the platform layers are byte-identical for every soul while the
+	// persona is the only per-soul part, so this order makes preamble+agents a
+	// prefix all souls share and warm for each other, instead of diverging a
+	// thousand characters in. (Worth little until the [current_datetime] stamp
+	// stops leading the prompt and invalidating the prefix at token zero.)
+	return strings.Join([]string{preamble, agents, persona}, "\n\n"), nil
 }
 
 // cachedPersona wraps the ResolveSoulPersona hook with a short TTL cache:
