@@ -51,7 +51,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	tokenBudget := budgetDecision.Budget
 	compactSummary := cfg.CompactSummary
 	toolObservationContext := a.recentToolObservationContext(ctx, cfg)
-	turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, tools, toolObservationContext)
+	turnContext := withCurrentDatetime(buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, tools, toolObservationContext), cfg.TurnNow)
 	dialogDecision := effectiveDialogBudgetDecision(tokenBudget, cfg.SystemPrompt, compactSummary, turnContext, tools)
 	dialogBudget := dialogBudgetAfterCurrentExpansion(
 		dialogDecision.DialogBudget, cfg, userMessage,
@@ -94,7 +94,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		if forceFinal {
 			turnTools = nil
 		}
-		turnContext := buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, turnTools, feltTime, toolObservationContext)
+		turnContext := withCurrentDatetime(buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, turnTools, feltTime, toolObservationContext), cfg.TurnNow)
 		messages = withTurnContext(messages, ctxAnchor, turnContext)
 		if forceFinal && len(messages) > 0 {
 			// After the turn context, so the directive stays the last thing read.

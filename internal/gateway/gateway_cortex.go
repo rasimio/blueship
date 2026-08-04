@@ -320,7 +320,12 @@ func (g *Gateway) prepareCortexTurnWithRegistry(
 		now:      now,
 		config: agent.RunConfig{
 			SessionID:           sess.ID,
-			SystemPrompt:        fmt.Sprintf("[current_datetime: %s]\n\n%s", now.Format("2006-01-02 15:04 MST (Monday)"), soulPrompt),
+			// No clock here. The stamp changes every minute and this is the head
+			// of the cacheable prefix, so it used to invalidate the entire
+			// prompt on every message; the loop now carries it in the turn
+			// context, which is rebuilt each message anyway. TurnNow below is
+			// what it renders from.
+			SystemPrompt:        soulPrompt,
 			CompactSummary:      derefString(sess.CompactSummary),
 			Model:               g.cortexModel(),
 			MaxTokens:           cortexMaxTokens,

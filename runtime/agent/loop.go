@@ -470,6 +470,38 @@ func effectiveSystemPrompt(systemPrompt, compactSummary string) string {
 	return effective
 }
 
+// dialogDatetimeFormat is how the current time is stamped for the model. Kept
+// identical to the wording handlers used when they prepended it themselves, so
+// the move changes where it is read, not what it says.
+const dialogDatetimeFormat = "2006-01-02 15:04 MST (Monday)"
+
+// withCurrentDatetime puts the clock at the head of the turn context.
+//
+// It used to lead the system prompt, which made it the single most expensive
+// token in the request: it changes every minute and sat at position zero, so
+// every new message invalidated the entire cached prefix behind it — system
+// prompt, tools and the whole dialog. Measured on production before the move:
+// 15.6% cache hit rate with 93 of 112 calls completely cold, while turns
+// *within* one interaction — where the stamp is frozen — ran at 92-95%.
+//
+// The turn context is rebuilt every message anyway, so carrying the clock there
+// costs nothing. It cannot simply be dropped: feltTimeContext stays empty
+// during an active conversation, which leaves this stamp as the model's only
+// clock most of the time.
+//
+// A zero time means the caller does not stamp turns (the handlers that build
+// their own system prompt still prepend their own), and nothing is added.
+func withCurrentDatetime(turnContext string, now time.Time) string {
+	if now.IsZero() {
+		return turnContext
+	}
+	stamp := "[current_datetime: " + now.Format(dialogDatetimeFormat) + "]"
+	if strings.TrimSpace(turnContext) == "" {
+		return stamp
+	}
+	return stamp + "\n\n" + turnContext
+}
+
 // turnContextEnvelope wraps the per-turn context in the same delimiters it
 // carried when it lived in the system prompt, so relocating it changes where
 // the model reads it, not what it reads.
