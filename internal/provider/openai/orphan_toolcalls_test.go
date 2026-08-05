@@ -78,6 +78,110 @@ func TestProviderReportsToolUseWhenTheModelCallsUnderAPlainStop(t *testing.T) {
 	}
 }
 
+// assertToolInvariant checks what the backend checks: every tool_call is
+// answered by the tool message in the matching position right behind its
+// assistant message, and no tool message answers a call that is not there.
+func assertToolInvariant(t *testing.T, msgs []chatMessage) {
+	t.Helper()
+	for i, msg := range msgs {
+		if msg.Role == "tool" {
+			continue
+		}
+		for offset, call := range msg.ToolCalls {
+			if call.ID == "" {
+				t.Fatalf("message %d carries a call with no id: %+v", i, call)
+			}
+			reply := i + 1 + offset
+			if reply >= len(msgs) || msgs[reply].Role != "tool" || msgs[reply].ToolCallID != call.ID {
+				t.Fatalf("call %q at message %d is not answered in position %d: %+v", call.ID, i, reply, msgs)
+			}
+		}
+	}
+	for i, msg := range msgs {
+		if msg.Role != "tool" {
+			continue
+		}
+		answers := false
+		for back := i - 1; back >= 0 && !answers; back-- {
+			if msgs[back].Role == "tool" {
+				continue
+			}
+			for _, call := range msgs[back].ToolCalls {
+				if call.ID == msg.ToolCallID {
+					answers = true
+				}
+			}
+			break
+		}
+		if !answers {
+			t.Fatalf("tool message %d answers no preceding call: %+v", i, msg)
+		}
+	}
+}
+
+// A message landing between a call and its results — a barge-in, a turn the
+// window reassembled out of order — leaves the call answered somewhere but not
+// where the backend looks. Position is the invariant, not mere presence.
+func TestBuildMessagesDropsACallItsReplyNoLongerFollows(t *testing.T) {
+	out := buildMessages("", []bs.Message{
+		{Role: "user", Content: "вопрос"},
+		{Role: "assistant", Content: []bs.ContentBlock{
+			{Type: "tool_use", ID: "call_1", Name: "search"},
+		}},
+		{Role: "user", Content: "а, забудь"},
+		{Role: "user", Content: []bs.ContentBlock{
+			{Type: "tool_result", ToolUseID: "call_1", Content: "нашлось"},
+		}},
+	}, false)
+
+	assertToolInvariant(t, out)
+	for _, m := range out {
+		if len(m.ToolCalls) > 0 || m.Role == "tool" {
+			t.Fatalf("the separated pair should have gone entirely, got %+v", m)
+		}
+	}
+}
+
+// A window that opens mid-round starts on results whose call was left behind.
+// The backend rejects a tool message that answers nothing just as hard as an
+// unanswered call.
+func TestBuildMessagesDropsARepliesWithoutTheirCall(t *testing.T) {
+	out := buildMessages("", []bs.Message{
+		{Role: "user", Content: []bs.ContentBlock{
+			{Type: "tool_result", ToolUseID: "call_gone", Content: "нашлось"},
+			{Type: "text", Text: "и что дальше?"},
+		}},
+	}, false)
+
+	assertToolInvariant(t, out)
+	if len(out) != 1 || out[0].Role != "user" {
+		t.Fatalf("only the user text should survive, got %+v", out)
+	}
+}
+
+// A backend that streams a call without an id gives both sides an empty
+// tool_call_id, which serializes away entirely — the assistant then carries a
+// call no tool message can ever address.
+func TestBuildMessagesDropsAnIDLessCallAndItsReply(t *testing.T) {
+	out := buildMessages("", []bs.Message{
+		{Role: "user", Content: "вопрос"},
+		{Role: "assistant", Content: []bs.ContentBlock{
+			{Type: "text", Text: "смотрю"},
+			{Type: "tool_use", Name: "search"},
+		}},
+		{Role: "user", Content: []bs.ContentBlock{
+			{Type: "tool_result", Name: "search", Content: "нашлось"},
+		}},
+	}, false)
+
+	assertToolInvariant(t, out)
+	for _, m := range out {
+		if m.Role == "tool" {
+			t.Fatalf("an unaddressable reply survived: %+v", m)
+		}
+	}
+}
+
 func TestStopReasonFollowsTheBlocksNotTheLabel(t *testing.T) {
 	withCall := []bs.ContentBlock{{Type: "text", Text: "ок"}, {Type: "tool_use", ID: "c1", Name: "search"}}
 	for _, reason := range []string{"stop", "length", ""} {
