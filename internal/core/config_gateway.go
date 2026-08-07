@@ -103,6 +103,13 @@ type GatewayConfig struct {
 	// turn. Nil falls back to the legacy replyUnpaired greeting.
 	BotOnboarding BotOnboarding `yaml:"-" json:"-"`
 
+	// PersonaEditor, when set, lets an onboarded user re-run the persona
+	// wizard on their existing soul (the /persona command, and the setup
+	// offer instant mode makes after a few turns). Nil disables both —
+	// the command reports that editing is unavailable rather than
+	// silently doing nothing.
+	PersonaEditor BotPersonaEditor `yaml:"-" json:"-"`
+
 	// DeeplinkLogin and DeeplinkLink are Telegram auth/account-linking hooks.
 	// They are separate from BotOnboarding so a paid host can disable chat-side
 	// account creation while preserving browser login and existing-account link.
@@ -112,6 +119,12 @@ type GatewayConfig struct {
 	// Onboarding holds the chat-native onboarding UI copy. Generic English
 	// defaults are filled by ApplyDefaults; a host overrides to brand it.
 	Onboarding OnboardingMessages `yaml:"-" json:"-"`
+
+	// OnboardingFlow selects which shape that onboarding takes and, for
+	// the instant shape, supplies the persona a chat starts with. See
+	// OnboardingFlow. Zero value means the wizard, which is what every
+	// host that predates this field already gets.
+	OnboardingFlow OnboardingFlow `yaml:"-" json:"-"`
 
 	// ResolveUserBotID maps a (user, Telegram chat) to the bot id that should
 	// deliver to them, for hosts that run multiple bots per user. The active

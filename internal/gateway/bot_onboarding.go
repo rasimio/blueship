@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/google/uuid"
@@ -13,13 +14,16 @@ import (
 )
 
 // Inline Telegram-native onboarding FSM. Engages when an inbound
-// message lands on a chat with no vaelum.user_identities row and the
-// host has wired Deps.BotOnboarding. The flow mirrors the web wizard
-// at vaelum-front/src/app/onboarding/page.tsx: name → voice → traits +
-// description → confirm. The host's CompleteOnboarding hook reuses
-// the same onboarding.UseCase.Complete the web endpoint invokes so
-// bot-born and web-born tenants land in the same vaelum.souls row
-// shape.
+// message lands on a chat the host cannot resolve to an identity and
+// Deps.BotOnboarding is wired. Five steps: name → voice → traits →
+// description → confirm, with the persona vocabulary supplied by the
+// host through GatewayConfig.OnboardingFlow — the framework ships none
+// of its own, because the ids it collects are persisted on the host's
+// rows and read back by the host's other surfaces.
+//
+// Instant mode (OnboardingFlow.Mode) skips the questions entirely and
+// mints the account from the flow's default persona, leaving the same
+// five steps reachable later through /persona.
 //
 // Step names match the BotOnboarding contract:
 //
@@ -43,20 +47,26 @@ import (
 // step's prompt without touching state — the user can always recover
 // by typing /start again.
 //
-// All UI strings are hardcoded in this file because they are not LLM
-// prompts but Telegram UI copy (the "no hardcoded text in Go" rule
-// applies to model-facing prompts; user-facing chrome stays here so a
-// translation pass is a code change, not a DB migration).
+// No user-facing string is written in this file. Every line the user
+// reads comes from GatewayConfig.Onboarding (copy) or OnboardingFlow
+// (palette and opening moves), both host-supplied — the framework has
+// no language of its own.
 
 const (
-	// FSM step names. Persisted verbatim in
-	// vaelum.bot_onboarding_state.step; the gateway dispatches on them.
+	// FSM step names, persisted verbatim by the host's GetState /
+	// AdvanceStep implementation; the gateway dispatches on them.
 	onbStepStart          = "start"
 	onbStepAskName        = "ask_name"
 	onbStepAskVoice       = "ask_voice"
 	onbStepAskTraits      = "ask_traits"
 	onbStepAskDescription = "ask_description"
 	onbStepConfirm        = "confirm"
+
+	// onbStepOfferPending parks an instant-mode account between signup
+	// and the deferred persona offer. It is the one step that belongs to
+	// an already-onboarded user, and the one step that does not consume
+	// the message it sees — the row exists only to carry a turn count.
+	onbStepOfferPending = "offer_pending"
 
 	// callback_data prefixes / tokens. Kept short — Telegram caps
 	// callback_data at 64 bytes so "tr:mischievous" leaves plenty of
@@ -66,105 +76,120 @@ const (
 	onbCallbackTraitsDone  = "traits_done"  // bare token
 	onbCallbackConfirmOK   = "confirm_ok"   // bare token
 	onbCallbackConfirmBack = "confirm_back" // bare token
+	onbCallbackSeed        = "sd:"          // sd:<index into OnboardingFlow.SeedButtons>
+	onbCallbackOfferSetup  = "pn_setup"     // bare token
+	onbCallbackOfferLater  = "pn_later"     // bare token
 
-	// data blob keys (vaelum.bot_onboarding_state.data jsonb).
+	// data blob keys, round-tripped through the host state store as JSON.
 	onbDataName        = "name"
 	onbDataVoice       = "voice_id"
 	onbDataTags        = "tags"
 	onbDataDescription = "description"
 	onbDataTraitsMsgID = "traits_msg_id" // message_id of the live traits keyboard, for edit-in-place
+	onbDataEdit        = "edit"          // true when the run updates an existing soul instead of creating one
+	onbDataTurns       = "turns"         // exchanges counted while step=offer_pending
 
-	// Web-parity caps. Mirrors maxLength=30 on the name input and
-	// maxLength=400 on the description textarea in
-	// vaelum-front/src/app/onboarding/page.tsx, plus the
-	// `prev.length < 5 ? […] : prev` toggle guard.
-	onbMaxNameRunes   = 30
-	onbMinNameRunes   = 2
-	onbMaxDescription = 400
-	onbMaxTags        = 5
 )
 
-// onbVoice is one row in the voice picker. Mirrors the VOICES export
-// in vaelum-front/src/lib/persona.ts — id is the canonical token the
-// web wizard sends to onboarding.UseCase.Complete, name + desc are the
-// UI labels.
-type onbVoice struct {
-	ID   string
-	Name string
-	Desc string
+// onbVoice aliases the host-supplied palette entry so the picker code
+// below reads without a package qualifier on every line.
+type onbVoice = bs.OnboardingVoice
+
+// voices and traits read the palette off the configured flow. It is the
+// host's vocabulary, in the host's language — the framework ships none.
+func (g *Gateway) voices() []onbVoice           { return g.flow().Voices }
+func (g *Gateway) traits() []bs.OnboardingTrait { return g.flow().Traits }
+
+// voiceName is the short label, used on the confirm row where the
+// description would be noise.
+func (g *Gateway) voiceName(v onbVoice) string { return v.Name }
+
+// voiceButton renders the picker button: "<name> — <description>", or
+// just the name when the host supplied no description.
+func (g *Gateway) voiceButton(v onbVoice) string {
+	if v.Desc == "" {
+		return v.Name
+	}
+	return fmt.Sprintf("%s — %s", v.Name, v.Desc)
 }
 
-// onbVoices is the canonical voice list (web parity). Order is the
-// same as VOICES in persona.ts so a bot user and a web user see the
-// same first/second/third option.
-var onbVoices = []onbVoice{
-	{ID: "clear", Name: "Clear", Desc: "Crisp and articulate."},
-	{ID: "warm", Name: "Warm", Desc: "Gentle and close."},
-	{ID: "quiet", Name: "Quiet", Desc: "Soft and unhurried."},
-}
+// traitText renders one trait id as the host worded it.
+func (g *Gateway) traitText(id string) string { return g.flow().TraitLabel(id) }
 
-// onbTraits is the canonical 16-trait palette (web parity, same order
-// as TRAITS in vaelum-front/src/lib/persona.ts). The bot picker shows
-// these 2-per-row so the keyboard fits cleanly on mobile.
-var onbTraits = []string{
-	"thoughtful", "direct", "dry humor", "curious", "calm", "playful",
-	"formal", "intuitive", "analytical", "warm", "bold", "patient",
-	"poetic", "sharp", "grounded", "mischievous",
+// traitTexts maps a selection of trait ids to their labels, preserving
+// order. The confirm row shows what the user picked, not the ids the
+// persona row stores.
+func (g *Gateway) traitTexts(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, g.traitText(id))
+	}
+	return out
 }
 
 // onb returns the host-configured onboarding copy (generic English defaults
 // filled by Config.ApplyDefaults; a host overrides via GatewayConfig.Onboarding).
 func (g *Gateway) onb() bs.OnboardingMessages { return g.deps.Config.Gateway.Onboarding }
 
-// maybeRunBotOnboarding intercepts inbound text from a chat with no
-// vaelum identity. Returns true when the message has been handled by
-// the FSM (caller stops processing); false means the caller continues
-// down the normal getOrInitTelegramUser path.
+// flow returns the host-configured onboarding shape. Validated at startup
+// (Ship.Run), so instant mode is known good by the time anything reads it.
+func (g *Gateway) flow() bs.OnboardingFlow { return g.deps.Config.Gateway.OnboardingFlow }
+
+// invalidateTelegramUser drops any cached UserState for a (bot, chat) so
+// the next inbound rebuilds it from the database.
 //
-// The detection is one DB read on the host hook (GetState). When the
-// hook is nil or the user already has identity (i.e. ResolveTelegramChat
-// would succeed), this returns false fast.
-func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, chatID string, tgChatID, tgUserID int64, text string) bool {
+// Onboarding is the one place this matters: the cached state was built —
+// or refused — while the chat had no identity, and everything downstream
+// keys off the (user, soul) it carries.
+func (g *Gateway) invalidateTelegramUser(botID uuid.UUID, chatID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	// Both key shapes: the multi-bot path stores under the composite key,
+	// the legacy single-bot path under the bare canonical chat id.
+	delete(g.users, telegramUserCacheKey(botID, chatID))
+	delete(g.users, chatID)
+}
+
+// maybeRunBotOnboarding intercepts inbound text that belongs to the
+// signup / persona FSM. Returns true when the message has been handled
+// (caller stops processing); false means the caller continues down the
+// normal getOrInitTelegramUser path.
+//
+// Onboarded users are no longer short-circuited before the state read.
+// They were while the FSM only ever created accounts — nothing it owned
+// could apply to someone who already had one. Persona editing changes
+// that: /persona and the deferred setup offer are both aimed at users who
+// are already onboarded, so their state has to be consulted too.
+//
+// That costs one primary-key lookup per inbound message on a table which
+// is empty for everyone except users with an edit or an offer in flight.
+// Cheap, and the alternative — an in-memory "is an edit running" hint —
+// loses the flag on restart and strands whoever was mid-wizard.
+func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, chatID string, tgChatID, tgUserID int64, text, senderName string) bool {
 	if g.deps.BotOnboarding == nil || bi == nil || bi.id == uuid.Nil {
 		return false
 	}
 
-	// In-process cache hit means the user already has identity in
-	// vaelum.user_identities — UserState would not have been built
-	// otherwise. Save the DB roundtrip and only intercept /start so
-	// the welcome-back line fires.
+	cmd, forUs := g.parseCommand(bi, text)
+	isStart := cmd == "/start" && forUs
+	isSkip := cmd == "/skip" && forUs
+	isPersona := cmd == "/persona" && forUs
+
+	// Identity resolution, cache first. A cache hit means the user has an
+	// identity row — UserState would not have been built otherwise.
 	g.mu.Lock()
 	us := g.users[telegramUserCacheKey(bi.id, chatID)]
 	g.mu.Unlock()
-	if us != nil && us.UserID != uuid.Nil {
-		if cmd, forUs := g.parseCommand(bi, text); cmd == "/start" && forUs {
-			name := g.lookupDisplayName(ctx, us.UserID)
-			if name == "" {
-				name = g.onb().FallbackName
-			}
-			g.sendOnboardingText(ctx, bi, tgChatID, fmt.Sprintf(g.onb().BackFmt, name))
-			return true
-		}
-		return false
+	userID := uuid.Nil
+	if us != nil {
+		userID = us.UserID
 	}
-
-	// Cold cache. Resolve identity via the same hook the gateway
-	// would call inside getOrInitTelegramUser; on a hit we know this
-	// is a paired user and only /start triggers welcome-back. On a
-	// miss the user is fresh — proceed to FSM dispatch below.
-	if g.deps.ResolveTelegramChat != nil {
-		if uid, _, rerr := g.deps.ResolveTelegramChat(ctx, bi.id, tgChatID); rerr == nil && uid != uuid.Nil {
-			if cmd, forUs := g.parseCommand(bi, text); cmd == "/start" && forUs {
-				name := g.lookupDisplayName(ctx, uid)
-				if name == "" {
-					name = g.onb().FallbackName
-				}
-				g.sendOnboardingText(ctx, bi, tgChatID, fmt.Sprintf(g.onb().BackFmt, name))
-				return true
-			}
-			return false
+	if userID == uuid.Nil && g.deps.ResolveTelegramChat != nil {
+		if uid, _, rerr := g.deps.ResolveTelegramChat(ctx, bi.id, tgChatID); rerr == nil {
+			userID = uid
 		}
 	}
+	onboarded := userID != uuid.Nil
 
 	step, data, err := g.deps.BotOnboarding.GetState(ctx, tgUserID, bi.id)
 	if err != nil {
@@ -173,15 +198,44 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 		return false
 	}
 
-	cmd, forUs := g.parseCommand(bi, text)
-	isStart := cmd == "/start" && forUs
-	isSkip := cmd == "/skip" && forUs
+	if onboarded {
+		// /start on a known chat is a greeting, never a re-signup —
+		// even mid-edit, where re-emitting the step below would be the
+		// wrong answer to "hello".
+		if isStart {
+			name := g.lookupDisplayName(ctx, userID)
+			if name == "" {
+				name = g.onb().FallbackName
+			}
+			g.sendOnboardingText(ctx, bi, tgChatID, fmt.Sprintf(g.onb().BackFmt, name))
+			return true
+		}
+		if isPersona {
+			return g.onboardingStartEdit(ctx, bi, tgChatID, tgUserID)
+		}
+		// The offer is a nudge alongside the conversation, not instead
+		// of it: it never consumes the message that triggered it.
+		if step == onbStepOfferPending {
+			g.onboardingTickOffer(ctx, bi, tgChatID, tgUserID, data)
+			return false
+		}
+		// Anything else with no FSM row is an ordinary message.
+		if step == "" {
+			return false
+		}
+		// Otherwise fall through: an edit is in flight and these are
+		// its answers.
+	}
 
-	// No state row yet. Only /start kicks off the flow — random text
-	// from an unknown chat still hits the standard unpaired-chat
-	// policy (replyUnpaired), so users can't accidentally start
-	// onboarding by typing "hi".
+	// No state row yet.
 	if step == "" {
+		if g.flow().Mode == bs.OnboardingModeInstant {
+			return g.onboardingInstant(ctx, bi, chatID, tgChatID, tgUserID, senderName, isStart)
+		}
+		// Wizard: only /start kicks off the flow — random text from an
+		// unknown chat still hits the standard unpaired-chat policy
+		// (replyUnpaired), so users can't accidentally start onboarding
+		// by typing "hi".
 		if !isStart {
 			return false
 		}
@@ -195,7 +249,7 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 
 	switch step {
 	case onbStepAskName:
-		return g.onboardingHandleName(ctx, bi, tgChatID, tgUserID, text)
+		return g.onboardingHandleName(ctx, bi, tgChatID, tgUserID, text, data)
 	case onbStepAskVoice, onbStepAskTraits, onbStepConfirm:
 		// User typed instead of tapping a button. Re-emit the keyboard.
 		return g.onboardingReissue(ctx, bi, tgChatID, step, data)
@@ -226,11 +280,29 @@ func (g *Gateway) maybeRunBotOnboardingCallback(ctx context.Context, bi *botInst
 	d := cq.Data
 	isOurs := strings.HasPrefix(d, onbCallbackVoice) ||
 		strings.HasPrefix(d, onbCallbackTrait) ||
+		strings.HasPrefix(d, onbCallbackSeed) ||
 		d == onbCallbackTraitsDone ||
 		d == onbCallbackConfirmOK ||
-		d == onbCallbackConfirmBack
+		d == onbCallbackConfirmBack ||
+		d == onbCallbackOfferSetup ||
+		d == onbCallbackOfferLater
 	if !isOurs {
 		return false
+	}
+
+	// Seed and offer buttons belong to an account that already exists, so
+	// they are dispatched before the FSM state lookup below — that lookup
+	// returns step="" for an onboarded user and tells us nothing.
+	switch {
+	case strings.HasPrefix(d, onbCallbackSeed):
+		return g.onboardingHandleSeed(ctx, bi, cq, strings.TrimPrefix(d, onbCallbackSeed))
+	case d == onbCallbackOfferSetup:
+		g.stripKeyboard(ctx, bi, cq)
+		return g.onboardingStartEdit(ctx, bi, cq.Message.Chat.ID, cq.From.ID)
+	case d == onbCallbackOfferLater:
+		g.stripKeyboard(ctx, bi, cq)
+		g.sendOnboardingText(ctx, bi, cq.Message.Chat.ID, g.onb().OfferLater)
+		return true
 	}
 
 	tgUserID := cq.From.ID
@@ -264,7 +336,7 @@ func (g *Gateway) maybeRunBotOnboardingCallback(ctx context.Context, bi *botInst
 		if step != onbStepConfirm {
 			return true
 		}
-		return g.onboardingFinalize(ctx, bi, tgChatID, tgUserID, data)
+		return g.onboardingFinalize(ctx, bi, tgChatID, tgUserID, data, cq.From.FirstName)
 	case d == onbCallbackConfirmBack:
 		if step != onbStepConfirm {
 			return true
@@ -272,6 +344,251 @@ func (g *Gateway) maybeRunBotOnboardingCallback(ctx context.Context, bi *botInst
 		return g.onboardingConfirmBack(ctx, bi, tgChatID, tgUserID, data)
 	}
 	return true
+}
+
+// -- Instant mode -------------------------------------------------------------
+
+// onboardingInstant mints the account on first contact with the flow's
+// default persona and returns whether it consumed the inbound message.
+//
+// greet distinguishes the two ways a stranger arrives, and they deserve
+// different endings:
+//
+//   - /start (an ad deep link, the Telegram "Start" button): there is no
+//     message to answer, so we consume it and open with the welcome plus
+//     its seed buttons. Consuming is what stops the assistant from being
+//     asked to reply to the literal string "/start".
+//   - anything else ("привет", or a real question): the person already
+//     said something, and answering it is a better first impression than
+//     any welcome copy. We create the account and return false so the
+//     message they actually wrote falls through and becomes turn one.
+//
+// The account row is committed before we return, so the fall-through
+// path's getOrInitTelegramUser resolves the fresh identity rather than
+// racing it.
+func (g *Gateway) onboardingInstant(
+	ctx context.Context,
+	bi *botInstance,
+	chatID string,
+	tgChatID, tgUserID int64,
+	senderName string,
+	greet bool,
+) bool {
+	flow := g.flow()
+	_, _, err := g.deps.BotOnboarding.CompleteOnboarding(ctx, bs.BotOnboardingComplete{
+		BotID:           bi.id,
+		TGUserID:        tgUserID,
+		TGChatID:        tgChatID,
+		Name:            flow.DefaultName,
+		UserDisplayName: senderName,
+		VoiceID:         flow.DefaultVoice,
+		CharacterTags:   flow.DefaultTags,
+	})
+	switch {
+	case errors.Is(err, bs.ErrBotOnboardingAlreadyDone):
+		// This Telegram identity already owns a soul, but this chat is
+		// not linked to it — reachable when the person onboarded through
+		// a different bot. Creating a second tenant for them would be
+		// worse than saying so.
+		g.logger.Info("gateway: instant onboarding skipped, identity already has a soul",
+			"tg_user", tgUserID, "bot_id", bi.id.String())
+		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().ErrAlreadyOnboarded)
+		return true
+	case err != nil:
+		g.logger.Error("gateway: instant onboarding failed",
+			"tg_user", tgUserID, "bot_id", bi.id.String(), "error", err)
+		if greet {
+			g.sendOnboardingText(ctx, bi, tgChatID, g.onb().ErrAccountFail)
+			return true
+		}
+		// Fall through to the unpaired-chat policy rather than swallow
+		// the message: the person gets *some* reply either way.
+		return false
+	}
+
+	g.logger.Info("gateway: instant onboarding created account",
+		"tg_user", tgUserID, "bot_id", bi.id.String())
+	g.invalidateTelegramUser(bi.id, chatID)
+
+	// Arm the deferred persona offer. Only instant accounts get one:
+	// a wizard user chose their persona deliberately a moment ago and
+	// does not need to be asked again.
+	if g.flow().OfferPersonaAfterTurns > 0 && g.deps.PersonaEditor != nil {
+		if err := g.deps.BotOnboarding.AdvanceStep(ctx, tgUserID, bi.id, onbStepOfferPending, map[string]any{
+			onbDataTurns: 0,
+		}); err != nil {
+			// The account is live either way; losing the nudge is not
+			// worth failing the signup over.
+			g.logger.Warn("gateway: arming persona offer failed", "tg_user", tgUserID, "error", err)
+		}
+	}
+
+	if !greet {
+		return false
+	}
+	g.sendOnboardingWelcome(ctx, bi, tgChatID)
+	return true
+}
+
+// sendOnboardingWelcome opens an instant-mode chat: one message, plus the
+// seed buttons when the host configured any. One button per row — these
+// are sentences, not labels, and two per row truncates them on a phone.
+func (g *Gateway) sendOnboardingWelcome(ctx context.Context, bi *botInstance, tgChatID int64) {
+	if bi == nil || bi.client == nil {
+		return
+	}
+	flow := g.flow()
+	if len(flow.SeedButtons) == 0 {
+		g.sendOnboardingText(ctx, bi, tgChatID, flow.Welcome)
+		return
+	}
+	rows := make([][]telegram.InlineKeyboardButton, 0, len(flow.SeedButtons))
+	for i, b := range flow.SeedButtons {
+		rows = append(rows, []telegram.InlineKeyboardButton{{
+			Text:         b.Label,
+			CallbackData: fmt.Sprintf("%s%d", onbCallbackSeed, i),
+		}})
+	}
+	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, flow.Welcome, rows); err != nil {
+		g.logger.Warn("gateway: onboarding welcome send failed",
+			"tg_chat", tgChatID, "error", err)
+	}
+}
+
+// stripKeyboard removes the inline keyboard from the message a callback
+// came from, so a one-shot prompt reads as spent and a second tap cannot
+// queue a duplicate action. Best effort: Telegram answers "message is not
+// modified" when there was nothing to remove.
+func (g *Gateway) stripKeyboard(ctx context.Context, bi *botInstance, cq *telegram.CallbackQuery) {
+	if bi == nil || bi.client == nil || cq == nil || cq.Message == nil {
+		return
+	}
+	if err := bi.client.EditMessageReplyMarkup(ctx, cq.Message.Chat.ID, cq.Message.MessageID, nil); err != nil {
+		g.logger.Debug("gateway: keyboard strip failed", "error", err)
+	}
+}
+
+// onboardingHandleSeed turns a seed-button tap into an ordinary inbound
+// message. The button's configured text is dispatched as though the
+// person had typed it, so the reply is a real turn — same session, same
+// memory, same tools — rather than a scripted answer that would stop
+// being true the moment the product changed.
+//
+// The keyboard is stripped first so the welcome message reads as spent
+// and a second tap cannot queue a duplicate turn.
+func (g *Gateway) onboardingHandleSeed(ctx context.Context, bi *botInstance, cq *telegram.CallbackQuery, idxRaw string) bool {
+	flow := g.flow()
+	idx, err := strconv.Atoi(idxRaw)
+	if err != nil || idx < 0 || idx >= len(flow.SeedButtons) {
+		// Stale keyboard from before a config change. Silently done —
+		// the tap was already acknowledged by handleUpdate.
+		g.logger.Debug("gateway: seed tap out of range", "index", idxRaw, "configured", len(flow.SeedButtons))
+		return true
+	}
+
+	g.stripKeyboard(ctx, bi, cq)
+
+	g.handleUpdate(ctx, bi, telegram.Update{Message: &telegram.Message{
+		MessageID: cq.Message.MessageID,
+		From:      cq.From,
+		Chat:      telegram.Chat{ID: cq.Message.Chat.ID, Type: "private"},
+		Text:      flow.SeedButtons[idx].Text,
+	}})
+	return true
+}
+
+// -- Persona editing ----------------------------------------------------------
+
+// onboardingStartEdit re-runs the persona wizard against a soul that
+// already exists. Same five steps as signup — only the terminal action
+// differs — so the FSM row is seeded with the same shape plus an edit
+// marker, and every step handler below is reused verbatim.
+//
+// Any pending setup offer is superseded: the user is doing the thing the
+// offer would have asked them to do.
+func (g *Gateway) onboardingStartEdit(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64) bool {
+	if g.deps.PersonaEditor == nil {
+		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().ErrNoPersona)
+		return true
+	}
+	if err := g.deps.BotOnboarding.AdvanceStep(ctx, tgUserID, bi.id, onbStepAskName, map[string]any{
+		onbDataEdit: true,
+	}); err != nil {
+		g.logger.Warn("gateway: persona edit AdvanceStep failed", "tg_user", tgUserID, "error", err)
+		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().ErrPersonaFail)
+		return true
+	}
+	g.sendOnboardingText(ctx, bi, tgChatID, g.onb().EditGreeting)
+	return true
+}
+
+// onboardingTickOffer counts an exchange against the threshold and, on
+// reaching it, sends the persona offer and retires the row.
+//
+// It never returns a "handled" signal — the message that tripped the
+// counter is a real message and still gets a real answer. The offer
+// arrives alongside it.
+//
+// State is a persisted counter rather than an in-process one because the
+// interesting threshold is measured in conversation, which outlives any
+// single daemon lifetime. The row is cleared once the offer fires, so the
+// per-message write costs at most OfferPersonaAfterTurns upserts across a
+// user's entire life.
+func (g *Gateway) onboardingTickOffer(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, data map[string]any) {
+	after := g.flow().OfferPersonaAfterTurns
+	if after <= 0 || g.deps.PersonaEditor == nil {
+		// Offer disabled or uneditable — retire the row so we stop
+		// reading it on every message.
+		_ = g.deps.BotOnboarding.ClearState(ctx, tgUserID, bi.id)
+		return
+	}
+
+	turns := turnsFromData(data) + 1
+	if turns < after {
+		if err := g.deps.BotOnboarding.AdvanceStep(ctx, tgUserID, bi.id, onbStepOfferPending, map[string]any{
+			onbDataTurns: turns,
+		}); err != nil {
+			g.logger.Warn("gateway: persona offer tick failed", "tg_user", tgUserID, "error", err)
+		}
+		return
+	}
+
+	// Retire the row before sending: a failed send costs one missed
+	// nudge, whereas a row that survives a successful send would re-offer
+	// on every subsequent message.
+	if err := g.deps.BotOnboarding.ClearState(ctx, tgUserID, bi.id); err != nil {
+		g.logger.Warn("gateway: persona offer ClearState failed", "tg_user", tgUserID, "error", err)
+		return
+	}
+	rows := [][]telegram.InlineKeyboardButton{{
+		{Text: g.onb().BtnOfferSetup, CallbackData: onbCallbackOfferSetup},
+		{Text: g.onb().BtnOfferLater, CallbackData: onbCallbackOfferLater},
+	}}
+	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, g.onb().OfferText, rows); err != nil {
+		g.logger.Warn("gateway: persona offer send failed", "tg_chat", tgChatID, "error", err)
+	}
+}
+
+// turnsFromData reads the offer counter. jsonb round-trips numbers as
+// float64, so an int type assertion alone would silently restart the
+// count at zero on every message and the offer would never fire.
+func turnsFromData(data map[string]any) int {
+	switch v := data[onbDataTurns].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	}
+	return 0
+}
+
+// isEditRun reports whether the in-flight FSM run updates an existing
+// soul rather than creating one.
+func isEditRun(data map[string]any) bool {
+	edit, _ := data[onbDataEdit].(bool)
+	return edit
 }
 
 // -- Step 1: entry / ask_name -------------------------------------------------
@@ -286,19 +603,25 @@ func (g *Gateway) onboardingStart(ctx context.Context, bi *botInstance, tgChatID
 	return true
 }
 
-func (g *Gateway) onboardingHandleName(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, raw string) bool {
+func (g *Gateway) onboardingHandleName(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, raw string, data map[string]any) bool {
 	name := strings.TrimSpace(raw)
 	// Web parity: 2-30 rune validation. Cap above the limit silently
 	// so a too-long paste is rejected with the same hint as too-short.
+	minRunes, maxRunes := g.flow().NameBounds()
 	rs := []rune(name)
-	if len(rs) < onbMinNameRunes || len(rs) > onbMaxNameRunes {
+	if len(rs) < minRunes || len(rs) > maxRunes {
 		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().NameTooShort)
 		return true
 	}
 
-	if err := g.deps.BotOnboarding.AdvanceStep(ctx, tgUserID, bi.id, onbStepAskVoice, map[string]any{
-		onbDataName: name,
-	}); err != nil {
+	// Carry the existing blob forward rather than replacing it: on an
+	// edit run it holds the marker that decides whether the last step
+	// creates a soul or updates one.
+	if data == nil {
+		data = map[string]any{}
+	}
+	data[onbDataName] = name
+	if err := g.deps.BotOnboarding.AdvanceStep(ctx, tgUserID, bi.id, onbStepAskVoice, data); err != nil {
 		g.logger.Warn("gateway: onboarding AdvanceStep(ask_name) failed",
 			"tg_user", tgUserID, "error", err)
 		return false
@@ -310,7 +633,7 @@ func (g *Gateway) onboardingHandleName(ctx context.Context, bi *botInstance, tgC
 // -- Step 2: ask_voice --------------------------------------------------------
 
 func (g *Gateway) onboardingHandleVoice(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, voiceID string, data map[string]any) bool {
-	v := findVoice(voiceID)
+	v := g.findVoice(voiceID)
 	if v == nil {
 		// Stale / unknown voice id. Re-emit the picker so the user can
 		// pick a valid one without losing the name they typed.
@@ -345,7 +668,7 @@ func (g *Gateway) onboardingHandleVoice(ctx context.Context, bi *botInstance, tg
 // 6th unselected trait is a no-op (the button's render stays unticked
 // so the user implicitly sees they hit the limit).
 func (g *Gateway) onboardingToggleTrait(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, messageID int, trait string, data map[string]any) bool {
-	if !isValidTrait(trait) {
+	if !g.flow().HasTrait(trait) {
 		return true
 	}
 	tags := tagsFromData(data)
@@ -361,7 +684,7 @@ func (g *Gateway) onboardingToggleTrait(ctx context.Context, bi *botInstance, tg
 		// Toggle off.
 		tags = append(tags[:idx], tags[idx+1:]...)
 	} else {
-		if len(tags) >= onbMaxTags {
+		if len(tags) >= g.flow().TagCap() {
 			// Silent ignore — user sees the counter is already 5/5.
 			return true
 		}
@@ -414,8 +737,8 @@ func (g *Gateway) onboardingHandleDescription(ctx context.Context, bi *botInstan
 		// Web-parity 400-char cap (rune count, not bytes). A too-long
 		// input is silently truncated — same shape as the web textarea
 		// maxLength=400 which simply refuses extra keystrokes.
-		if rs := []rune(desc); len(rs) > onbMaxDescription {
-			desc = string(rs[:onbMaxDescription])
+		if cap := g.flow().DescriptionCap(); len([]rune(desc)) > cap {
+			desc = string([]rune(desc)[:cap])
 		}
 	}
 	data[onbDataDescription] = desc
@@ -429,9 +752,68 @@ func (g *Gateway) onboardingHandleDescription(ctx context.Context, bi *botInstan
 	return true
 }
 
+// personaFinalize is the terminal step of an edit run: the same five
+// answers, applied to the soul the user already has.
+//
+// On failure the FSM row is deliberately left at step=confirm so the
+// user can tap Create again — the update is a single host-side statement,
+// so a failure means nothing changed and a retry is safe.
+func (g *Gateway) personaFinalize(
+	ctx context.Context,
+	bi *botInstance,
+	tgChatID, tgUserID int64,
+	name, voiceID string,
+	tags []string,
+	desc string,
+) bool {
+	if g.deps.PersonaEditor == nil {
+		// Reachable only if the hook was unwired mid-flow.
+		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().ErrNoPersona)
+		_ = g.deps.BotOnboarding.ClearState(ctx, tgUserID, bi.id)
+		return true
+	}
+
+	g.sendOnboardingText(ctx, bi, tgChatID, g.onb().WorkingFmt)
+
+	err := g.deps.PersonaEditor.UpdatePersona(ctx, bs.BotPersonaUpdate{
+		BotID:                bi.id,
+		TGUserID:             tgUserID,
+		Name:                 name,
+		VoiceID:              voiceID,
+		CharacterTags:        tags,
+		CharacterDescription: desc,
+	})
+	switch {
+	case errors.Is(err, bs.ErrBotPersonaNoSoul):
+		// The identity lost its soul between /persona and confirm.
+		// Nothing to retry against.
+		_ = g.deps.BotOnboarding.ClearState(ctx, tgUserID, bi.id)
+		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().ErrNoPersona)
+		return true
+	case err != nil:
+		g.logger.Error("gateway: persona update failed",
+			"tg_user", tgUserID, "bot_id", bi.id.String(), "error", err)
+		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().ErrPersonaFail)
+		return true
+	}
+
+	if err := g.deps.BotOnboarding.ClearState(ctx, tgUserID, bi.id); err != nil {
+		g.logger.Warn("gateway: persona edit ClearState failed", "tg_user", tgUserID, "error", err)
+	}
+
+	// The persona is part of the system prompt, and the gateway caches
+	// per-user state that was built around the old one. Drop it so the
+	// next turn is answered by who the user just described.
+	g.invalidateTelegramUser(bi.id, tgCanonical(tgChatID))
+
+	g.logger.Info("gateway: persona updated", "tg_user", tgUserID, "bot_id", bi.id.String())
+	g.sendOnboardingText(ctx, bi, tgChatID, fmt.Sprintf(g.onb().EditDoneFmt, name))
+	return true
+}
+
 // -- Step 5: confirm ----------------------------------------------------------
 
-func (g *Gateway) onboardingFinalize(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, data map[string]any) bool {
+func (g *Gateway) onboardingFinalize(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, data map[string]any, senderName string) bool {
 	name, _ := data[onbDataName].(string)
 	voiceID, _ := data[onbDataVoice].(string)
 	tags := tagsFromData(data)
@@ -445,6 +827,10 @@ func (g *Gateway) onboardingFinalize(ctx context.Context, bi *botInstance, tgCha
 		return true
 	}
 
+	if isEditRun(data) {
+		return g.personaFinalize(ctx, bi, tgChatID, tgUserID, name, voiceID, tags, desc)
+	}
+
 	g.sendOnboardingText(ctx, bi, tgChatID, g.onb().WorkingFmt)
 
 	_, _, err := g.deps.BotOnboarding.CompleteOnboarding(ctx, bs.BotOnboardingComplete{
@@ -452,6 +838,7 @@ func (g *Gateway) onboardingFinalize(ctx context.Context, bi *botInstance, tgCha
 		TGUserID:             tgUserID,
 		TGChatID:             tgChatID,
 		Name:                 name,
+		UserDisplayName:      senderName,
 		VoiceID:              voiceID,
 		CharacterTags:        tags,
 		CharacterDescription: desc,
@@ -481,9 +868,7 @@ func (g *Gateway) onboardingFinalize(ctx context.Context, bi *botInstance, tgCha
 	// Drop any cached UserState built before the identity row landed,
 	// so the next inbound message goes through getOrInitTelegramUser
 	// and resolves the freshly-linked (user, soul).
-	g.mu.Lock()
-	delete(g.users, tgCanonical(tgChatID))
-	g.mu.Unlock()
+	g.invalidateTelegramUser(bi.id, tgCanonical(tgChatID))
 
 	g.sendOnboardingText(ctx, bi, tgChatID, fmt.Sprintf(g.onb().DoneFmt, name))
 	return true
@@ -545,11 +930,12 @@ func (g *Gateway) sendOnboardingVoicePicker(ctx context.Context, bi *botInstance
 	if bi == nil || bi.client == nil {
 		return
 	}
-	rows := make([][]telegram.InlineKeyboardButton, 0, len(onbVoices))
-	for _, v := range onbVoices {
+	voices := g.voices()
+	rows := make([][]telegram.InlineKeyboardButton, 0, len(voices))
+	for _, v := range voices {
 		rows = append(rows, []telegram.InlineKeyboardButton{
 			{
-				Text:         fmt.Sprintf("%s — %s", v.Name, v.Desc),
+				Text:         g.voiceButton(v),
 				CallbackData: onbCallbackVoice + v.ID,
 			},
 		})
@@ -606,12 +992,12 @@ func (g *Gateway) sendOnboardingConfirm(ctx context.Context, bi *botInstance, tg
 	desc, _ := data[onbDataDescription].(string)
 
 	voiceName := g.onb().DashEmpty
-	if v := findVoice(voiceID); v != nil {
-		voiceName = v.Name
+	if v := g.findVoice(voiceID); v != nil {
+		voiceName = g.voiceName(*v)
 	}
 	tagsStr := g.onb().DashEmpty
 	if len(tags) > 0 {
-		tagsStr = strings.Join(tags, ", ")
+		tagsStr = strings.Join(g.traitTexts(tags), ", ")
 	}
 	descStr := desc
 	if strings.TrimSpace(descStr) == "" {
@@ -644,21 +1030,22 @@ func (g *Gateway) sendOnboardingConfirm(ctx context.Context, bi *botInstance, tg
 
 // buildTraitsKeyboard renders the 16-trait grid as a 2-per-row keyboard
 // plus a trailing "Done · N of 5" row. Selected traits get a `[✓]`
-// prefix, unselected `[ ]`. Order matches onbTraits (web parity).
+// prefix, unselected `[ ]`. Order matches the configured palette.
 func (g *Gateway) buildTraitsKeyboard(selected []string) [][]telegram.InlineKeyboardButton {
 	selSet := make(map[string]struct{}, len(selected))
 	for _, t := range selected {
 		selSet[t] = struct{}{}
 	}
-	rows := make([][]telegram.InlineKeyboardButton, 0, len(onbTraits)/2+1)
-	for i := 0; i < len(onbTraits); i += 2 {
+	traits := g.traits()
+	rows := make([][]telegram.InlineKeyboardButton, 0, len(traits)/2+1)
+	for i := 0; i < len(traits); i += 2 {
 		row := []telegram.InlineKeyboardButton{
-			{Text: traitLabel(onbTraits[i], selSet), CallbackData: onbCallbackTrait + onbTraits[i]},
+			{Text: g.traitButton(traits[i].ID, selSet), CallbackData: onbCallbackTrait + traits[i].ID},
 		}
-		if i+1 < len(onbTraits) {
+		if i+1 < len(traits) {
 			row = append(row, telegram.InlineKeyboardButton{
-				Text:         traitLabel(onbTraits[i+1], selSet),
-				CallbackData: onbCallbackTrait + onbTraits[i+1],
+				Text:         g.traitButton(traits[i+1].ID, selSet),
+				CallbackData: onbCallbackTrait + traits[i+1].ID,
 			})
 		}
 		rows = append(rows, row)
@@ -672,29 +1059,21 @@ func (g *Gateway) buildTraitsKeyboard(selected []string) [][]telegram.InlineKeyb
 	return rows
 }
 
-func traitLabel(t string, selSet map[string]struct{}) string {
+func (g *Gateway) traitButton(t string, selSet map[string]struct{}) string {
 	if _, ok := selSet[t]; ok {
-		return "[✓] " + t
+		return "[✓] " + g.traitText(t)
 	}
-	return "[ ] " + t
+	return "[ ] " + g.traitText(t)
 }
 
-func findVoice(id string) *onbVoice {
-	for i := range onbVoices {
-		if onbVoices[i].ID == id {
-			return &onbVoices[i]
+func (g *Gateway) findVoice(id string) *onbVoice {
+	voices := g.voices()
+	for i := range voices {
+		if voices[i].ID == id {
+			return &voices[i]
 		}
 	}
 	return nil
-}
-
-func isValidTrait(t string) bool {
-	for _, v := range onbTraits {
-		if v == t {
-			return true
-		}
-	}
-	return false
 }
 
 // tagsFromData extracts the persisted tags slice from the jsonb data

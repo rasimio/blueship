@@ -89,6 +89,42 @@ type BotOnboarding interface {
 	ClearState(ctx context.Context, tgUserID int64, botID uuid.UUID) error
 }
 
+// BotPersonaEditor re-runs the persona wizard against a soul that already
+// exists. Separate from BotOnboarding — and therefore optional — because
+// creating a tenant and editing one are different powers: a host may want
+// chat-side editing without chat-side signup, or the reverse.
+//
+// It exists at all because instant onboarding starts everyone on a default
+// persona. Without an edit path that default is permanent from the chat,
+// and the wizard the framework already ships becomes unreachable.
+//
+// The soul is resolved host-side from the Telegram identity rather than
+// passed in, so a caller can only ever edit their own.
+type BotPersonaEditor interface {
+	// UpdatePersona overwrites the persona of the soul owned by this
+	// Telegram identity. Returns ErrBotPersonaNoSoul when the identity
+	// owns none — the gateway maps that to "set up an assistant first"
+	// rather than retrying.
+	UpdatePersona(ctx context.Context, in BotPersonaUpdate) error
+}
+
+// ErrBotPersonaNoSoul is returned by UpdatePersona when the Telegram
+// identity has no soul to edit.
+var ErrBotPersonaNoSoul = errors.New("bot persona: identity owns no soul")
+
+// BotPersonaUpdate carries the wizard's output for an existing soul. The
+// persona fields mirror BotOnboardingComplete exactly, because they come
+// from the same five FSM steps — the only difference is that this lands
+// as an UPDATE.
+type BotPersonaUpdate struct {
+	BotID                uuid.UUID
+	TGUserID             int64
+	Name                 string
+	VoiceID              string
+	CharacterTags        []string
+	CharacterDescription string
+}
+
 // DeeplinkLoginApprover is independent from BotOnboarding: authenticating a
 // browser through an existing Telegram identity must not enable account
 // creation inside chat. A host may wire either capability, both, or neither.
@@ -158,8 +194,19 @@ type BotOnboardingComplete struct {
 	BotID                uuid.UUID
 	TGUserID             int64
 	TGChatID             int64
-	Name                 string   // soul name (also used as display_name)
+	Name                 string   // soul name — what the assistant is called
 	VoiceID              string   // one of "clear" | "warm" | "quiet"; never empty after FSM validation
 	CharacterTags        []string // up to 5 entries from the 16-trait palette
 	CharacterDescription string   // up to 400 chars, trimmed; may be empty
+
+	// UserDisplayName is the person's own name, taken from the transport
+	// (Telegram's from.first_name). It is NOT the assistant's name.
+	//
+	// These were one field until instant onboarding made the conflation
+	// visible: with a config-supplied default persona, reusing the soul
+	// name as the person's display name gives every account in the
+	// database the same one, and the framework greets all of them by the
+	// assistant's name. Empty falls back to Name so hosts that have not
+	// been updated keep their previous behaviour.
+	UserDisplayName string
 }

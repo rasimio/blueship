@@ -761,7 +761,7 @@ func (g *Gateway) prepareTelegramInbound(
 	if g.maybeRunDeeplinkLink(ctx, bi, rawChatID, tgUserID, text) {
 		return nil, 0, false
 	}
-	if g.maybeRunBotOnboarding(ctx, bi, chatID, rawChatID, tgUserID, text) {
+	if g.maybeRunBotOnboarding(ctx, bi, chatID, rawChatID, tgUserID, text, msg.From.FirstName) {
 		return nil, 0, false
 	}
 
@@ -806,7 +806,7 @@ func (g *Gateway) prepareTelegramInbound(
 				g.logger.Warn("telegram /reset failed",
 					"chat_id", us.ChatID, "user_id", us.UserID, "error", resetErr)
 				if bi != nil && bi.client != nil {
-					_, _ = bi.client.SendMessage(rctx, fmt.Sprintf("%d", rawChatID), "Reset failed.")
+					_, _ = bi.client.SendMessage(rctx, fmt.Sprintf("%d", rawChatID), g.deps.Config.UI.ResetFailed)
 				}
 				return
 			}
@@ -815,7 +815,7 @@ func (g *Gateway) prepareTelegramInbound(
 				"chat_id", us.ChatID, "user_id", us.UserID,
 				"old_session_id", oldID, "new_session_id", newID)
 			if bi != nil && bi.client != nil {
-				_, _ = bi.client.SendMessage(rctx, fmt.Sprintf("%d", rawChatID), "Session reset. New thread.")
+				_, _ = bi.client.SendMessage(rctx, fmt.Sprintf("%d", rawChatID), g.deps.Config.UI.ResetDone)
 			}
 		}()
 		return nil, 0, false

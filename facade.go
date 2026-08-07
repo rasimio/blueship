@@ -118,6 +118,13 @@ type (
 	GatewayConfig         = core.GatewayConfig
 	UIStrings             = core.UIStrings
 	OnboardingMessages    = core.OnboardingMessages
+	OnboardingVoice       = core.OnboardingVoice
+	OnboardingTrait       = core.OnboardingTrait
+	OnboardingFlow        = core.OnboardingFlow
+	OnboardingMode        = core.OnboardingMode
+	OnboardingSeedButton  = core.OnboardingSeedButton
+	BotPersonaEditor      = core.BotPersonaEditor
+	BotPersonaUpdate      = core.BotPersonaUpdate
 	OwnerConfig           = core.OwnerConfig
 	ToolMeta              = core.ToolMeta
 	A2AConfig             = core.A2AConfig
@@ -228,6 +235,11 @@ const (
 )
 
 const (
+	OnboardingModeWizard  = core.OnboardingModeWizard
+	OnboardingModeInstant = core.OnboardingModeInstant
+)
+
+const (
 	ProjectionProjected              = core.ProjectionProjected
 	ProjectionNonDialogue            = core.ProjectionNonDialogue
 	ProjectionUnprojectableLegacy    = core.ProjectionUnprojectableLegacy
@@ -239,5 +251,6 @@ const (
 var (
 	ErrTelegramChatUnpaired     = core.ErrTelegramChatUnpaired
 	ErrBotOnboardingAlreadyDone = core.ErrBotOnboardingAlreadyDone
+	ErrBotPersonaNoSoul         = core.ErrBotPersonaNoSoul
 	ErrExecutionDenied          = core.ErrExecutionDenied
 )

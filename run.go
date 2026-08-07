@@ -31,6 +31,22 @@ type coordinatedTaskNotificationContextKey struct{}
 func (s *Ship) Run(ctx context.Context) error {
 	s.logger.Info("starting blueship")
 
+	// Refuse a chat-native signup flow that cannot run, before anything is
+	// listening: an empty palette renders pickers with no buttons, and a
+	// default persona naming a voice outside the palette writes tenant
+	// rows pointing at something that does not exist — one per signup,
+	// silently, until somebody noticed.
+	//
+	// Gated on the hook, not on the config: a host that never wired chat
+	// onboarding has no reason to configure a persona vocabulary, and
+	// making it boot-critical for them would be the framework imposing a
+	// feature they declined.
+	if s.cfg.Gateway.BotOnboarding != nil {
+		if err := s.cfg.Gateway.OnboardingFlow.Validate(); err != nil {
+			return err
+		}
+	}
+
 	// 1. Initialize deps
 	deps, err := InitDeps(&s.cfg, s.logger)
 	if err != nil {
@@ -49,6 +65,7 @@ func (s *Ship) Run(ctx context.Context) error {
 	deps.ResolveTelegramChat = s.cfg.Gateway.ResolveTelegramChat
 	deps.AttachmentSink = s.cfg.Gateway.AttachmentSink
 	deps.BotOnboarding = s.cfg.Gateway.BotOnboarding
+	deps.PersonaEditor = s.cfg.Gateway.PersonaEditor
 	deps.DeeplinkLogin = s.cfg.Gateway.DeeplinkLogin
 	deps.DeeplinkLink = s.cfg.Gateway.DeeplinkLink
 	deps.AuthorizeExecution = s.cfg.AuthorizeExecution

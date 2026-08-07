@@ -188,6 +188,7 @@ type Deps struct {
 	// replyUnpaired (platform greet / user-bot silence). Mirrors the
 	// Config.Gateway field; ship.go copies it across at InitDeps time.
 	BotOnboarding BotOnboarding
+	PersonaEditor BotPersonaEditor
 	DeeplinkLogin DeeplinkLoginApprover
 	DeeplinkLink  DeeplinkLinker
 
@@ -239,6 +240,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		EnsureAutonomousHistory:        d.EnsureAutonomousHistory,
 		SendToUserAttachment:           d.SendToUserAttachment,
 		BotOnboarding:                  d.BotOnboarding,
+		PersonaEditor:                  d.PersonaEditor,
 		DeeplinkLogin:                  d.DeeplinkLogin,
 		DeeplinkLink:                   d.DeeplinkLink,
 		AuthorizeExecution:             d.AuthorizeExecution,
