@@ -123,6 +123,7 @@ type (
 	OnboardingFlow        = core.OnboardingFlow
 	OnboardingMode        = core.OnboardingMode
 	OnboardingSeedButton  = core.OnboardingSeedButton
+	BotCommand            = core.BotCommand
 	BotPersonaEditor      = core.BotPersonaEditor
 	BotPersonaUpdate      = core.BotPersonaUpdate
 	OwnerConfig           = core.OwnerConfig

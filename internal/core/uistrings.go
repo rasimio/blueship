@@ -55,6 +55,28 @@ func (u *UIStrings) applyDefaults() {
 	}
 }
 
+// BotCommand is one entry in the Telegram command menu.
+//
+// Two kinds live in the same list, distinguished by Prompt:
+//
+//   - Prompt empty — a command something already handles (/start, /reset,
+//     /persona). Listing it only makes it discoverable; the menu is the
+//     only place a user ever learns these exist.
+//   - Prompt set — a prompt shortcut. The command is rewritten to Prompt
+//     and dispatched as though the user had typed it, so the answer is an
+//     ordinary turn with ordinary tools rather than a static help page
+//     that starts drifting from the truth the day it is written.
+//
+// Name and Description are host copy in the host's language; the
+// framework has no commands and no words of its own.
+type BotCommand struct {
+	// Name without the leading slash, lowercase — Telegram rejects
+	// anything else.
+	Name        string
+	Description string
+	Prompt      string
+}
+
 // OnboardingMode selects what a fresh /start on an unpaired chat does.
 type OnboardingMode string
 

@@ -697,6 +697,40 @@ func (g *Gateway) reflexSystemPromptForSoul(ctx context.Context, soulID uuid.UUI
 	return strings.Join([]string{preamble, persona}, "\n\n"), nil
 }
 
+// expandCommandPrompt rewrites a configured prompt-shortcut command into
+// the question it stands for, and returns anything else untouched.
+//
+// The point is that the answer stays an ordinary turn: a host that wants
+// "/help" to describe what the assistant can do gets a reply assembled by
+// the assistant, from whatever it can actually do right now, rather than
+// a static page that begins drifting from the truth the day it is
+// written. Commands with no Prompt are menu entries for handlers that
+// already exist and pass through untouched.
+//
+// Arguments are ignored rather than appended: "/help про файлы" would
+// otherwise splice into the configured question and produce something
+// nobody wrote.
+func (g *Gateway) expandCommandPrompt(bi *botInstance, text string) string {
+	if !strings.HasPrefix(strings.TrimSpace(text), "/") {
+		return text
+	}
+	cmd, forUs := g.parseCommand(bi, text)
+	if !forUs || cmd == "" {
+		return text
+	}
+	name := strings.ToLower(strings.TrimPrefix(cmd, "/"))
+	for _, c := range g.deps.Config.Gateway.Commands {
+		if c.Prompt == "" {
+			continue
+		}
+		if strings.ToLower(strings.TrimPrefix(strings.TrimSpace(c.Name), "/")) == name {
+			g.logger.Debug("gateway: expanded command prompt", "command", name)
+			return c.Prompt
+		}
+	}
+	return text
+}
+
 // Run drives the multi-bot fan-in: every registered bot's poller writes
 // into g.updatesChan tagged with its id; this loop dispatches each
 // tagged update to handleUpdate. The host is expected to have called
@@ -784,7 +818,11 @@ func (g *Gateway) prepareTelegramInbound(
 		g.logger.Info("gateway: execution denied",
 			"chat_id", chatID, "user_id", us.UserID, "reason", decision.Reason)
 		if bi != nil && bi.client != nil {
-			_, _ = bi.client.SendMessage(ctx, fmt.Sprintf("%d", rawChatID), g.deps.Config.UI.ExecutionDenied)
+			denial := decision.Message
+			if denial == "" {
+				denial = g.deps.Config.UI.ExecutionDenied
+			}
+			_, _ = bi.client.SendMessage(ctx, fmt.Sprintf("%d", rawChatID), denial)
 		}
 		return nil, 0, false
 	}
@@ -858,6 +896,11 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	if strings.TrimSpace(text) == "" && msg.Document == nil && msg.Voice == nil && msg.Video == nil && msg.VideoNote == nil && len(msg.Photo) == 0 {
 		return
 	}
+	// Expand prompt shortcuts before anything looks at the text, so a
+	// shortcut is indistinguishable from the user having typed the
+	// question — including to the onboarding dispatcher, which would
+	// otherwise treat it as an unrecognised command.
+	text = g.expandCommandPrompt(bi, text)
 	us, admissionVersion, admitted := g.prepareTelegramInbound(ctx, bi, msg, text)
 	if !admitted {
 		return

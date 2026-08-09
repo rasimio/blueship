@@ -247,6 +247,33 @@ func (c *Client) AnswerCallbackQuery(ctx context.Context, callbackID string) err
 	return err
 }
 
+// BotCommand is one entry in the client's command menu — the list behind
+// Telegram's "Menu" button and the autocomplete that opens on "/".
+type BotCommand struct {
+	Command     string `json:"command"`
+	Description string `json:"description"`
+}
+
+// SetMyCommands publishes this bot's command menu. An empty list clears
+// it, which is Telegram's own semantics and the right outcome for a host
+// that configures none.
+//
+// Telegram keeps this menu server-side and indefinitely: it survives our
+// restarts, and a command left in it after we stop handling it goes on
+// being offered forever. Publishing on every bot registration therefore
+// makes the visible menu a function of the running config rather than of
+// whatever was last set by hand in BotFather.
+func (c *Client) SetMyCommands(ctx context.Context, commands []BotCommand) error {
+	if !c.IsConfigured() {
+		return nil
+	}
+	if commands == nil {
+		commands = []BotCommand{}
+	}
+	_, err := c.postJSON(ctx, "setMyCommands", map[string]any{"commands": commands})
+	return err
+}
+
 func (c *Client) postJSON(ctx context.Context, method string, payload map[string]any) (*SendMessageResult, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {

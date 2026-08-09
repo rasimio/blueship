@@ -199,6 +199,21 @@ type BotOnboardingComplete struct {
 	CharacterTags        []string // up to 5 entries from the 16-trait palette
 	CharacterDescription string   // up to 400 chars, trimmed; may be empty
 
+	// SignupSource is the deep-link payload the account arrived on —
+	// everything after "/start " on the message that began onboarding,
+	// e.g. the campaign token in t.me/<bot>?start=<token>. Empty when
+	// somebody opened the bot without one.
+	//
+	// Opaque to the framework: it is copied through untouched beyond the
+	// transport's own bounds (Telegram's deep-link charset and 64-char
+	// cap), because what a token means is the host's business.
+	//
+	// A host that records it should treat the first one as the answer.
+	// Later /start payloads come from people who already have accounts
+	// clicking a second link, and letting those overwrite would credit
+	// acquisition to whichever campaign a returning user saw last.
+	SignupSource string
+
 	// UserDisplayName is the person's own name, taken from the transport
 	// (Telegram's from.first_name). It is NOT the assistant's name.
 	//

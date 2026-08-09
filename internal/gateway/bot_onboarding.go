@@ -88,7 +88,12 @@ const (
 	onbDataTraitsMsgID = "traits_msg_id" // message_id of the live traits keyboard, for edit-in-place
 	onbDataEdit        = "edit"          // true when the run updates an existing soul instead of creating one
 	onbDataTurns       = "turns"         // exchanges counted while step=offer_pending
+	onbDataSource      = "source"        // deep-link payload the /start that opened the flow carried
 
+	// onbMaxSourceRunes bounds the recorded deep-link payload. Telegram
+	// caps its own at 64; anything longer was typed by hand and is not a
+	// campaign token.
+	onbMaxSourceRunes = 64
 )
 
 // onbVoice aliases the host-supplied palette entry so the picker code
@@ -227,10 +232,30 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 		// its answers.
 	}
 
+	// A user with no identity carrying an FSM row, while the flow is
+	// instant, is holding a half-finished wizard from a mode that no
+	// longer runs. Discard it and sign them up the way everyone else is
+	// signed up — resuming a five-step form they abandoned, on a
+	// deployment that has since decided not to ask those questions at
+	// all, would strand them somewhere nobody else can reach.
+	//
+	// Only reachable for users who are NOT onboarded: an edit run belongs
+	// to someone who is, and is handled above.
+	if step != "" && g.flow().Mode == bs.OnboardingModeInstant {
+		g.logger.Info("gateway: discarding wizard state left over from a previous flow",
+			"tg_user", tgUserID, "step", step)
+		if err := g.deps.BotOnboarding.ClearState(ctx, tgUserID, bi.id); err != nil {
+			g.logger.Warn("gateway: clearing stale onboarding state failed",
+				"tg_user", tgUserID, "error", err)
+			return false
+		}
+		step, data = "", nil
+	}
+
 	// No state row yet.
 	if step == "" {
 		if g.flow().Mode == bs.OnboardingModeInstant {
-			return g.onboardingInstant(ctx, bi, chatID, tgChatID, tgUserID, senderName, isStart)
+			return g.onboardingInstant(ctx, bi, chatID, tgChatID, tgUserID, senderName, g.signupSource(bi, text), isStart)
 		}
 		// Wizard: only /start kicks off the flow — random text from an
 		// unknown chat still hits the standard unpaired-chat policy
@@ -239,7 +264,7 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 		if !isStart {
 			return false
 		}
-		return g.onboardingStart(ctx, bi, tgChatID, tgUserID)
+		return g.onboardingStart(ctx, bi, tgChatID, tgUserID, g.signupSource(bi, text))
 	}
 
 	// /start mid-flow re-emits the current step without resetting.
@@ -371,7 +396,7 @@ func (g *Gateway) onboardingInstant(
 	bi *botInstance,
 	chatID string,
 	tgChatID, tgUserID int64,
-	senderName string,
+	senderName, source string,
 	greet bool,
 ) bool {
 	flow := g.flow()
@@ -381,6 +406,7 @@ func (g *Gateway) onboardingInstant(
 		TGChatID:        tgChatID,
 		Name:            flow.DefaultName,
 		UserDisplayName: senderName,
+		SignupSource:    source,
 		VoiceID:         flow.DefaultVoice,
 		CharacterTags:   flow.DefaultTags,
 	})
@@ -584,6 +610,44 @@ func turnsFromData(data map[string]any) int {
 	return 0
 }
 
+// signupSource extracts the deep-link payload from a /start, or "" when
+// the message is not a /start, carries no payload, or carries something
+// that could not have come from a deep link.
+//
+// The charset check is Telegram's own: it accepts A-Za-z0-9_- in the
+// start parameter and nothing else. Anything outside that was typed by
+// hand into the chat, so recording it would put arbitrary user text into
+// whatever the host reports acquisition from — the one field that has to
+// stay a small closed set to be worth counting.
+func (g *Gateway) signupSource(bi *botInstance, text string) string {
+	cmd, args, forUs := parseStartCommandArgs(g, bi, text)
+	if !forUs || cmd != "/start" {
+		return ""
+	}
+	payload := strings.TrimSpace(args)
+	if payload == "" || len([]rune(payload)) > onbMaxSourceRunes {
+		return ""
+	}
+	for _, r := range payload {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			g.logger.Debug("gateway: ignoring non-deeplink /start payload")
+			return ""
+		}
+	}
+	return payload
+}
+
+// sourceFromData reads the payload stashed when the wizard began. The
+// wizard creates the account several steps after the /start that carried
+// it, so it has to survive in the FSM row; instant mode has no such gap
+// and passes it straight through.
+func sourceFromData(data map[string]any) string {
+	s, _ := data[onbDataSource].(string)
+	return s
+}
+
 // isEditRun reports whether the in-flight FSM run updates an existing
 // soul rather than creating one.
 func isEditRun(data map[string]any) bool {
@@ -593,8 +657,14 @@ func isEditRun(data map[string]any) bool {
 
 // -- Step 1: entry / ask_name -------------------------------------------------
 
-func (g *Gateway) onboardingStart(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64) bool {
-	if err := g.deps.BotOnboarding.AdvanceStep(ctx, tgUserID, bi.id, onbStepAskName, nil); err != nil {
+func (g *Gateway) onboardingStart(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, source string) bool {
+	var data map[string]any
+	if source != "" {
+		// Carried through the whole wizard because the account is created
+		// four steps after the /start that named the campaign.
+		data = map[string]any{onbDataSource: source}
+	}
+	if err := g.deps.BotOnboarding.AdvanceStep(ctx, tgUserID, bi.id, onbStepAskName, data); err != nil {
 		g.logger.Warn("gateway: onboarding AdvanceStep(start) failed",
 			"tg_user", tgUserID, "error", err)
 		return false
@@ -839,6 +909,7 @@ func (g *Gateway) onboardingFinalize(ctx context.Context, bi *botInstance, tgCha
 		TGChatID:             tgChatID,
 		Name:                 name,
 		UserDisplayName:      senderName,
+		SignupSource:         sourceFromData(data),
 		VoiceID:              voiceID,
 		CharacterTags:        tags,
 		CharacterDescription: desc,

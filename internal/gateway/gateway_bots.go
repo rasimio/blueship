@@ -199,12 +199,63 @@ func (g *Gateway) registerBot(parentCtx context.Context, cfg bs.BotConfig) error
 		"username", me.Username,
 	)
 
+	g.publishCommands(ctx, bi)
+
 	// Spawn the poller goroutine. Each tick lands updates into a
 	// per-bot channel that we then tag and forward into the shared
 	// fan-in. A poller crash drops THIS bot's updates only; the others
 	// keep going.
 	go g.runBotPoller(ctx, bi)
 	return nil
+}
+
+// publishCommands pushes the configured command menu to Telegram.
+//
+// Best effort on purpose: the menu is discoverability, and a bot that
+// answers every command correctly while showing a stale menu is far
+// better than a bot that refuses to start because Telegram was briefly
+// unreachable. Failures are logged and the registration continues.
+func (g *Gateway) publishCommands(ctx context.Context, bi *botInstance) {
+	if bi == nil || bi.client == nil {
+		return
+	}
+	commands, skipped := telegramCommands(g.deps.Config.Gateway.Commands)
+	for _, name := range skipped {
+		g.logger.Warn("gateway: skipping malformed bot command",
+			"name", name, "bot_id", bi.id.String())
+	}
+
+	cmdCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := bi.client.SetMyCommands(cmdCtx, commands); err != nil {
+		g.logger.Warn("gateway: publishing command menu failed",
+			"bot_id", bi.id.String(), "count", len(commands), "error", err)
+		return
+	}
+	g.logger.Info("gateway: published command menu",
+		"bot_id", bi.id.String(), "count", len(commands))
+}
+
+// telegramCommands converts the configured menu into Telegram's shape,
+// returning the entries it dropped so the caller can say which.
+//
+// Dropping rather than failing, because Telegram rejects the whole
+// setMyCommands call on one bad entry: a single typo would otherwise cost
+// the entire menu, and no menu is much worse than a menu missing one row.
+func telegramCommands(configured []bs.BotCommand) (commands []telegram.BotCommand, skipped []string) {
+	commands = make([]telegram.BotCommand, 0, len(configured))
+	for _, c := range configured {
+		name := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(c.Name), "/"))
+		if name == "" || strings.TrimSpace(c.Description) == "" {
+			skipped = append(skipped, c.Name)
+			continue
+		}
+		commands = append(commands, telegram.BotCommand{
+			Command:     name,
+			Description: strings.TrimSpace(c.Description),
+		})
+	}
+	return commands, skipped
 }
 
 // runBotPoller drives one bot's long-polling loop, tagging every update

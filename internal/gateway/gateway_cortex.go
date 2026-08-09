@@ -319,7 +319,7 @@ func (g *Gateway) prepareCortexTurnWithRegistry(
 		registry: turnRegistry,
 		now:      now,
 		config: agent.RunConfig{
-			SessionID:           sess.ID,
+			SessionID: sess.ID,
 			// No clock here. The stamp changes every minute and this is the head
 			// of the cacheable prefix, so it used to invalidate the entire
 			// prompt on every message; the loop now carries it in the turn

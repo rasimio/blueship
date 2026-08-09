@@ -25,11 +25,23 @@ type ExecutionRequest struct {
 	Transport string
 }
 
-// ExecutionDecision is the host's admission result. Reason is for logs and
-// must not be shown directly to end users.
+// ExecutionDecision is the host's admission result.
 type ExecutionDecision struct {
 	Allowed bool
-	Reason  string
+
+	// Reason is a stable code for logs and must not be shown to end users.
+	Reason string
+
+	// Message is what the user reads when a turn is refused. Optional:
+	// empty falls back to UIStrings.ExecutionDenied.
+	//
+	// It exists because a host's reasons for refusing are not
+	// interchangeable — "your subscription lapsed" and "you have used
+	// today's messages" need different words and lead somewhere
+	// different — and only the host knows which applies, in what
+	// language, with what numbers in it. The framework carries the
+	// sentence; it never writes one.
+	Message string
 }
 
 // ExecutionAuthorizer is an optional host policy hook. Nil means allow, which

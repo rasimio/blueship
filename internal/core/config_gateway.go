@@ -126,6 +126,11 @@ type GatewayConfig struct {
 	// host that predates this field already gets.
 	OnboardingFlow OnboardingFlow `yaml:"-" json:"-"`
 
+	// Commands is the command menu published to Telegram on every bot
+	// registration, and the source of any prompt shortcuts. Empty clears
+	// the menu. See BotCommand.
+	Commands []BotCommand `yaml:"-" json:"-"`
+
 	// ResolveUserBotID maps a (user, Telegram chat) to the bot id that should
 	// deliver to them, for hosts that run multiple bots per user. The active
 	// soul is available through SoulIDFromContext, allowing a host to route
