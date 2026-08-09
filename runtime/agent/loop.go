@@ -376,28 +376,62 @@ func visibleTextPointer(content []bs.ContentBlock) *string {
 // beyond which the turn context carries an explicit elapsed-time reminder.
 const feltTimeStaleAfter = 6 * time.Hour
 
-const dialogDateFormat = "Monday 2006-01-02"
+// dialogGapMarkerAfter is the silence between two consecutive messages beyond
+// which the window gets an explicit clock reading.
+//
+// The day marker alone left the model unable to tell two minutes from eight
+// hours: inside one calendar day the window is an unbroken run of messages, so
+// a morning exchange and an evening one read as one continuous conversation.
+// That is how a reply came to place a training session and the report about it
+// at the same moment, three hours apart — the model was not guessing wildly, it
+// had nothing to guess from.
+//
+// 25 minutes marks the discontinuities a person would feel as "later" while
+// staying quiet through the back-and-forth of an actual conversation. Too small
+// and the window fills with markers nobody reads; too large and the afternoon
+// collapses into the morning again.
+const dialogGapMarkerAfter = 25 * time.Minute
 
-// annotateDialogDays inserts [date: <Weekday YYYY-MM-DD>] user-role markers
-// into the rendered dialog window wherever the calendar day (in now's
-// timezone) changes — including one before the first message, so the model
-// can attribute every part of the transcript to a real day instead of
-// reading the whole window as "today". No-op when now is zero. Markers are
-// prompt-only; nothing is persisted.
+const dialogDateFormat = "Monday 2006-01-02"
+const dialogTimeFormat = "15:04"
+
+// annotateDialogDays inserts user-role time markers into the rendered dialog
+// window: [date: <Weekday YYYY-MM-DD> HH:MM] wherever the calendar day (in
+// now's timezone) changes — including one before the first message, so the
+// model can attribute every part of the transcript to a real day instead of
+// reading the whole window as "today" — and [time: HH:MM] wherever the gap
+// since the previous message exceeds dialogGapMarkerAfter, so it can also tell
+// when a single day has a hole in it.
+//
+// Both markers are stable once emitted: each is derived from one message's own
+// created_at, which never changes, so a marker inserted today reads identically
+// tomorrow. That is what rules out the obvious alternative of stamping every
+// message with a relative "N minutes ago" — the dialogue prefix has to stay
+// byte-identical between turns or prompt caching cannot hold.
+//
+// No-op when now is zero. Markers are prompt-only; nothing is persisted.
 func annotateDialogDays(msgs []bs.Message, now time.Time) []bs.Message {
 	if now.IsZero() || len(msgs) == 0 {
 		return msgs
 	}
 	loc := now.Location()
-	out := make([]bs.Message, 0, len(msgs)+4)
+	out := make([]bs.Message, 0, len(msgs)+8)
 	lastDay := ""
+	var prev time.Time
 	for _, m := range msgs {
 		if !m.CreatedAt.IsZero() {
-			day := m.CreatedAt.In(loc).Format(dialogDateFormat)
-			if day != lastDay {
-				out = append(out, bs.Message{Role: "user", Content: "[date: " + day + "]"})
+			at := m.CreatedAt.In(loc)
+			day := at.Format(dialogDateFormat)
+			switch {
+			case day != lastDay:
+				out = append(out, bs.Message{Role: "user",
+					Content: "[date: " + day + " " + at.Format(dialogTimeFormat) + "]"})
 				lastDay = day
+			case !prev.IsZero() && at.Sub(prev) >= dialogGapMarkerAfter:
+				out = append(out, bs.Message{Role: "user",
+					Content: "[time: " + at.Format(dialogTimeFormat) + "]"})
 			}
+			prev = at
 		}
 		out = append(out, m)
 	}
