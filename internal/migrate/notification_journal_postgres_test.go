@@ -400,7 +400,22 @@ func newNotificationJournalPostgresStore(t *testing.T, dsn string) (*core.AgentT
 			content JSONB NOT NULL,
 			token_estimate INT NOT NULL DEFAULT 0,
 			tg_message_id BIGINT,
-			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			-- Not decoration: the write path under test inserts into these, so a
+			-- fixture without them fails with 42703 for every input. This test
+			-- skips unless BLUESHIP_TEST_POSTGRES_DSN is set and CI never set it,
+			-- so it had never once run — it was red the first time any database
+			-- was pointed at it.
+			-- Nullability copied from production, not chosen: visible_text and
+			-- projection_reason are nullable there and the writer passes NULL for
+			-- them, so a stricter fixture fails with 23502 instead of testing
+			-- anything. The two NOT NULL columns carry production's defaults for
+			-- the same reason.
+			visible_text      TEXT,
+			projection_status TEXT NOT NULL DEFAULT 'unprojectable_legacy',
+			projection_reason TEXT,
+			projector_version TEXT NOT NULL DEFAULT 'legacy-unprojected',
+			tool_use_id       TEXT
 		);
 		CREATE TABLE agent_task_deliveries (
 			task_id UUID NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
