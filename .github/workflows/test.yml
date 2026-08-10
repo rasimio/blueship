@@ -1,77 +1,94 @@
 name: Test
 
-# BlueShip had no test gate. Its only workflow was agent-isolation, which builds
-# and greps for agent-specific names — there was no `go test` in CI at all, so
-# twenty-odd test packages covering prompt assembly, the dialogue window, the
-# session store and every provider ran nowhere. Bugs in them reached production
-# and were found by users.
+# BlueShip had no test gate. Its only workflow builds and greps for
+# agent-specific names, so twenty-odd packages covering prompt assembly, the
+# dialogue window, the session store and every provider ran nowhere at all. This
+# is the repository the bugs users report live in, and nothing checked it.
 #
-# It was worse than absent. agent-isolation has been failing on every commit for
-# long enough that a red result carried no information, so even its build job's
-# verdict was buried. This workflow is deliberately separate: its status means one
-# thing and nothing else.
+# It was worse than absent: agent-isolation has failed on every commit for long
+# enough that red carries no information, so even its build verdict was buried.
+# This workflow is separate on purpose — its status means one thing.
 
 on:
   push:
   pull_request:
   workflow_dispatch:
 
-# One run per ref: a new push cancels the previous, still-queued run. Note the
-# consequence, because it has already bitten this project once — two pushes in
-# quick succession leave the first commit unverified, and a red commit can ride
-# into main under a green one. The pair is tested together by the second run.
+# One run per ref: a new push cancels the previous, still-queued run. The
+# consequence has already bitten this project — two pushes in quick succession
+# leave the first commit unverified, and a red commit can ride into main under a
+# green one. The pair is tested together by the second run.
 concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
-    runs-on: self-hosted
-    # The host has one runner, so a hung job holds every other workflow behind
-    # it. The suite takes about a minute; this is a ceiling, not a target.
-    timeout-minutes: 30
+    # GitHub-hosted, NOT self-hosted, and that is deliberate after getting it
+    # wrong: this repository has zero self-hosted runners and the account is not
+    # an organisation, so there are no org-level ones either. A `runs-on:
+    # self-hosted` job here queues forever — a gate that looks present and never
+    # runs, which is the exact failure this workflow was written to end. The one
+    # self-hosted runner belongs to the arlene repository and is already the
+    # bottleneck for its Test, Deploy and Memory Lab.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # A real Postgres, because the tests that matter most here are the ones a
+    # mock cannot see: a boundary INSERT that was dead in production for months
+    # passed a fully-mocked suite, and the dialogue-window boundary lives in a
+    # JOIN. No pgvector needed — nothing in this repo's tests uses vectors.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: blueship
+          POSTGRES_DB: blueship_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
+    env:
+      # The DB-backed tests skip without this, and skipping is how they came to
+      # be broken: internal/migrate's notification-journal test had never run
+      # once, and failed the first time a database was pointed at it because its
+      # fixture lacked columns the write path inserts into. What it covers is the
+      # boundary INSERT that stayed dead in production — it would have caught
+      # that on the first push.
+      BLUESHIP_TEST_POSTGRES_DSN: postgres://postgres:blueship@localhost:5432/blueship_test?sslmode=disable
+
     steps:
-      # Into this job's own workspace, never ~/tensai/*: the deploy job for
-      # arlene works directly in the prod checkout of this repo, and sharing it
-      # would race with a concurrent deploy.
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Build, vet, test
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build and vet
         run: |
-          export PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
-
-          # The DB-backed tests skip without a DSN, and skipping is how they came
-          # to be broken: internal/migrate's notification-journal test had never
-          # run once, and failed the first time a database was pointed at it —
-          # its fixture was missing columns the write path inserts into. A gate
-          # whose hardest tests silently skip is the gate that let a boundary
-          # INSERT stay dead in production for months.
-          #
-          # These create and drop their own ephemeral schemas and databases and
-          # never touch application data.
-          PGPW=$(grep '^PG_PASSWORD=' ~/tensai/arlene/.env | cut -d= -f2)
-          export BLUESHIP_TEST_POSTGRES_DSN="postgres://arlenekate:${PGPW}@localhost:13101/postgres?sslmode=disable"
-
           go build ./...
           go vet ./...
-          go test ./... -timeout 15m
 
-      # A skip is not a pass. If the DSN stops resolving — a rotated password, a
-      # moved .env — every database test goes quietly green again, which is the
-      # exact failure mode this workflow exists to end. So the run is asserted to
-      # have actually executed them.
-      - name: Assert the database tests actually ran
+      - name: Test
+        run: go test ./... -timeout 15m
+
+      # A skip is not a pass. If the DSN stops resolving — a renamed service, a
+      # changed port — every database test goes quietly green again, which is the
+      # failure mode this workflow exists to end. So the run asserts they
+      # actually executed.
+      - name: Assert the database tests ran
         run: |
-          export PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
-          PGPW=$(grep '^PG_PASSWORD=' ~/tensai/arlene/.env | cut -d= -f2)
-          export BLUESHIP_TEST_POSTGRES_DSN="postgres://arlenekate:${PGPW}@localhost:13101/postgres?sslmode=disable"
-
-          out=$(go test ./internal/migrate/ ./runtime/session/ -run 'Postgres|DialogWindow|LatestSoftSummary' -count=1 -v 2>&1)
-          if echo "$out" | grep -q 'SKIP'; then
-            echo "$out" | grep -B2 'SKIP' >&2
+          out=$(go test ./internal/migrate/ ./runtime/session/ \
+                  -run 'Postgres|DialogWindow|LatestSoftSummary' -count=1 -v 2>&1)
+          if grep -q 'SKIP' <<<"$out"; then
+            grep -B2 'SKIP' <<<"$out" >&2
             echo "ERROR: database tests skipped — BLUESHIP_TEST_POSTGRES_DSN did not resolve." >&2
             echo "       They pass by not running, which is what this check exists to catch." >&2
             exit 1
           fi
-          echo "$out" | grep -cE '^(=== RUN|--- PASS)' | xargs echo "database test lines executed:"
+          grep -cE '^(=== RUN|--- PASS)' <<<"$out" | xargs echo "database test lines executed:"
