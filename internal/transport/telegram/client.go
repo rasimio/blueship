@@ -155,10 +155,14 @@ func (c *Client) SendMessage(ctx context.Context, chatID string, text string) (*
 	return result, err
 }
 
-// InlineKeyboardButton represents one button in an inline keyboard.
+// InlineKeyboardButton is one button. Telegram requires exactly one
+// optional field per button, so both are omitempty: a callback button
+// carrying an empty "url", or a link button carrying an empty
+// "callback_data", is rejected for the whole keyboard.
 type InlineKeyboardButton struct {
 	Text         string `json:"text"`
-	CallbackData string `json:"callback_data"`
+	CallbackData string `json:"callback_data,omitempty"`
+	URL          string `json:"url,omitempty"`
 }
 
 // SendMessageWithKeyboard sends a message with an inline keyboard.

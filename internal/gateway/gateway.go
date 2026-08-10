@@ -731,6 +731,64 @@ func (g *Gateway) expandCommandPrompt(bi *botInstance, text string) string {
 	return text
 }
 
+// maybeRunHostCommand dispatches a command the host answers itself.
+// Returns true when the message was one, so the caller stops.
+//
+// The reply may carry a single link button — the way a host hands over
+// something the chat cannot produce on its own, a payment page being the
+// case this was built for.
+func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, tgChatID int64, us *UserState, text string) bool {
+	if g.deps.CommandHandler == nil || us == nil {
+		return false
+	}
+	cmd, forUs := g.parseCommand(bi, text)
+	if !forUs || cmd == "" {
+		return false
+	}
+	name := strings.ToLower(strings.TrimPrefix(cmd, "/"))
+
+	handled := false
+	for _, c := range g.deps.Config.Gateway.Commands {
+		if c.Host && strings.ToLower(strings.TrimPrefix(strings.TrimSpace(c.Name), "/")) == name {
+			handled = true
+			break
+		}
+	}
+	if !handled {
+		return false
+	}
+
+	args := ""
+	if i := strings.IndexByte(strings.TrimSpace(text), ' '); i >= 0 {
+		args = strings.TrimSpace(strings.TrimSpace(text)[i+1:])
+	}
+
+	result, err := g.deps.CommandHandler(ctx, bs.BotCommandRequest{
+		Name: name, Args: args, UserID: us.UserID, SoulID: us.SoulID,
+	})
+	if err != nil {
+		g.logger.Error("gateway: host command failed",
+			"command", name, "user_id", us.UserID, "error", err)
+		// Consumed either way: the alternative is handing "/plus foo@bar"
+		// to the model as if it were conversation.
+		return true
+	}
+	if strings.TrimSpace(result.Text) == "" {
+		return true
+	}
+	if result.ButtonURL == "" || result.ButtonLabel == "" {
+		g.sendOnboardingText(ctx, bi, tgChatID, result.Text)
+		return true
+	}
+	rows := [][]telegram.InlineKeyboardButton{{
+		{Text: result.ButtonLabel, URL: result.ButtonURL},
+	}}
+	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, result.Text, rows); err != nil {
+		g.logger.Warn("gateway: host command reply failed", "command", name, "error", err)
+	}
+	return true
+}
+
 // Run drives the multi-bot fan-in: every registered bot's poller writes
 // into g.updatesChan tagged with its id; this loop dispatches each
 // tagged update to handleUpdate. The host is expected to have called
@@ -808,6 +866,15 @@ func (g *Gateway) prepareTelegramInbound(
 		g.logger.Debug("ignored message", "chat_id", chatID, "error", err)
 		return nil, 0, false
 	}
+
+	// Host-handled commands run before the execution policy, deliberately.
+	// The case they exist for is somebody the policy has just refused who
+	// needs a way to do something about it — putting them behind the same
+	// gate that said no would close the loop.
+	if g.maybeRunHostCommand(ctx, bi, rawChatID, us, text) {
+		return nil, 0, false
+	}
+
 	decision, err := g.authorizeExecution(ctx, us.UserID, us.SoulID, bs.ExecutionInteractive, "telegram")
 	if err != nil {
 		g.logger.Warn("gateway: execution authorization failed",

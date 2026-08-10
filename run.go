@@ -66,6 +66,7 @@ func (s *Ship) Run(ctx context.Context) error {
 	deps.AttachmentSink = s.cfg.Gateway.AttachmentSink
 	deps.BotOnboarding = s.cfg.Gateway.BotOnboarding
 	deps.PersonaEditor = s.cfg.Gateway.PersonaEditor
+	deps.CommandHandler = s.cfg.Gateway.CommandHandler
 	deps.DeeplinkLogin = s.cfg.Gateway.DeeplinkLogin
 	deps.DeeplinkLink = s.cfg.Gateway.DeeplinkLink
 	deps.AuthorizeExecution = s.cfg.AuthorizeExecution

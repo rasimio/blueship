@@ -20,10 +20,10 @@ const XlsxTextHeadCap = 60_000
 // so the model can ask for a narrower slice instead of pretending it
 // saw everything.
 const (
-	xlsxMaxSheets      = 10
-	xlsxMaxRowsSheet   = 200
-	xlsxMaxCols        = 30
-	xlsxMaxCellRunes   = 200
+	xlsxMaxSheets    = 10
+	xlsxMaxRowsSheet = 200
+	xlsxMaxCols      = 30
+	xlsxMaxCellRunes = 200
 )
 
 // mimeXlsx is the canonical MIME for an Excel .xlsx (OOXML spreadsheet).

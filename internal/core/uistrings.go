@@ -1,9 +1,12 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 // UIStrings holds the framework-emitted, human-language strings a host may
@@ -66,6 +69,8 @@ func (u *UIStrings) applyDefaults() {
 //     and dispatched as though the user had typed it, so the answer is an
 //     ordinary turn with ordinary tools rather than a static help page
 //     that starts drifting from the truth the day it is written.
+//   - Host set — the host answers it directly, through
+//     Deps.BotCommandHandler, without a model turn.
 //
 // Name and Description are host copy in the host's language; the
 // framework has no commands and no words of its own.
@@ -75,7 +80,38 @@ type BotCommand struct {
 	Name        string
 	Description string
 	Prompt      string
+
+	// Host routes the command to Deps.BotCommandHandler instead of to a
+	// model turn. Mutually exclusive with Prompt.
+	//
+	// Host commands are admitted BEFORE the execution policy runs, which
+	// is the point of having them: the case they exist for is a person
+	// who has been refused a turn and needs a way to do something about
+	// it. Routing "let me pay" through the same gate that just said no
+	// would be a closed loop.
+	Host bool
 }
+
+// BotCommandRequest is one host-handled command invocation.
+type BotCommandRequest struct {
+	Name   string // without the leading slash
+	Args   string // everything after the command, trimmed
+	UserID uuid.UUID
+	SoulID uuid.UUID
+}
+
+// BotCommandResult is what the host wants said back. Text is required;
+// ButtonURL adds a single link button under it, which is how a host
+// hands over something the chat cannot render itself.
+type BotCommandResult struct {
+	Text        string
+	ButtonLabel string
+	ButtonURL   string
+}
+
+// BotCommandHandler answers host-handled commands. Nil means no command
+// is host-handled, whatever the config says.
+type BotCommandHandler func(context.Context, BotCommandRequest) (BotCommandResult, error)
 
 // OnboardingMode selects what a fresh /start on an unpaired chat does.
 type OnboardingMode string

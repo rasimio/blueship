@@ -187,10 +187,11 @@ type Deps struct {
 	// Nil disables the inline path — the gateway falls back to
 	// replyUnpaired (platform greet / user-bot silence). Mirrors the
 	// Config.Gateway field; ship.go copies it across at InitDeps time.
-	BotOnboarding BotOnboarding
-	PersonaEditor BotPersonaEditor
-	DeeplinkLogin DeeplinkLoginApprover
-	DeeplinkLink  DeeplinkLinker
+	BotOnboarding  BotOnboarding
+	PersonaEditor  BotPersonaEditor
+	CommandHandler BotCommandHandler
+	DeeplinkLogin  DeeplinkLoginApprover
+	DeeplinkLink   DeeplinkLinker
 
 	// AuthorizeExecution mirrors Config.AuthorizeExecution. Gateway and
 	// scheduler call it at execution boundaries, including cached users.
@@ -241,6 +242,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		SendToUserAttachment:           d.SendToUserAttachment,
 		BotOnboarding:                  d.BotOnboarding,
 		PersonaEditor:                  d.PersonaEditor,
+		CommandHandler:                 d.CommandHandler,
 		DeeplinkLogin:                  d.DeeplinkLogin,
 		DeeplinkLink:                   d.DeeplinkLink,
 		AuthorizeExecution:             d.AuthorizeExecution,

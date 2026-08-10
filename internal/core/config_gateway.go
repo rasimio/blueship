@@ -131,6 +131,9 @@ type GatewayConfig struct {
 	// the menu. See BotCommand.
 	Commands []BotCommand `yaml:"-" json:"-"`
 
+	// CommandHandler answers the commands marked Host. Nil disables them.
+	CommandHandler BotCommandHandler `yaml:"-" json:"-"`
+
 	// ResolveUserBotID maps a (user, Telegram chat) to the bot id that should
 	// deliver to them, for hosts that run multiple bots per user. The active
 	// soul is available through SoulIDFromContext, allowing a host to route

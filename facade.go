@@ -124,6 +124,9 @@ type (
 	OnboardingMode        = core.OnboardingMode
 	OnboardingSeedButton  = core.OnboardingSeedButton
 	BotCommand            = core.BotCommand
+	BotCommandRequest     = core.BotCommandRequest
+	BotCommandResult      = core.BotCommandResult
+	BotCommandHandler     = core.BotCommandHandler
 	BotPersonaEditor      = core.BotPersonaEditor
 	BotPersonaUpdate      = core.BotPersonaUpdate
 	OwnerConfig           = core.OwnerConfig
