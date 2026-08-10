@@ -245,16 +245,10 @@ func (tm *turnManager) startTurn(connCtx context.Context, inb bs.InboundMessage)
 			tm.logger.Warn("ws: process error", "error", err)
 			tm.w.write(connCtx, OutMsg{Type: "error", Data: err.Error()})
 		}
-		// If the turn was cancelled mid-stream, persist whatever was spoken
-		// so the session keeps user/assistant alternation intact (a dangling
-		// user message with no reply breaks the next turn's API call).
-		if turnCtx.Err() != nil {
-			if tm.auth.legacy {
-				tm.gw.PersistInterrupted(connCtx, tm.auth.chatID, h.spokenText())
-			} else {
-				tm.gw.PersistInterruptedForUser(connCtx, tm.auth.userID, tm.auth.soulID, deviceTransport, h.spokenText())
-			}
-		}
+		// A turn cancelled mid-stream persists its partial answer inside the
+		// gateway, under the conversation's turn lock, before this goroutine
+		// returns — so a queued interjection never reads a session that is
+		// still missing the interrupted reply.
 		select {
 		case tm.turnDone <- h:
 		case <-connCtx.Done():

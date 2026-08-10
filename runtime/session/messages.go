@@ -110,6 +110,28 @@ func (s *Store) LatestDialogMessageID(ctx context.Context, sessionID string) (st
 	return id, nil
 }
 
+// LatestDialogRole returns the role of the newest provider-visible dialogue
+// row, or "" for an empty session. A cancelled turn reads it before writing
+// its interrupted marker: the marker exists to keep user/assistant
+// alternation, so appending it where the newest row is already an assistant
+// message would break the very invariant it protects.
+func (s *Store) LatestDialogRole(ctx context.Context, sessionID string) (string, error) {
+	var role string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT role FROM chat_messages
+		  WHERE session_id = $1 AND role IN ('user', 'assistant')
+		  ORDER BY created_at DESC, id DESC LIMIT 1`,
+		sessionID,
+	).Scan(&role)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", fmt.Errorf("latest dialog role: %w", err)
+	}
+	return role, nil
+}
+
 // AppendAutonomousAssistant atomically inserts an invisible turn boundary and
 // its assistant message. The boundary prevents write-time consumers from
 // treating an assistant-initiated message as the answer to the previous user

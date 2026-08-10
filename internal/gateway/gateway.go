@@ -86,6 +86,13 @@ type Gateway struct {
 	// concurrently.
 	turnLocks sync.Map // map[string]*sync.Mutex
 
+	// activeTurns holds the cancel handle of the turn currently running for
+	// one (user, soul), so a stop arriving on any transport — a button in
+	// the cabinet, an inline button in Telegram — reaches the generation it
+	// refers to. Same key as turnLocks: turns are serialised per
+	// conversation, so an entry is either there or the conversation is idle.
+	activeTurns sync.Map // map[string]*turnHandle
+
 	// conversationActivity closes the gap between transport ingress and
 	// chat_messages persistence. In particular, a Telegram message spends a
 	// short time in the debouncer before processMessages can append it. An
@@ -875,6 +882,14 @@ func (g *Gateway) prepareTelegramInbound(
 		return nil, 0, false
 	}
 
+	// Stopping runs before the execution policy for the same reason host
+	// commands do: it consumes nothing, and a ceiling that ticks over while
+	// an answer is being written must not leave the person watching it with
+	// no way to end it.
+	if g.maybeRunStopCommand(ctx, bi, rawChatID, us, text) {
+		return nil, 0, false
+	}
+
 	decision, err := g.authorizeExecution(ctx, us.UserID, us.SoulID, bs.ExecutionInteractive, "telegram")
 	if err != nil {
 		g.logger.Warn("gateway: execution authorization failed",
@@ -937,6 +952,11 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	// handleModelCallback in model_command.go. Restoration: rebuild with
 	// `-tags legacy_commands` and uncomment the dispatch below.
 	if cq := update.CallbackQuery; cq != nil {
+		// Stop answers the callback itself: it has a toast to show, and the
+		// blanket answer below would consume the query before it could.
+		if g.maybeHandleStopCallback(ctx, bi, cq) {
+			return
+		}
 		bi.client.AnswerCallbackQuery(ctx, cq.ID)
 		// Bot-onboarding inline keyboards (preset picker) land here.
 		// Handled before the legacy model dispatch so a fresh user's

@@ -90,6 +90,8 @@ func (s *Server) Run(ctx context.Context) error {
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /chat", s.handleChat)
+	mux.HandleFunc("POST /chat/stop", s.handleStop)
+	mux.HandleFunc("GET /chat/state", s.handleState)
 	mux.Handle(
 		"POST /api/internal/tools/invoke",
 		s.requireInternalBearer(http.HandlerFunc(s.handleInvokeTool)),
@@ -188,6 +190,29 @@ type chatAttachment struct {
 	// side by the request body limit (we don't enforce a per-file cap
 	// beyond that — vaelum already rejects oversized uploads).
 	DataB64 string `json:"data_b64"`
+}
+
+// stopRequest asks for the turn in flight on one conversation to end.
+// TurnID names the generation the caller means: a stop pressed as a turn
+// finishes must not land on the next one. Empty means "whatever is running".
+type stopRequest struct {
+	UserID string `json:"user_id"`
+	SoulID string `json:"soul_id"`
+	TurnID string `json:"turn_id,omitempty"`
+}
+
+type stopResponse struct {
+	Stopped bool `json:"stopped"`
+}
+
+// stateResponse tells a reconnecting client whether an answer is being
+// written right now, and which one — so a reloaded page can restore the live
+// bubble with a working stop control instead of inferring it from the shape
+// of the history.
+type stateResponse struct {
+	Streaming bool   `json:"streaming"`
+	TurnID    string `json:"turn_id,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
 }
 
 type resetRequest struct {
@@ -382,28 +407,83 @@ func (s *Server) handleReset(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resetResponse{OldSessionID: oldID, NewSessionID: newID})
 }
 
+// handleStop ends the turn in flight for one conversation.
+//
+// It exists because /chat deliberately runs its turn on a context detached
+// from the request: a closed tab must not kill a generation. Nothing about
+// the streaming connection can end a turn any more, so stopping needs a
+// request of its own.
+func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
+	var req stopRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	userID, soulID, ok := s.conversation(w, r, req.UserID, req.SoulID)
+	if !ok {
+		return
+	}
+
+	stopped := s.gw.CancelTurn(userID, soulID, req.TurnID)
+	s.logger.Info("httpchat: stop requested",
+		"user_id", userID, "soul_id", soulID, "turn_id", req.TurnID, "stopped", stopped)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(stopResponse{Stopped: stopped})
+}
+
+// handleState reports whether a turn is being written for one conversation.
+func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
+	userID, soulID, ok := s.conversation(w, r, r.URL.Query().Get("user_id"), r.URL.Query().Get("soul_id"))
+	if !ok {
+		return
+	}
+
+	resp := stateResponse{}
+	if turn, running := s.gw.ActiveTurn(userID, soulID); running {
+		resp.Streaming = true
+		resp.TurnID = turn.ID
+		resp.StartedAt = turn.StartedAt.UTC().Format(time.RFC3339)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// conversation parses and authorises a (user, soul) pair, writing the error
+// response itself. The pairing check is the same one /chat runs: knowing the
+// service token is not the same as being allowed to touch a given soul.
+func (s *Server) conversation(w http.ResponseWriter, r *http.Request, rawUser, rawSoul string) (uuid.UUID, uuid.UUID, bool) {
+	userID, err := uuid.Parse(rawUser)
+	if err != nil {
+		http.Error(w, "invalid user_id", http.StatusBadRequest)
+		return uuid.Nil, uuid.Nil, false
+	}
+	soulID, err := uuid.Parse(rawSoul)
+	if err != nil {
+		http.Error(w, "invalid soul_id", http.StatusBadRequest)
+		return uuid.Nil, uuid.Nil, false
+	}
+	if s.validateUserSoul != nil {
+		if err := s.validateUserSoul(r.Context(), userID, soulID); err != nil {
+			s.logger.Warn("httpchat: user/soul validation failed",
+				"user_id", userID, "soul_id", soulID, "err", err)
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return uuid.Nil, uuid.Nil, false
+		}
+	}
+	return userID, soulID, true
+}
+
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	userID, err := uuid.Parse(req.UserID)
-	if err != nil {
-		http.Error(w, "invalid user_id", http.StatusBadRequest)
+	userID, soulID, ok := s.conversation(w, r, req.UserID, req.SoulID)
+	if !ok {
 		return
-	}
-	soulID, err := uuid.Parse(req.SoulID)
-	if err != nil {
-		http.Error(w, "invalid soul_id", http.StatusBadRequest)
-		return
-	}
-	if s.validateUserSoul != nil {
-		if err := s.validateUserSoul(r.Context(), userID, soulID); err != nil {
-			s.logger.Warn("httpchat: user/soul validation failed", "user_id", userID, "soul_id", soulID, "err", err)
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
 	}
 	if req.Text == "" && len(req.Attachments) == 0 {
 		http.Error(w, "empty message", http.StatusBadRequest)
@@ -491,8 +571,8 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	flusher, canFlush := w.(http.Flusher)
+	if !canFlush {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
@@ -535,9 +615,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			Images:           images,
 			ReplyToMessageID: req.ReplyToMessageID,
 			Ephemeral:        req.Source == "notebook",
-		}}, sink); err != nil {
+		}}, sink); err != nil && workCtx.Err() == nil {
 		s.logger.Warn("httpchat: process error", "error", err)
 		sink.event("error", err.Error())
+	}
+	// A cut-off turn is not an error: the partial answer is already on
+	// screen and persisted. Say so explicitly so the client can mark the
+	// bubble as stopped rather than as complete.
+	if workCtx.Err() != nil {
+		sink.event("stopped", "")
 	}
 	sink.event("done", "")
 }
@@ -673,6 +759,14 @@ func (s *sseSink) SendMeta(ctx context.Context, sessionID, messageID string) err
 		payload["message_id"] = messageID
 	}
 	s.emit(payload)
+	return nil
+}
+
+// SendTurnStart implements bs.TurnStartSink: name this turn before anything
+// streams, so the cabinet's stop button can address it and cannot stop a
+// later one by accident. It rides the meta frame the client already parses.
+func (s *sseSink) SendTurnStart(ctx context.Context, turnID string) error {
+	s.emit(map[string]string{"type": "meta", "turn_id": turnID})
 	return nil
 }
 

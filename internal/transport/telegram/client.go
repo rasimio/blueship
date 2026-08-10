@@ -243,11 +243,36 @@ func (c *Client) EditMessageReplyMarkup(ctx context.Context, chatID int64, messa
 
 // AnswerCallbackQuery answers a callback query (removes loading spinner).
 func (c *Client) AnswerCallbackQuery(ctx context.Context, callbackID string) error {
+	return c.AnswerCallbackQueryText(ctx, callbackID, "")
+}
+
+// AnswerCallbackQueryText answers a callback query with a toast the user
+// actually reads. Telegram shows the text as a notification above the chat,
+// which is the only feedback available for a button whose effect (a turn
+// stopping) takes a moment to become visible.
+func (c *Client) AnswerCallbackQueryText(ctx context.Context, callbackID, text string) error {
 	if !c.IsConfigured() {
 		return nil
 	}
 	payload := map[string]any{"callback_query_id": callbackID}
+	if text != "" {
+		payload["text"] = text
+	}
 	_, err := c.postJSON(ctx, "answerCallbackQuery", payload)
+	return err
+}
+
+// DeleteMessage removes a message the bot sent. Used to clean up a turn
+// placeholder that never became an answer, rather than leave a stray "…"
+// in the chat.
+func (c *Client) DeleteMessage(ctx context.Context, chatID int64, messageID int) error {
+	if !c.IsConfigured() {
+		return fmt.Errorf("telegram bot not configured")
+	}
+	_, err := c.postJSON(ctx, "deleteMessage", map[string]any{
+		"chat_id":    chatID,
+		"message_id": messageID,
+	})
 	return err
 }
 

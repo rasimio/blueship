@@ -82,6 +82,14 @@ type MetaSink interface {
 	SendMeta(ctx context.Context, sessionID, messageID string) error
 }
 
+// TurnStartSink is an optional sink capability for transports whose client
+// renders its own stop control. The gateway announces the id of the turn it
+// has just registered, so a stop can name the generation it means and cannot
+// land on whatever turn runs next. Fired once, before any stream event.
+type TurnStartSink interface {
+	SendTurnStart(ctx context.Context, turnID string) error
+}
+
 // ContextInfoSink is an optional sink capability for transports that
 // surface what went into the LLM's context window (AME memories + rule
 // engine matches + reflex strategy). The web cabinet renders this as a

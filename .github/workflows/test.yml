@@ -84,7 +84,7 @@ jobs:
       - name: Assert the database tests ran
         run: |
           out=$(go test ./internal/migrate/ ./runtime/session/ \
-                  -run 'Postgres|DialogWindow|LatestSoftSummary' -count=1 -v 2>&1)
+                  -run 'Postgres|DialogWindow|LatestSoftSummary|LatestDialogRole' -count=1 -v 2>&1)
           if grep -q 'SKIP' <<<"$out"; then
             grep -B2 'SKIP' <<<"$out" >&2
             echo "ERROR: database tests skipped — BLUESHIP_TEST_POSTGRES_DSN did not resolve." >&2

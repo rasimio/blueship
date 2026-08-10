@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -205,35 +204,36 @@ func (g *Gateway) ProcessInboundForUser(ctx context.Context, userID, soulID uuid
 	return nil
 }
 
-// PersistInterruptedForUser is the soul-aware counterpart to
-// PersistInterrupted — the barge-in voice path uses this when a turn is
-// cancelled mid-stream so the partial assistant reply persists against
-// the authenticated (user, soul), with no chatID round-trip.
-func (g *Gateway) PersistInterruptedForUser(_ context.Context, userID, soulID uuid.UUID, transport, partial string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// persistInterrupted records a cancelled turn's partial answer as the
+// assistant message for that turn, so the transcript keeps user/assistant
+// alternation — a user message with no reply breaks the next provider call
+// — and so the model can see, next turn, that it was cut off mid-sentence.
+//
+// A stop can also land before the turn ever persisted its user message: the
+// button is live from the moment the turn starts, while memory retrieval
+// runs ahead of the first append. There is nothing to keep alternating with
+// in that case, and a marker appended after the previous turn's assistant
+// message would break the next call rather than protect it — so the write is
+// skipped unless the transcript ends on a user row (a tool result counts:
+// that is a genuine mid-turn cut).
+//
+// Called from processMessages' defer, with the conversation's turn lock
+// still held: the marker has to be in the transcript before any queued turn
+// reads the session. The write runs on a detached context because the turn's
+// own context is, by definition, already cancelled.
+func (g *Gateway) persistInterrupted(ctx context.Context, sessionID, partial string) {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 
-	us, err := g.getOrInitPlatformUser(ctx, userID, soulID, transport)
+	role, err := g.store.LatestDialogRole(writeCtx, sessionID)
 	if err != nil {
-		g.logger.Warn("persist interrupted: init platform user failed", "error", err)
+		g.logger.Warn("persist interrupted: latest role lookup failed",
+			"session_id", sessionID, "error", err)
 		return
 	}
-	ctx = bs.WithSoulID(ctx, us.SoulID)
-
-	turnMu := g.turnMutex(us.UserID, us.SoulID)
-	turnMu.Lock()
-	defer turnMu.Unlock()
-
-	us.Mu.Lock()
-	defer us.Mu.Unlock()
-
-	sess, err := g.GetOrCreateSession(ctx, us)
-	if err != nil {
-		g.logger.Warn("persist interrupted: session failed", "error", err)
-		return
-	}
-	if err := g.ensureAutonomousHistoryLocked(ctx, us.UserID, us.SoulID, sess.ID); err != nil {
-		g.logger.Warn("persist interrupted: autonomous history barrier failed", "error", err)
+	if role != "user" {
+		g.logger.Info("persist interrupted: nothing to answer, skipping marker",
+			"session_id", sessionID, "latest_role", role)
 		return
 	}
 
@@ -243,11 +243,12 @@ func (g *Gateway) PersistInterruptedForUser(_ context.Context, userID, soulID uu
 	} else {
 		text += g.deps.Config.UI.InterruptSuffix
 	}
-	if err := g.store.Append(ctx, sess.ID, bs.Message{
-		Role:    "assistant",
-		Content: []bs.ContentBlock{{Type: "text", Text: text}},
+	if err := g.appendUnlessEphemeral(writeCtx, sessionID, bs.Message{
+		Role:        "assistant",
+		Content:     []bs.ContentBlock{{Type: "text", Text: text}},
+		VisibleText: &text,
 	}); err != nil {
-		g.logger.Warn("persist interrupted: append failed", "error", err)
+		g.logger.Warn("persist interrupted: append failed", "session_id", sessionID, "error", err)
 	}
 }
 
@@ -477,6 +478,38 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	turnMu.Lock()
 	defer turnMu.Unlock()
 	ctx = contextWithConversationTurn(ctx)
+
+	// Register the turn so a stop arriving on any transport can reach this
+	// generation, and record the partial answer when one does. Both defers
+	// run before turnMu is released, so a queued turn never starts before
+	// the interrupted reply is in the transcript.
+	ctx, turn, endTurn := g.beginTurn(ctx, us.UserID, us.SoulID)
+	defer endTurn()
+	var turnSessionID string
+	defer func() {
+		if ctx.Err() == nil || turnSessionID == "" {
+			return
+		}
+		g.persistInterrupted(ctx, turnSessionID, turn.partialText())
+	}()
+
+	// The message this turn will become, posted now with the stop control on
+	// it. Telling the client the turn id serves the same purpose on
+	// transports that render their own controls (the web cabinet).
+	preview := g.newTurnPreview(ctx, sink, turn.id)
+	defer func() {
+		settleCtx, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancelSettle()
+		if ctx.Err() != nil {
+			preview.settle(settleCtx, g.deps.Config.UI.InterruptMarker, g.deps.Config.UI.InterruptSuffix)
+			return
+		}
+		preview.settle(settleCtx, "", "")
+	}()
+	if ts, ok := sink.(bs.TurnStartSink); ok {
+		_ = ts.SendTurnStart(ctx, turn.id)
+	}
+
 	var (
 		activitySessionID      string
 		activityBaselineAnchor string
@@ -585,6 +618,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		g.sendDebugError(ctx, sink, "autonomous history", err)
 		return
 	}
+	turnSessionID = sess.ID
 	if baseline, err := g.store.LatestUserMessageAnchor(ctx, sess.ID); err != nil {
 		g.logger.Warn("inbound activity: baseline anchor lookup failed",
 			"session_id", sess.ID, "error", err)
@@ -1034,7 +1068,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			}
 		}
 
-		voiceCb := &bs.StreamCallbacks{OnText: onText}
+		voiceCb := turn.captureText(&bs.StreamCallbacks{OnText: onText})
 		interactionStarted := time.Now()
 		reply, _, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, voiceCb, voiceCb, reflexFlush)
 		timings.RecordSince("interaction.total", interactionStarted, "transport=voice")
@@ -1102,8 +1136,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		return
 	}
 
-	// Streaming path for Telegram: send placeholder, edit as chunks arrive.
-	tgSink, isTelegram := sink.(*telegramSink)
+	// Streaming path for Telegram: the placeholder posted at turn start is
+	// already on screen; edit it as chunks arrive.
+	_, isTelegram := sink.(*telegramSink)
 	if !isTelegram {
 		// Non-Telegram transports: text-streaming if sink supports it
 		// (http-chat SSE for the web cabinet), batch otherwise. Both
@@ -1112,7 +1147,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		// reply — otherwise the web cabinet would see an empty bubble
 		// and fall back to the "(no response)" stalled placeholder
 		// because the reply text never reaches a SendText call.
-		cortexCb := buildSinkCallbacks(ctx, sink)
+		cortexCb := turn.captureText(buildSinkCallbacks(ctx, sink))
 		interactionStarted := time.Now()
 		reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, cortexCb, cortexCb, nil)
 		timings.RecordSince("interaction.total", interactionStarted, "transport=text")
@@ -1169,83 +1204,12 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		return
 	}
 
-	// Telegram streaming: progressive message editing.
-	var (
-		streamMsgID int // Telegram message ID for edits
-		streamBuf   strings.Builder
-		lastEdit    time.Time
-		toolStatus  string // current tool being executed
-		previewErr  bool   // log the first transport failure, not every delta
-		mu          sync.Mutex
-	)
-
-	const editInterval = 600 * time.Millisecond
-
-	flushEdit := func() {
-		mu.Lock()
-		defer mu.Unlock()
-		if streamMsgID == 0 {
-			return
-		}
-		text := telegramPreviewText(streamBuf.String(), toolStatus)
-		if text == "" {
-			return
-		}
-		if time.Since(lastEdit) < editInterval {
-			return
-		}
-		if tgSink.client != nil {
-			if err := tgSink.client.EditMessageText(ctx, tgSink.chatID, streamMsgID, text, nil); err != nil && !previewErr {
-				previewErr = true
-				g.logger.Warn("telegram preview edit failed",
-					"chat_id", us.ChatID, "message_id", streamMsgID, "error", err)
-			}
-		}
-		lastEdit = time.Now()
-	}
-
-	// ensureMsg creates the Telegram message on first content (text or tool).
-	ensureMsg := func(text string) {
-		if streamMsgID != 0 || tgSink.client == nil {
-			return
-		}
-		text = telegramPreviewText(text, "")
-		res, err := tgSink.client.SendMessage(ctx, fmt.Sprintf("%d", tgSink.chatID), text)
-		if err == nil && res != nil && res.Result.MessageID != 0 {
-			streamMsgID = res.Result.MessageID
-			lastEdit = time.Now()
-		} else if err != nil && !previewErr {
-			previewErr = true
-			g.logger.Warn("telegram preview create failed", "chat_id", us.ChatID, "error", err)
-		}
-	}
-
-	onText := func(chunk string) {
-		mu.Lock()
-		streamBuf.WriteString(chunk)
-		text := strings.TrimSpace(streamBuf.String())
-		mu.Unlock()
-
-		if streamMsgID == 0 && len(text) > 10 {
-			// First meaningful chunk — create message
-			ensureMsg(text)
-		} else {
-			flushEdit()
-		}
-	}
-
-	onToolUse := func(name string) {
-		mu.Lock()
-		toolStatus = ">> " + name + "..."
-		mu.Unlock()
-		ensureMsg("`>> " + name + "...`")
-		flushEdit()
-	}
-
-	tgCb := &bs.StreamCallbacks{
-		OnText:    onText,
-		OnToolUse: func(_, name string, _ json.RawMessage) { onToolUse(name) },
-	}
+	tgCb := turn.captureText(&bs.StreamCallbacks{
+		OnText: func(chunk string) { preview.appendText(ctx, chunk) },
+		OnToolUse: func(_, name string, _ json.RawMessage) {
+			preview.noteTool(ctx, name)
+		},
+	})
 	interactionStarted := time.Now()
 	reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, tgCb, nil)
 	timings.RecordSince("interaction.total", interactionStarted, "transport=telegram")
@@ -1280,22 +1244,22 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		g.scanAndSaveLinks(ctx, us, sessionUUID, assistantMsgID, "assistant", reply)
 	}
 
-	// Clear tool status for final message
-	mu.Lock()
-	toolStatus = ""
-	mu.Unlock()
+	preview.clearTool()
 
+	// Delivery outlives the turn context on purpose: an answer the model has
+	// already produced must reach the chat even if the turn is being torn
+	// down around it.
 	deliveryCtx, cancelDelivery := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	var deliveryErr error
-	if tgSink.client != nil {
-		deliveryErr = tgSink.client.FinalizeResponse(deliveryCtx, tgSink.chatID, streamMsgID, reply)
+	if preview.hasClient() {
+		deliveryErr = preview.finalize(deliveryCtx, reply)
 	} else {
 		deliveryErr = sink.SendText(deliveryCtx, reply)
 	}
 	cancelDelivery()
 	if deliveryErr != nil {
 		g.logger.Error("telegram final delivery failed",
-			"chat_id", us.ChatID, "preview_message_id", streamMsgID,
+			"chat_id", us.ChatID, "preview_message_id", preview.messageIDForDelivery(),
 			"reply_runes", len([]rune(reply)), "error", deliveryErr)
 	}
 
