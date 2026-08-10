@@ -314,6 +314,25 @@ func (g *Gateway) prepareCortexTurnWithRegistry(
 		allowedTools = g.allowedToolsForSoul(ctx, us.SoulID, turnRegistry)
 	}
 
+	// The dialogue window now starts at the last soft summary, so this text is
+	// the only thing carrying what happened before that point. Loading it is not
+	// an optimisation: without it, anchoring the window would hand the model LESS
+	// history than it had before, which is the opposite of the intent.
+	//
+	// A failure is logged and survived. Losing the summary costs older context;
+	// refusing the turn costs the conversation.
+	compactSummary := derefString(sess.CompactSummary)
+	if g.store == nil {
+		// No session persistence configured — there is no summary to read and
+		// nothing has been anchored, so the window is a plain tail. Same guard
+		// the other store readers here carry.
+	} else if soft, softErr := g.store.LatestSoftSummaryText(ctx, sess.ID); softErr != nil {
+		g.logger.Error("soft summary: load for prompt failed, older context is missing from this turn",
+			"session_id", sess.ID, "error", softErr)
+	} else {
+		compactSummary = composeSummaries(compactSummary, soft)
+	}
+
 	return preparedCortexTurn{
 		loop:     loop,
 		registry: turnRegistry,
@@ -326,7 +345,7 @@ func (g *Gateway) prepareCortexTurnWithRegistry(
 			// context, which is rebuilt each message anyway. TurnNow below is
 			// what it renders from.
 			SystemPrompt:        soulPrompt,
-			CompactSummary:      derefString(sess.CompactSummary),
+			CompactSummary:      compactSummary,
 			Model:               g.cortexModel(),
 			MaxTokens:           cortexMaxTokens,
 			ContextWindow:       cortexRef.ContextWindow,
@@ -345,4 +364,22 @@ func (g *Gateway) prepareCortexTurnWithRegistry(
 			OnTiming:            onTiming,
 		},
 	}, nil
+}
+
+// composeSummaries joins the hard-compaction summary with the soft one, oldest
+// first, dropping whichever is absent.
+//
+// Order is the whole content of this function. Hard compaction summarises and
+// deletes; a soft summary is appended later and covers newer ground. Reversed,
+// the model reads the recent past as if it came before the distant past, which is
+// worse than having neither — a wrong order is asserted with the same confidence
+// as a right one.
+func composeSummaries(hard, soft string) string {
+	parts := make([]string, 0, 2)
+	for _, s := range []string{hard, soft} {
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return strings.Join(parts, "\n\n")
 }

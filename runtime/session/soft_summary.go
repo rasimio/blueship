@@ -70,6 +70,36 @@ func (s *Store) SoftSummaryStatus(ctx context.Context, sessionID string, thresho
 	}, nil
 }
 
+// LatestSoftSummaryText returns the newest soft summary for a session, or "".
+//
+// Until this existed, nothing read the summary column. Every threshold crossing
+// spent a summarisation call, stored the result and showed it to no one — the
+// only observable effect was that SoftSummaryStatus reset its "new tokens since"
+// counter. One production session had 1205 messages and 1.13M tokens summarised
+// that way, none of it ever reaching a prompt.
+//
+// It matters more now than it did: the dialogue window starts at the summary
+// boundary, so this text is the only thing carrying what came before it.
+func (s *Store) LatestSoftSummaryText(ctx context.Context, sessionID string) (string, error) {
+	if sessionID == "" {
+		return "", nil
+	}
+	var summary string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT summary
+		FROM chat_session_summaries
+		WHERE session_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1`, sessionID).Scan(&summary)
+	switch {
+	case err == sql.ErrNoRows:
+		return "", nil
+	case err != nil:
+		return "", fmt.Errorf("load latest soft summary: %w", err)
+	}
+	return summary, nil
+}
+
 func (s *Store) AppendSoftSummary(ctx context.Context, sessionID, toMessageID string, messageCount, tokenCount int, summary string) error {
 	if summary == "" || sessionID == "" || toMessageID == "" {
 		return nil

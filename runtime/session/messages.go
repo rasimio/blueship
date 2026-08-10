@@ -404,22 +404,127 @@ func (s *Store) MessagesForAPI(ctx context.Context, sessionID string, maxTokens 
 // DialogMessagesForAPI returns recent visible dialogue for prompt assembly.
 // It deliberately strips old tool_use/tool_result transcript blocks so the
 // message budget represents user/assistant conversation, not internal scratch.
+//
+// The window starts at the last soft summary rather than counting backwards from
+// the newest message, and that is the difference between a stable prefix and a
+// sliding one.
+//
+// Counting back from the end put the window's left edge wherever the token
+// budget happened to run out, which depends on the SIZES of recent messages, not
+// their number. Measured on one production session over six consecutive turns:
+// 27876, 27876, 24698, 26008, 26775, 28289 dialogue tokens — the left edge moved
+// on nearly every turn, and one large paste moved it by thousands. Providers
+// cache by prefix, so a left edge that moves invalidates the entire dialogue on
+// the turn it moves, every time. Anchoring at the summary boundary makes the
+// window append-only between summaries: byte-identical prefix, one new message
+// at the tail, and the boundary advances only when a summary is written.
+//
+// Sessions are never truncated — nothing here deletes anything. The boundary is
+// a read offset, so the whole transcript stays in the table for chat_recall to
+// search.
+//
+// The budget still applies, because a summary is asynchronous and can be
+// overdue: if the messages since the boundary do not fit, this falls back to the
+// old behaviour of taking what fits from the newest end. That case is degraded
+// but not wrong, and it is reported by the caller through the
+// dialog_budget_overhead_exceeded path rather than passing silently.
 func (s *Store) DialogMessagesForAPI(ctx context.Context, sessionID string, maxTokens int) ([]bs.Message, error) {
-	var msgs []Message
-	err := s.db.SelectContext(ctx, &msgs,
-		`SELECT id, session_id, role, content, visible_text, projection_status,
-		        projection_reason, projector_version, tool_use_id, token_estimate, created_at
-		 FROM chat_messages
-		 WHERE session_id = $1
-		 ORDER BY created_at DESC
-		 LIMIT 500`,
-		sessionID,
-	)
+	const selectDialogRows = `
+		SELECT id, session_id, role, content, visible_text, projection_status,
+		       projection_reason, projector_version, tool_use_id, token_estimate, created_at
+		FROM chat_messages
+		WHERE session_id = $1`
+
+	boundary, hasBoundary, err := s.softSummaryBoundary(ctx, sessionID)
 	if err != nil {
+		return nil, err
+	}
+
+	if hasBoundary {
+		var since []Message
+		if err := s.db.SelectContext(ctx, &since,
+			selectDialogRows+` AND created_at > $2 ORDER BY created_at DESC LIMIT 500`,
+			sessionID, boundary,
+		); err != nil {
+			return nil, fmt.Errorf("get dialog messages since summary: %w", err)
+		}
+		// Everything since the boundary, or nothing: a partial take from the
+		// boundary forward would reintroduce the moving edge this exists to
+		// remove, one message at a time.
+		if out, complete := dialogMessagesIfComplete(since, maxTokens); complete {
+			return out, nil
+		}
+	}
+
+	var msgs []Message
+	if err := s.db.SelectContext(ctx, &msgs,
+		selectDialogRows+` ORDER BY created_at DESC LIMIT 500`,
+		sessionID,
+	); err != nil {
 		return nil, fmt.Errorf("get dialog messages for API: %w", err)
 	}
 
 	return dialogMessagesForAPIFromRows(msgs, maxTokens), nil
+}
+
+// softSummaryBoundary returns the created_at of the message the newest soft
+// summary covers up to. The summary text itself is carried into the prompt
+// separately; here it only marks where the window begins.
+//
+// to_message_id is ON DELETE SET NULL, so a summary whose boundary message is
+// gone is skipped rather than treated as "from the beginning of time" — the JOIN
+// drops those rows.
+func (s *Store) softSummaryBoundary(ctx context.Context, sessionID string) (time.Time, bool, error) {
+	var at time.Time
+	err := s.db.QueryRowContext(ctx, `
+		SELECT cm.created_at
+		FROM chat_session_summaries css
+		JOIN chat_messages cm ON cm.id = css.to_message_id
+		WHERE css.session_id = $1
+		ORDER BY css.created_at DESC
+		LIMIT 1`, sessionID).Scan(&at)
+	switch {
+	case err == sql.ErrNoRows:
+		return time.Time{}, false, nil
+	case err != nil:
+		return time.Time{}, false, fmt.Errorf("load soft summary boundary: %w", err)
+	}
+	return at, true, nil
+}
+
+// dialogMessagesIfComplete renders the window and reports whether every visible
+// message in it fit the budget.
+//
+// It asks the selector rather than counting separately, and that is not
+// fastidiousness: the stored token_estimate covers the whole persisted message
+// including tool traffic, while the window strips tool blocks and re-estimates
+// what is left. A second counter using the stored numbers looked equivalent and
+// disagreed by 4x on the first test that exercised it — it would have sent every
+// session down the fallback path and quietly restored the sliding edge.
+func dialogMessagesIfComplete(msgs []Message, maxTokens int) ([]bs.Message, bool) {
+	candidates := visibleDialogCandidates(msgs)
+	// No candidates is the load-bearing case: a boundary with nothing visible
+	// after it must fall back, or the turn goes in with an empty dialogue.
+	if len(candidates) == 0 {
+		return nil, false
+	}
+	selected := selectDialogCandidatesWithinBudget(candidates, maxTokens)
+	// This one is intent rather than observable behaviour, and worth saying so:
+	// when the messages since the boundary overflow the budget, the selector
+	// takes the newest that fit — which is what the fallback would return
+	// anyway, over the same LIMIT. Deleting this line changes nothing today, and
+	// a mutation test confirms that. It stays because it is what makes the
+	// boundary window all-or-nothing in the code rather than by coincidence: the
+	// moment the fallback stops being "the newest that fit" — a larger row limit,
+	// pre-boundary context deliberately added back — a partial take from the
+	// boundary would silently become a third, worse behaviour.
+	if len(selected) < len(candidates) {
+		return nil, false
+	}
+	for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
+		selected[i], selected[j] = selected[j], selected[i]
+	}
+	return trimLeadingToUser(selected), true
 }
 
 // RecentToolObservations returns recent tool results as provenance records for
@@ -618,6 +723,13 @@ type dialogMessageCandidate struct {
 }
 
 func selectDialogMessagesWithinBudget(msgs []Message, maxTokens int) []bs.Message {
+	return selectDialogCandidatesWithinBudget(visibleDialogCandidates(msgs), maxTokens)
+}
+
+// visibleDialogCandidates turns stored rows into what the window may actually
+// carry: user and assistant turns with tool traffic stripped, each with the
+// token count the budget is spent against.
+func visibleDialogCandidates(msgs []Message) []dialogMessageCandidate {
 	var candidates []dialogMessageCandidate
 	for _, stored := range msgs {
 		candidate, ok := visibleDialogCandidate(stored)
@@ -629,7 +741,7 @@ func selectDialogMessagesWithinBudget(msgs []Message, maxTokens int) []bs.Messag
 	if isTranslationWorkflow(candidates) {
 		candidates = applyTranslationHistoryLayout(candidates)
 	}
-	return selectDialogCandidatesWithinBudget(candidates, maxTokens)
+	return candidates
 }
 
 func selectDialogCandidatesWithinBudget(candidates []dialogMessageCandidate, maxTokens int) []bs.Message {
