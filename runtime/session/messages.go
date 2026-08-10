@@ -445,11 +445,17 @@ func (s *Store) MessagesForAPI(ctx context.Context, sessionID string, maxTokens 
 // a read offset, so the whole transcript stays in the table for chat_recall to
 // search.
 //
-// The budget still applies, because a summary is asynchronous and can be
-// overdue: if the messages since the boundary do not fit, this falls back to the
-// old behaviour of taking what fits from the newest end. That case is degraded
-// but not wrong, and it is reported by the caller through the
-// dialog_budget_overhead_exceeded path rather than passing silently.
+// A summary is not enough on its own, and measuring said so: seven sessions out
+// of 172222 had one, because the threshold is 80000 stored tokens. For every
+// other session the boundary did not exist and the old sliding edge was still
+// running — the fix was correct and inert. So when there is no summary the window
+// falls back to a BLOCK anchor rather than to counting from the end: the left
+// edge sits on a multiple of dialogWindowBlock messages, which keeps it still for
+// a whole block of turns and then moves once, instead of moving on every turn.
+//
+// The budget still decides. A block that does not fit advances by one block until
+// it does, so the anchor is always on a block boundary and the result is always
+// within budget — deterministic either way, never a token-by-token edge.
 func (s *Store) DialogMessagesForAPI(ctx context.Context, sessionID string, maxTokens int) ([]bs.Message, error) {
 	const selectDialogRows = `
 		SELECT id, session_id, role, content, visible_text, projection_status,
@@ -486,7 +492,72 @@ func (s *Store) DialogMessagesForAPI(ctx context.Context, sessionID string, maxT
 		return nil, fmt.Errorf("get dialog messages for API: %w", err)
 	}
 
-	return dialogMessagesForAPIFromRows(msgs, maxTokens), nil
+	return dialogMessagesOnBlockAnchor(msgs, maxTokens), nil
+}
+
+// dialogWindowBlock is how many messages the left edge moves by when it moves.
+//
+// The edge has to move eventually — a session grows without bound and the budget
+// does not. The only question is whether it moves a little on every turn, which
+// costs the whole cached dialogue every time, or a lot once in a while. This is
+// the "once in a while": with a block of 30, the prefix is byte-identical for
+// thirty turns and then changes once.
+//
+// Bigger is better for cache and worse for how much history a moving edge
+// discards in one step. Thirty is roughly a day of conversation for an active
+// user, and comfortably inside the 48000-token dialogue budget at normal message
+// sizes — when it is not, the code advances a block rather than trimming a
+// message, so the guarantee holds regardless.
+const dialogWindowBlock = 30
+
+// dialogMessagesOnBlockAnchor returns the newest whole blocks that fit.
+//
+// msgs arrives newest-first. The retained count is held in [block, 2*block) so
+// that appending a message changes nothing until the count crosses a multiple of
+// the block size — that is what makes the prefix stable for a stretch of turns
+// instead of for none.
+func dialogMessagesOnBlockAnchor(msgs []Message, maxTokens int) []bs.Message {
+	candidates := visibleDialogCandidates(msgs)
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// The DROPPED count is the multiple of the block size, not the kept count —
+	// making the kept count a multiple instead lets the window grow without
+	// bound (at 60 messages it would keep all 60).
+	//
+	//   dropped  = max(0, ((n - block) / block) * block)
+	//   retained = n - dropped, which lands in [block, 2*block) once n >= block
+	//
+	// So the edge is fixed while n climbs from 60 to 89, moves once at 90, and
+	// holds again to 119. Appending a message changes nothing in between, which is
+	// the entire point.
+	keep := len(candidates)
+	if keep > dialogWindowBlock {
+		dropped := ((keep - dialogWindowBlock) / dialogWindowBlock) * dialogWindowBlock
+		keep -= dropped
+	}
+
+	// Advance a whole block at a time until the budget is satisfied. Trimming
+	// single messages here would put the edge back on token arithmetic, which is
+	// the thing being removed.
+	for keep > 0 {
+		selected := selectDialogCandidatesWithinBudget(candidates[:keep], maxTokens)
+		if len(selected) == keep {
+			for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
+				selected[i], selected[j] = selected[j], selected[i]
+			}
+			return trimLeadingToUser(selected)
+		}
+		if keep <= dialogWindowBlock {
+			// One block does not fit. Take what does — a turn with no dialogue at
+			// all is worse than a turn with a token-bounded tail, and this is the
+			// only path where the edge is allowed to depend on sizes.
+			return dialogMessagesForAPIFromRows(msgs, maxTokens)
+		}
+		keep -= dialogWindowBlock
+	}
+	return nil
 }
 
 // softSummaryBoundary returns the created_at of the message the newest soft

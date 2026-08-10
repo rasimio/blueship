@@ -199,6 +199,113 @@ func TestLatestSoftSummaryTextReturnsTheNewest(t *testing.T) {
 	}
 }
 
+// Anchoring on the summary was correct and inert: seven sessions out of 172222
+// had a summary, because the threshold is 80000 stored tokens. Everything else
+// kept the old sliding edge, which is the bug. So a session with NO summary must
+// still get a stable prefix — held by the block anchor.
+//
+// This is the property, stated as the cache sees it: append a turn and the window
+// must come back with the same messages plus one, for a whole block of turns, and
+// change its left edge exactly once when the block fills.
+func TestDialogWindowPrefixHoldsWithoutAnySummary(t *testing.T) {
+	db := windowTestDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+
+	sessionID := uuid.New()
+	mustExec(t, db, `INSERT INTO chat_sessions (id) VALUES ($1)`, sessionID)
+
+	base := time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC)
+	at := 0
+	add := func() {
+		seedMessage(t, db, sessionID, at, base.Add(time.Duration(at)*time.Minute), 20)
+		at++
+	}
+
+	// Start above one block so the anchor is engaged rather than trivially zero.
+	for i := 0; i < 61; i++ {
+		add()
+	}
+
+	const budget = 100000 // ample: this test is about the edge, not the budget
+	first, err := store.DialogMessagesForAPI(ctx, sessionID.String(), budget)
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if len(first) < dialogWindowBlock || len(first) >= 2*dialogWindowBlock {
+		t.Fatalf("window is %d messages, want it held inside [%d, %d)",
+			len(first), dialogWindowBlock, 2*dialogWindowBlock)
+	}
+	head := text(first[0])
+
+	// Append turns one at a time. Until the block fills, the left edge must not
+	// move — every earlier message identical, one more at the end.
+	prev := first
+	moves := 0
+	for turn := 0; turn < dialogWindowBlock; turn++ {
+		add()
+		next, err := store.DialogMessagesForAPI(ctx, sessionID.String(), budget)
+		if err != nil {
+			t.Fatalf("turn %d: %v", turn, err)
+		}
+		if text(next[0]) != text(prev[0]) {
+			moves++
+			prev = next
+			continue
+		}
+		if len(next) != len(prev)+1 {
+			t.Fatalf("turn %d: window went from %d to %d messages with the same left edge — appending should add exactly one",
+				turn, len(prev), len(next))
+		}
+		for i := range prev {
+			if text(prev[i]) != text(next[i]) {
+				t.Fatalf("turn %d: message %d changed while the left edge stayed put, so the cached prefix is lost anyway", turn, i)
+			}
+		}
+		prev = next
+	}
+
+	if moves == 0 {
+		t.Errorf("the left edge never moved across %d appended turns, so the window is unbounded", dialogWindowBlock)
+	}
+	if moves > 1 {
+		t.Errorf("the left edge moved %d times across %d turns, want exactly once — that is the difference between a cached prefix and none", moves, dialogWindowBlock)
+	}
+	if text(prev[0]) == head && moves > 0 {
+		t.Error("the edge was counted as moved but the first message is unchanged")
+	}
+}
+
+// The window must stay bounded. Without the block anchor the retained count grew
+// with the session, which is the failure mode the first version of the
+// arithmetic had: making the KEPT count a multiple of the block keeps everything
+// at n=60.
+func TestDialogWindowStaysBoundedAsTheSessionGrows(t *testing.T) {
+	db := windowTestDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+
+	sessionID := uuid.New()
+	mustExec(t, db, `INSERT INTO chat_sessions (id) VALUES ($1)`, sessionID)
+	base := time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC)
+
+	for i := 0; i < 200; i++ {
+		seedMessage(t, db, sessionID, i, base.Add(time.Duration(i)*time.Minute), 20)
+	}
+
+	out, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 100000)
+	if err != nil {
+		t.Fatalf("DialogMessagesForAPI: %v", err)
+	}
+	if len(out) >= 2*dialogWindowBlock {
+		t.Errorf("200 messages produced a window of %d, want under %d — the window grows with the session",
+			len(out), 2*dialogWindowBlock)
+	}
+	if last := text(out[len(out)-1]); !strings.Contains(last, "msg-199") {
+		t.Errorf("the window ends at %q, want the newest message", last)
+	}
+}
+
 func text(m bs.Message) string {
 	if s, ok := m.Content.(string); ok {
 		return s
