@@ -55,21 +55,37 @@ func newTestPreview(client telegramPreviewClient) *telegramPreview {
 		stopKeyboard("turn-1", "⏹ Stop"))
 }
 
-// Variant B of the design: the message exists from the moment the turn does,
-// so the wait before the first token is stoppable. Posting it only once text
-// arrives would leave the stop button missing during exactly the pause people
-// want to interrupt.
-func TestPreviewPostsTheStopControlBeforeAnyText(t *testing.T) {
+// Nothing to say, nothing on screen. A placeholder posted at turn start put
+// an hourglass in the chat on every single turn, and left a stray message
+// behind every time a turn was cancelled before it said anything.
+func TestPreviewPostsNothingBeforeThereIsSomethingToRead(t *testing.T) {
 	client := &fakePreviewClient{}
 	p := newTestPreview(client)
 
-	p.start(context.Background(), "⌛")
+	p.appendText(context.Background(), "hi") // below the create threshold
+	p.settle(context.Background(), true)
 
-	if len(client.sent) != 1 || client.sent[0] != "⌛" {
-		t.Fatalf("placeholder sent = %+v", client.sent)
+	if len(client.sent) != 0 {
+		t.Fatalf("posted a message with nothing to show: %+v", client.sent)
+	}
+	if len(client.finalized) != 0 || len(client.deleted) != 0 {
+		t.Fatalf("touched a message that was never created: %+v", client)
+	}
+}
+
+// The answer carries its own stop control, and it appears as soon as there is
+// an answer to stop.
+func TestPreviewCreatesTheMessageWithTheStopControl(t *testing.T) {
+	client := &fakePreviewClient{}
+	p := newTestPreview(client)
+
+	p.appendText(context.Background(), "the answer starts here")
+
+	if len(client.sent) != 1 {
+		t.Fatalf("sent = %+v", client.sent)
 	}
 	if len(client.sentRows) != 1 || len(client.sentRows[0]) != 1 {
-		t.Fatalf("placeholder posted without a stop control: %+v", client.sentRows)
+		t.Fatalf("message posted without a stop control: %+v", client.sentRows)
 	}
 	if got := client.sentRows[0][0][0].CallbackData; got != stopCallbackPrefix+"turn-1" {
 		t.Fatalf("stop button callback = %q", got)
@@ -82,10 +98,10 @@ func TestPreviewPostsTheStopControlBeforeAnyText(t *testing.T) {
 func TestPreviewKeepsTheStopControlThroughEdits(t *testing.T) {
 	client := &fakePreviewClient{}
 	p := newTestPreview(client)
-	p.start(context.Background(), "⌛")
+	p.appendText(context.Background(), "the answer starts here")
 	p.lastEdit = time.Now().Add(-time.Minute) // past the edit throttle
 
-	p.appendText(context.Background(), "the first half")
+	p.appendText(context.Background(), " and continues")
 
 	if len(client.edits) != 1 {
 		t.Fatalf("edits = %+v", client.edits)
@@ -95,52 +111,75 @@ func TestPreviewKeepsTheStopControlThroughEdits(t *testing.T) {
 	}
 }
 
-// What the user was reading stays on screen, and it says where it stopped —
-// the same marker the transcript gets, so chat and history agree.
-func TestPreviewSettlesAnInterruptedAnswerWithItsPartialText(t *testing.T) {
+// A stopped answer keeps what the reader was reading, and loses the control
+// that has nothing left to stop. It says nothing extra: the interruption is
+// not written to the transcript when there was nothing to answer, so words
+// added here would exist on screen and nowhere else.
+func TestPreviewSettleKeepsThePartialAnswerAndAddsNothing(t *testing.T) {
 	client := &fakePreviewClient{}
 	p := newTestPreview(client)
-	p.start(context.Background(), "⌛")
-	p.lastEdit = time.Now().Add(-time.Minute)
 	p.appendText(context.Background(), "half an answer")
 
-	p.settle(context.Background(), "[interrupted]", " […interrupted]")
+	p.settle(context.Background(), true)
 
-	if len(client.finalized) != 1 || client.finalized[0] != "half an answer […interrupted]" {
+	if len(client.finalized) != 1 || client.finalized[0] != "half an answer" {
 		t.Fatalf("finalized = %+v", client.finalized)
+	}
+	if len(client.sent) != 1 {
+		t.Fatalf("settle posted an extra message: %+v", client.sent)
 	}
 	if len(client.deleted) != 0 {
 		t.Fatal("an answer with text was deleted instead of kept")
 	}
 }
 
-// Stopped before the first word: the tap needs a visible result, or the chat
-// shows a question that looks ignored.
-func TestPreviewSettlesAnEmptyInterruptedTurnWithTheMarker(t *testing.T) {
+// The regression this replaced: a turn stopped before it said anything used
+// to leave "[interrupted by user]" sitting in the chat as if it were a reply,
+// while the transcript — correctly — recorded nothing of the sort.
+func TestPreviewSettleAnnouncesNothingWhenNothingWasSaid(t *testing.T) {
 	client := &fakePreviewClient{}
 	p := newTestPreview(client)
-	p.start(context.Background(), "⌛")
 
-	p.settle(context.Background(), "[interrupted]", " […interrupted]")
+	p.settle(context.Background(), true)
 
-	if len(client.finalized) != 1 || client.finalized[0] != "[interrupted]" {
-		t.Fatalf("finalized = %+v", client.finalized)
+	if len(client.sent) != 0 || len(client.finalized) != 0 {
+		t.Fatalf("a cancelled turn left a message behind: sent=%+v finalized=%+v",
+			client.sent, client.finalized)
 	}
 }
 
-// A turn that failed or answered with nothing leaves no ghost behind.
-func TestPreviewDeletesAnEmptyPlaceholderWhenTheTurnJustFailed(t *testing.T) {
+// The other half of the same rule: text that reached the screen but not the
+// transcript is taken back off the screen. Otherwise the reader is left with
+// a reply the assistant has no record of giving — and will contradict.
+func TestPreviewRemovesAnAnswerThatWasNeverRecorded(t *testing.T) {
 	client := &fakePreviewClient{}
 	p := newTestPreview(client)
-	p.start(context.Background(), "⌛")
+	p.appendText(context.Background(), "half an answer nobody stored")
 
-	p.settle(context.Background(), "", "")
+	p.settle(context.Background(), false)
 
 	if len(client.deleted) != 1 || client.deleted[0] != 4242 {
 		t.Fatalf("deleted = %+v", client.deleted)
 	}
 	if len(client.finalized) != 0 {
-		t.Fatalf("empty failed turn was finalized as an answer: %+v", client.finalized)
+		t.Fatalf("an unrecorded answer was left on screen: %+v", client.finalized)
+	}
+}
+
+// A message that got created for a tool status and never grew past it is
+// removed rather than left as a ghost.
+func TestPreviewDeletesAToolOnlyMessageWithNoAnswer(t *testing.T) {
+	client := &fakePreviewClient{}
+	p := newTestPreview(client)
+	p.noteTool(context.Background(), "browser_fetch")
+
+	p.settle(context.Background(), true)
+
+	if len(client.deleted) != 1 || client.deleted[0] != 4242 {
+		t.Fatalf("deleted = %+v", client.deleted)
+	}
+	if len(client.finalized) != 0 {
+		t.Fatalf("empty turn was finalized as an answer: %+v", client.finalized)
 	}
 }
 
@@ -150,12 +189,12 @@ func TestPreviewDeletesAnEmptyPlaceholderWhenTheTurnJustFailed(t *testing.T) {
 func TestPreviewSettleIsANoOpAfterDelivery(t *testing.T) {
 	client := &fakePreviewClient{}
 	p := newTestPreview(client)
-	p.start(context.Background(), "⌛")
+	p.appendText(context.Background(), "the answer starts here")
 	if err := p.finalize(context.Background(), "the whole answer"); err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
 
-	p.settle(context.Background(), "[interrupted]", " […interrupted]")
+	p.settle(context.Background(), true)
 
 	if len(client.finalized) != 1 || client.finalized[0] != "the whole answer" {
 		t.Fatalf("finalized = %+v", client.finalized)
@@ -166,13 +205,12 @@ func TestPreviewSettleIsANoOpAfterDelivery(t *testing.T) {
 }
 
 // Telegram being briefly unavailable costs the typing effect, not the turn.
-func TestPreviewSurvivesAFailedPlaceholder(t *testing.T) {
+func TestPreviewSurvivesAFailedCreate(t *testing.T) {
 	client := &fakePreviewClient{sendErr: errors.New("429 too many requests")}
 	p := newTestPreview(client)
 
-	p.start(context.Background(), "⌛")
 	p.appendText(context.Background(), "text nobody can preview")
-	p.settle(context.Background(), "[interrupted]", " […interrupted]")
+	p.settle(context.Background(), true)
 
 	if p.messageIDForDelivery() != 0 {
 		t.Fatal("preview claims a message id it never got")
@@ -187,11 +225,10 @@ func TestPreviewSurvivesAFailedPlaceholder(t *testing.T) {
 func TestInertPreviewDoesNothing(t *testing.T) {
 	p := &telegramPreview{logger: slog.New(slog.DiscardHandler)}
 
-	p.start(context.Background(), "⌛")
-	p.appendText(context.Background(), "text")
+	p.appendText(context.Background(), "text that would otherwise post")
 	p.noteTool(context.Background(), "browser_fetch")
 	p.clearTool()
-	p.settle(context.Background(), "[interrupted]", " […interrupted]")
+	p.settle(context.Background(), true)
 
 	if p.hasClient() {
 		t.Fatal("inert preview claims a client")

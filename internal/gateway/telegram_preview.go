@@ -26,14 +26,16 @@ type telegramPreviewClient interface {
 }
 
 // telegramPreview is the single Telegram message one turn writes itself into:
-// posted when the turn starts, edited as text and tool status arrive, and
-// finalised in place as the answer.
+// created when the answer starts arriving, edited as text and tool status
+// come in, and finalised in place as the answer. The stop control rides it
+// and disappears with the finished answer.
 //
-// It exists as an object rather than as closures over local state because the
-// turn needs it before it has anything to say. The stop control lives on this
-// message, and the moment a person most wants to stop an answer is the pause
-// before the first word — so the message is posted at turn start, carrying the
-// button and a placeholder, and fills in afterwards.
+// It posts nothing before there is something to say. An earlier version put a
+// placeholder up at turn start so the stop button existed during the pause
+// before the first word; what that produced was a chat full of hourglasses,
+// and — worse — a message per cancelled turn, since a placeholder that never
+// grew still had to be disposed of somehow. Nothing to show means no message.
+// The gap is covered by /stop, which needs no message to exist.
 type telegramPreview struct {
 	client   telegramPreviewClient
 	chatID   int64
@@ -58,15 +60,9 @@ func newTelegramPreview(
 	return &telegramPreview{client: client, chatID: chatID, logger: logger, keyboard: keyboard}
 }
 
-// start posts the placeholder that carries the stop control. Failure is not
-// fatal: without a preview the turn still runs and still delivers its answer
-// as a fresh message, it just loses the in-place typing effect.
-func (p *telegramPreview) start(ctx context.Context, placeholder string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.ensureLocked(ctx, placeholder)
-}
-
+// ensureLocked creates the message on the first thing worth showing. Failure
+// is not fatal: without a preview the turn still runs and still delivers its
+// answer as a fresh message, it just loses the in-place typing effect.
 func (p *telegramPreview) ensureLocked(ctx context.Context, text string) {
 	if p.messageID != 0 || p.settled || p.client == nil {
 		return
@@ -90,12 +86,19 @@ func (p *telegramPreview) ensureLocked(ctx context.Context, text string) {
 	p.lastEdit = time.Now()
 }
 
+// telegramPreviewMinCreateBytes is how much text has to exist before the
+// message is worth creating. Posting on the very first delta would put a
+// single letter on screen and then grow it, which reads as a glitch.
+const telegramPreviewMinCreateBytes = 10
+
 // appendText adds one streamed chunk and refreshes the message, throttled.
 func (p *telegramPreview) appendText(ctx context.Context, chunk string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.buf.WriteString(chunk)
-	p.ensureLocked(ctx, strings.TrimSpace(p.buf.String()))
+	if text := strings.TrimSpace(p.buf.String()); len(text) > telegramPreviewMinCreateBytes {
+		p.ensureLocked(ctx, text)
+	}
 	p.flushLocked(ctx)
 }
 
@@ -163,18 +166,21 @@ func (p *telegramPreview) finalize(ctx context.Context, text string) error {
 	return p.client.FinalizeResponse(ctx, p.chatID, messageID, text)
 }
 
-// settle disposes of a preview whose turn ended without delivering a final
-// answer, and is what the reader is left looking at:
+// settle closes out a preview whose turn ended without delivering a final
+// answer — stopped by the reader, cut off by a restart, failed.
 //
-//   - text already streamed → finalise it in place, plus suffix when the turn
-//     was cut off, so the chat and the stored transcript say the same thing
-//     and the button disappears with the edit;
-//   - nothing streamed but a marker given (a stop that landed before the first
-//     word) → the marker replaces the placeholder, so the tap has a visible
-//     result instead of leaving a message that appears to have been ignored;
-//   - nothing streamed and no marker (an error, an empty reply) → delete the
-//     placeholder rather than leave a ghost "…" behind in the chat.
-func (p *telegramPreview) settle(ctx context.Context, marker, suffix string) {
+// It never creates a message and never writes words of its own. Announcing
+// the interruption in the chat is what produced replies the model had no
+// record of giving.
+//
+// recorded says whether what streamed reached the transcript. When it did,
+// the message stays as the reader saw it, minus the stop control, which has
+// nothing left to stop. When it did not — a turn cut off before it had even
+// persisted the question it was answering — the message goes, because a reply
+// on screen that exists nowhere else is the thing being fixed here. That case
+// is a cancel within a second or two of asking, so there is next to nothing on
+// screen to lose.
+func (p *telegramPreview) settle(ctx context.Context, recorded bool) {
 	p.mu.Lock()
 	if p.settled || p.messageID == 0 || p.client == nil {
 		p.mu.Unlock()
@@ -185,42 +191,36 @@ func (p *telegramPreview) settle(ctx context.Context, marker, suffix string) {
 	partial := strings.TrimSpace(p.buf.String())
 	p.mu.Unlock()
 
-	final := ""
-	switch {
-	case partial != "":
-		final = partial + suffix
-	case marker != "":
-		final = marker
-	}
-	if final == "" {
+	if partial == "" || !recorded {
 		if err := p.client.DeleteMessage(ctx, p.chatID, messageID); err != nil {
 			p.logger.Warn("telegram preview delete failed",
 				"chat_id", p.chatID, "message_id", messageID, "error", err)
 		}
 		return
 	}
-	if err := p.client.FinalizeResponse(ctx, p.chatID, messageID, final); err != nil {
+	// One last edit so the message shows everything that streamed — the
+	// live edits are throttled, so the tail chunk may not be on screen —
+	// and drops the keyboard with it.
+	if err := p.client.FinalizeResponse(ctx, p.chatID, messageID, partial); err != nil {
 		p.logger.Warn("telegram preview settle failed",
 			"chat_id", p.chatID, "message_id", messageID, "error", err)
 	}
 }
 
 // newTurnPreview builds the preview a turn writes into: a live Telegram
-// message for the Telegram transport, an inert one everywhere else. The live
-// one is posted here, at turn start, with the stop control already on it.
-func (g *Gateway) newTurnPreview(ctx context.Context, sink bs.ResponseSink, turnID string) *telegramPreview {
+// message for the Telegram transport, an inert one everywhere else. Nothing is
+// posted yet — the message appears with the first thing worth reading.
+func (g *Gateway) newTurnPreview(sink bs.ResponseSink, turnID string) *telegramPreview {
 	tgSink, ok := sink.(*telegramSink)
 	if !ok || tgSink.client == nil {
 		return &telegramPreview{logger: g.logger}
 	}
-	p := newTelegramPreview(
+	return newTelegramPreview(
 		tgSink.client,
 		tgSink.chatID,
 		g.logger,
 		stopKeyboard(turnID, g.deps.Config.UI.StopButton),
 	)
-	p.start(ctx, g.deps.Config.UI.TurnPlaceholder)
-	return p
 }
 
 // stopKeyboard is the one-button keyboard a preview carries. The turn id

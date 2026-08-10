@@ -33,12 +33,8 @@ type UIStrings struct {
 	ResetDone   string
 	ResetFailed string
 
-	// TurnPlaceholder is the body of the message a chat transport posts the
-	// moment a turn starts, before any of the answer exists. It carries the
-	// stop control, which is why it is posted that early: the wait before
-	// the first word is exactly when someone wants to stop.
-	TurnPlaceholder string
-	// StopButton labels that control.
+	// StopButton labels the control a chat transport attaches to an answer
+	// while it is still being written.
 	StopButton string
 	// StopAcknowledged is the toast shown when a stop is accepted.
 	StopAcknowledged string
@@ -69,9 +65,6 @@ func (u *UIStrings) applyDefaults() {
 	}
 	if u.ResetFailed == "" {
 		u.ResetFailed = "Reset failed."
-	}
-	if u.TurnPlaceholder == "" {
-		u.TurnPlaceholder = "…"
 	}
 	if u.StopButton == "" {
 		u.StopButton = "Stop"

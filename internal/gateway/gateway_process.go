@@ -221,7 +221,11 @@ func (g *Gateway) ProcessInboundForUser(ctx context.Context, userID, soulID uuid
 // still held: the marker has to be in the transcript before any queued turn
 // reads the session. The write runs on a detached context because the turn's
 // own context is, by definition, already cancelled.
-func (g *Gateway) persistInterrupted(ctx context.Context, sessionID, partial string) {
+//
+// Reports whether the answer was recorded, which the transport needs: a reply
+// left on a reader's screen that reached no transcript is a reply the model
+// will deny having given.
+func (g *Gateway) persistInterrupted(ctx context.Context, sessionID, partial string) bool {
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 
@@ -229,12 +233,12 @@ func (g *Gateway) persistInterrupted(ctx context.Context, sessionID, partial str
 	if err != nil {
 		g.logger.Warn("persist interrupted: latest role lookup failed",
 			"session_id", sessionID, "error", err)
-		return
+		return false
 	}
 	if role != "user" {
 		g.logger.Info("persist interrupted: nothing to answer, skipping marker",
 			"session_id", sessionID, "latest_role", role)
-		return
+		return false
 	}
 
 	text := strings.TrimSpace(partial)
@@ -249,7 +253,9 @@ func (g *Gateway) persistInterrupted(ctx context.Context, sessionID, partial str
 		VisibleText: &text,
 	}); err != nil {
 		g.logger.Warn("persist interrupted: append failed", "session_id", sessionID, "error", err)
+		return false
 	}
+	return true
 }
 
 // getOrInitWebUser is retained as a thin wrapper for backward
@@ -485,26 +491,24 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// the interrupted reply is in the transcript.
 	ctx, turn, endTurn := g.beginTurn(ctx, us.UserID, us.SoulID)
 	defer endTurn()
+
+	// The message this turn will become. It carries the stop control and
+	// appears with the first thing worth reading. Naming the turn to the
+	// client serves the same purpose on transports that render their own
+	// control (the web cabinet).
+	preview := g.newTurnPreview(sink, turn.id)
 	var turnSessionID string
 	defer func() {
-		if ctx.Err() == nil || turnSessionID == "" {
-			return
+		// One closure for both halves, because they have to agree: what is
+		// left on screen must be what the transcript records. Recording
+		// happens first; the screen follows its verdict.
+		recorded := true
+		if ctx.Err() != nil && turnSessionID != "" {
+			recorded = g.persistInterrupted(ctx, turnSessionID, turn.partialText())
 		}
-		g.persistInterrupted(ctx, turnSessionID, turn.partialText())
-	}()
-
-	// The message this turn will become, posted now with the stop control on
-	// it. Telling the client the turn id serves the same purpose on
-	// transports that render their own controls (the web cabinet).
-	preview := g.newTurnPreview(ctx, sink, turn.id)
-	defer func() {
 		settleCtx, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancelSettle()
-		if ctx.Err() != nil {
-			preview.settle(settleCtx, g.deps.Config.UI.InterruptMarker, g.deps.Config.UI.InterruptSuffix)
-			return
-		}
-		preview.settle(settleCtx, "", "")
+		preview.settle(settleCtx, recorded)
 	}()
 	if ts, ok := sink.(bs.TurnStartSink); ok {
 		_ = ts.SendTurnStart(ctx, turn.id)
