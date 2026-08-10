@@ -250,6 +250,13 @@ func telegramCommands(configured []bs.BotCommand) (commands []telegram.BotComman
 	commands = make([]telegram.BotCommand, 0, len(configured))
 	for _, c := range configured {
 		name := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(c.Name), "/"))
+		// A host command with no description is deliberately unlisted: it
+		// exists to receive an answer the product asked for, and offering
+		// it in the menu would advertise a command nobody should type.
+		// Only a nameless entry is actually malformed.
+		if name != "" && c.Host && strings.TrimSpace(c.Description) == "" {
+			continue
+		}
 		if name == "" || strings.TrimSpace(c.Description) == "" {
 			skipped = append(skipped, c.Name)
 			continue

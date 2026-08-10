@@ -126,6 +126,16 @@ type BotCommandResult struct {
 	Text        string
 	ButtonLabel string
 	ButtonURL   string
+
+	// AwaitReply, when set, claims the person's next message and delivers
+	// it back to the handler as the Args of a command by this name.
+	//
+	// This is what lets a host ask one question without inventing its own
+	// state: "type your email" is a step, and a step needs somewhere to
+	// remember that it is outstanding. The framework already keeps
+	// per-(user, bot) state for onboarding and reuses it here rather than
+	// asking every host to build the same thing.
+	AwaitReply string
 }
 
 // BotCommandHandler answers host-handled commands. Nil means no command

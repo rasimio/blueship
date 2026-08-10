@@ -68,6 +68,11 @@ const (
 	// the message it sees — the row exists only to carry a turn count.
 	onbStepOfferPending = "offer_pending"
 
+	// onbStepAwaitPrefix parks a chat while a host command waits for one
+	// answer. The suffix is the command the answer is delivered to, so the
+	// gateway needs no table of who asked what.
+	onbStepAwaitPrefix = "await:"
+
 	// callback_data prefixes / tokens. Kept short — Telegram caps
 	// callback_data at 64 bytes so "tr:mischievous" leaves plenty of
 	// headroom for long trait names.
@@ -79,6 +84,7 @@ const (
 	onbCallbackSeed        = "sd:"          // sd:<index into OnboardingFlow.SeedButtons>
 	onbCallbackOfferSetup  = "pn_setup"     // bare token
 	onbCallbackOfferLater  = "pn_later"     // bare token
+	onbCallbackHostCmd     = "hc:"          // hc:<host command name>
 
 	// data blob keys, round-tripped through the host state store as JSON.
 	onbDataName        = "name"
@@ -139,6 +145,16 @@ func (g *Gateway) onb() bs.OnboardingMessages { return g.deps.Config.Gateway.Onb
 // flow returns the host-configured onboarding shape. Validated at startup
 // (Ship.Run), so instant mode is known good by the time anything reads it.
 func (g *Gateway) flow() bs.OnboardingFlow { return g.deps.Config.Gateway.OnboardingFlow }
+
+// cachedUserState returns the in-process state for a (bot, chat), or nil.
+func (g *Gateway) cachedUserState(botID uuid.UUID, chatID string) *UserState {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if us := g.users[telegramUserCacheKey(botID, chatID)]; us != nil {
+		return us
+	}
+	return g.users[chatID]
+}
 
 // invalidateTelegramUser drops any cached UserState for a (bot, chat) so
 // the next inbound rebuilds it from the database.
@@ -217,6 +233,25 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 		}
 		if isPersona {
 			return g.onboardingStartEdit(ctx, bi, tgChatID, tgUserID)
+		}
+		// A host command asked one question and this is the answer.
+		// Cleared before dispatch, so a handler that asks again parks a
+		// fresh row and a failure cannot leave the chat waiting forever.
+		if strings.HasPrefix(step, onbStepAwaitPrefix) {
+			awaited := strings.TrimPrefix(step, onbStepAwaitPrefix)
+			if err := g.deps.BotOnboarding.ClearState(ctx, tgUserID, bi.id); err != nil {
+				g.logger.Warn("gateway: clearing an awaited reply failed",
+					"command", awaited, "error", err)
+			}
+			if g.deps.CommandHandler == nil {
+				return false
+			}
+			us := g.cachedUserState(bi.id, chatID)
+			if us == nil {
+				return false
+			}
+			g.runHostCommand(ctx, bi, tgChatID, tgUserID, us, awaited, strings.TrimSpace(text))
+			return true
 		}
 		// The offer is a nudge alongside the conversation, not instead
 		// of it: it never consumes the message that triggered it.
@@ -306,6 +341,7 @@ func (g *Gateway) maybeRunBotOnboardingCallback(ctx context.Context, bi *botInst
 	isOurs := strings.HasPrefix(d, onbCallbackVoice) ||
 		strings.HasPrefix(d, onbCallbackTrait) ||
 		strings.HasPrefix(d, onbCallbackSeed) ||
+		strings.HasPrefix(d, onbCallbackHostCmd) ||
 		d == onbCallbackTraitsDone ||
 		d == onbCallbackConfirmOK ||
 		d == onbCallbackConfirmBack ||
@@ -324,6 +360,23 @@ func (g *Gateway) maybeRunBotOnboardingCallback(ctx context.Context, bi *botInst
 	case d == onbCallbackOfferSetup:
 		g.stripKeyboard(ctx, bi, cq)
 		return g.onboardingStartEdit(ctx, bi, cq.Message.Chat.ID, cq.From.ID)
+	case strings.HasPrefix(d, onbCallbackHostCmd):
+		g.stripKeyboard(ctx, bi, cq)
+		name := strings.TrimPrefix(d, onbCallbackHostCmd)
+		if g.deps.CommandHandler == nil {
+			return true
+		}
+		us := g.cachedUserState(bi.id, tgCanonical(cq.Message.Chat.ID))
+		if us == nil {
+			// A tap from a chat whose state was dropped — a restart, or an
+			// old message. There is nobody to attribute the command to,
+			// and acting as the wrong user is worse than silence.
+			g.logger.Info("gateway: host-command button from an unresolved chat",
+				"command", name, "tg_user", cq.From.ID)
+			return true
+		}
+		g.runHostCommand(ctx, bi, cq.Message.Chat.ID, cq.From.ID, us, name, "")
+		return true
 	case d == onbCallbackOfferLater:
 		g.stripKeyboard(ctx, bi, cq)
 		g.sendOnboardingText(ctx, bi, cq.Message.Chat.ID, g.onb().OfferLater)

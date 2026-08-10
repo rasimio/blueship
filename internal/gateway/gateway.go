@@ -738,13 +738,79 @@ func (g *Gateway) expandCommandPrompt(bi *botInstance, text string) string {
 	return text
 }
 
+// sendDenial delivers a refusal with whatever way out the host offered.
+//
+// The buttons matter more than the sentence: a person who has just been
+// refused is the least likely to go and compose a command, so the escape
+// has to be one tap away from the message that blocked them.
+func (g *Gateway) sendDenial(ctx context.Context, bi *botInstance, tgChatID int64, text string, actions []bs.DecisionAction) {
+	if bi == nil || bi.client == nil {
+		return
+	}
+	rows := make([][]telegram.InlineKeyboardButton, 0, len(actions))
+	for _, a := range actions {
+		if strings.TrimSpace(a.Label) == "" || strings.TrimSpace(a.Command) == "" {
+			continue
+		}
+		rows = append(rows, []telegram.InlineKeyboardButton{{
+			Text:         a.Label,
+			CallbackData: onbCallbackHostCmd + a.Command,
+		}})
+	}
+	if len(rows) == 0 {
+		_, _ = bi.client.SendMessage(ctx, fmt.Sprintf("%d", tgChatID), text)
+		return
+	}
+	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, text, rows); err != nil {
+		g.logger.Warn("gateway: denial keyboard send failed", "chat_id", tgChatID, "error", err)
+	}
+}
+
+// runHostCommand invokes a host command by name and delivers its answer.
+// Shared by the typed-command path, the refusal buttons, and the reply a
+// command asked to wait for, so all three behave identically.
+func (g *Gateway) runHostCommand(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, us *UserState, name, args string) {
+	result, err := g.deps.CommandHandler(ctx, bs.BotCommandRequest{
+		Name: name, Args: args, UserID: us.UserID, SoulID: us.SoulID,
+	})
+	if err != nil {
+		g.logger.Error("gateway: host command failed",
+			"command", name, "user_id", us.UserID, "error", err)
+		return
+	}
+
+	// Claim the next message BEFORE answering, so a fast reply cannot
+	// arrive while there is nothing recorded to route it to.
+	if result.AwaitReply != "" && g.deps.BotOnboarding != nil && bi.id != uuid.Nil {
+		if err := g.deps.BotOnboarding.AdvanceStep(ctx, tgUserID, bi.id,
+			onbStepAwaitPrefix+result.AwaitReply, nil); err != nil {
+			g.logger.Warn("gateway: could not park the chat for a reply",
+				"command", name, "error", err)
+		}
+	}
+
+	if strings.TrimSpace(result.Text) == "" {
+		return
+	}
+	if result.ButtonURL == "" || result.ButtonLabel == "" {
+		g.sendOnboardingText(ctx, bi, tgChatID, result.Text)
+		return
+	}
+	rows := [][]telegram.InlineKeyboardButton{{
+		{Text: result.ButtonLabel, URL: result.ButtonURL},
+	}}
+	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, result.Text, rows); err != nil {
+		g.logger.Warn("gateway: host command reply failed", "command", name, "error", err)
+	}
+}
+
 // maybeRunHostCommand dispatches a command the host answers itself.
 // Returns true when the message was one, so the caller stops.
 //
 // The reply may carry a single link button — the way a host hands over
 // something the chat cannot produce on its own, a payment page being the
 // case this was built for.
-func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, tgChatID int64, us *UserState, text string) bool {
+func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, us *UserState, text string) bool {
 	if g.deps.CommandHandler == nil || us == nil {
 		return false
 	}
@@ -753,15 +819,7 @@ func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, tgCh
 		return false
 	}
 	name := strings.ToLower(strings.TrimPrefix(cmd, "/"))
-
-	handled := false
-	for _, c := range g.deps.Config.Gateway.Commands {
-		if c.Host && strings.ToLower(strings.TrimPrefix(strings.TrimSpace(c.Name), "/")) == name {
-			handled = true
-			break
-		}
-	}
-	if !handled {
+	if !g.isHostCommand(name) {
 		return false
 	}
 
@@ -769,31 +827,21 @@ func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, tgCh
 	if i := strings.IndexByte(strings.TrimSpace(text), ' '); i >= 0 {
 		args = strings.TrimSpace(strings.TrimSpace(text)[i+1:])
 	}
-
-	result, err := g.deps.CommandHandler(ctx, bs.BotCommandRequest{
-		Name: name, Args: args, UserID: us.UserID, SoulID: us.SoulID,
-	})
-	if err != nil {
-		g.logger.Error("gateway: host command failed",
-			"command", name, "user_id", us.UserID, "error", err)
-		// Consumed either way: the alternative is handing "/plus foo@bar"
-		// to the model as if it were conversation.
-		return true
-	}
-	if strings.TrimSpace(result.Text) == "" {
-		return true
-	}
-	if result.ButtonURL == "" || result.ButtonLabel == "" {
-		g.sendOnboardingText(ctx, bi, tgChatID, result.Text)
-		return true
-	}
-	rows := [][]telegram.InlineKeyboardButton{{
-		{Text: result.ButtonLabel, URL: result.ButtonURL},
-	}}
-	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, result.Text, rows); err != nil {
-		g.logger.Warn("gateway: host command reply failed", "command", name, "error", err)
-	}
+	// Consumed either way, including on failure: the alternative is
+	// handing "/plus foo@bar" to the model as though it were conversation.
+	g.runHostCommand(ctx, bi, tgChatID, tgUserID, us, name, args)
 	return true
+}
+
+// isHostCommand reports whether the configured menu marks this name as
+// host-answered.
+func (g *Gateway) isHostCommand(name string) bool {
+	for _, c := range g.deps.Config.Gateway.Commands {
+		if c.Host && strings.ToLower(strings.TrimPrefix(strings.TrimSpace(c.Name), "/")) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Run drives the multi-bot fan-in: every registered bot's poller writes
@@ -883,7 +931,7 @@ func (g *Gateway) prepareTelegramInbound(
 	// The case they exist for is somebody the policy has just refused who
 	// needs a way to do something about it — putting them behind the same
 	// gate that said no would close the loop.
-	if g.maybeRunHostCommand(ctx, bi, rawChatID, us, text) {
+	if g.maybeRunHostCommand(ctx, bi, rawChatID, tgUserID, us, text) {
 		return nil, 0, false
 	}
 
@@ -909,7 +957,7 @@ func (g *Gateway) prepareTelegramInbound(
 			if denial == "" {
 				denial = g.deps.Config.UI.ExecutionDenied
 			}
-			_, _ = bi.client.SendMessage(ctx, fmt.Sprintf("%d", rawChatID), denial)
+			g.sendDenial(ctx, bi, rawChatID, denial, decision.Actions)
 		}
 		return nil, 0, false
 	}

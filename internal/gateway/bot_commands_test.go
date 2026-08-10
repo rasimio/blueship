@@ -112,3 +112,20 @@ func TestTelegramCommandsOnEmptyConfigReturnsEmptyNotNil(t *testing.T) {
 		t.Errorf("commands = %+v, skipped = %v", commands, skipped)
 	}
 }
+
+// A host command with no description is unlisted on purpose — it receives
+// an answer the product asked for, and a menu entry would offer a command
+// nobody should ever type. That is not the same as malformed, and must
+// not be reported as one on every bot registration.
+func TestTelegramCommandsSkipsUnlistedHostCommandsQuietly(t *testing.T) {
+	commands, skipped := telegramCommands([]bs.BotCommand{
+		{Name: "plus", Description: "Subscribe", Host: true},
+		{Name: "plus_email", Host: true},
+	})
+	if len(commands) != 1 || commands[0].Command != "plus" {
+		t.Fatalf("commands = %+v, want only the listed one", commands)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("skipped = %v, want the unlisted host command reported as nothing", skipped)
+	}
+}

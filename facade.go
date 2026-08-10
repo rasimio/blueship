@@ -82,6 +82,7 @@ type (
 	ExecutionKind                 = core.ExecutionKind
 	ExecutionRequest              = core.ExecutionRequest
 	ExecutionDecision             = core.ExecutionDecision
+	DecisionAction                = core.DecisionAction
 	ExecutionAuthorizer           = core.ExecutionAuthorizer
 	AutonomousTurnRequest         = core.AutonomousTurnRequest
 	AutonomousTurnDraft           = core.AutonomousTurnDraft
