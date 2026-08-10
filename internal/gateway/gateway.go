@@ -870,7 +870,12 @@ func (g *Gateway) prepareTelegramInbound(
 			g.replyUnpaired(ctx, bi, chatID)
 			return nil, 0, false
 		}
-		g.logger.Debug("ignored message", "chat_id", chatID, "error", err)
+		// Not "unpaired" — a real resolution failure, and the message is
+		// dropped without the person being told anything. At Debug that is
+		// invisible in production, which is the wrong level for the only
+		// record that somebody was ignored.
+		g.logger.Warn("gateway: dropping message, could not resolve the chat",
+			"chat_id", chatID, "bot_id", bi.id.String(), "error", err)
 		return nil, 0, false
 	}
 
@@ -1445,6 +1450,16 @@ func (g *Gateway) replyUnpaired(ctx context.Context, bi *botInstance, chatID str
 			"bot_id", bi.id.String(), "chat_id", chatID)
 		return
 	}
+	// Logged, at Info, because this is the one path that answers somebody
+	// while leaving no trace of having done it. Everything upstream —
+	// onboarding, the deeplink hooks, identity resolution — has already
+	// declined the message by the time we get here, so their logs say
+	// nothing either. A user reporting an unexplained reply produced a
+	// clean log, and a clean log reads exactly like "that never happened".
+	// It cost two wrong diagnoses before anyone noticed the path was mute.
+	g.logger.Info("gateway: replying to an unpaired chat",
+		"chat_id", chatID, "bot_id", bi.id.String(), "bot_kind", bi.kind)
+
 	g.platformGreetMu.Lock()
 	greeting := g.platformGreet
 	g.platformGreetMu.Unlock()
