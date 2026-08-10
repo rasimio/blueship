@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -24,6 +25,24 @@ type Client struct {
 	token      string
 	apiBaseURL string
 	httpClient *http.Client
+
+	// logger records the failures this client recovers from on its own.
+	// Optional; nil means those recoveries stay silent, which is the
+	// behaviour that hid a formatting regression for hours.
+	logger *slog.Logger
+}
+
+// SetLogger attaches a logger. Without one, every fallback this client
+// performs is invisible: the caller sees success and never learns the
+// preferred path failed.
+func (c *Client) SetLogger(l *slog.Logger) { c.logger = l }
+
+// note records a recovered failure. Silent when no logger is attached.
+func (c *Client) note(msg string, args ...any) {
+	if c.logger == nil {
+		return
+	}
+	c.logger.Warn(msg, args...)
 }
 
 // NewClient creates a new Telegram client.
@@ -147,7 +166,10 @@ func (c *Client) SendMessage(ctx context.Context, chatID string, text string) (*
 	result, err := c.postJSON(ctx, "sendMessage", payload)
 	if err != nil && isEntityParseError(err) {
 		// A malformed/incomplete Markdown fragment must never make the
-		// transport lose the message. Retry as literal plain text.
+		// transport lose the message. Retry as literal plain text — the
+		// reader then sees raw markup, so say which message did it.
+		c.note("telegram: markup rejected, resending as literal text",
+			"chat_id", chatID, "error", err)
 		payload["text"] = text
 		delete(payload, "parse_mode")
 		return c.postJSON(ctx, "sendMessage", payload)

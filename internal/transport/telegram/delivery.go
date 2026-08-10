@@ -164,6 +164,12 @@ func (c *Client) FinalizeResponse(ctx context.Context, chatID int64, previewMess
 			// parser rejection. Keep the existing bubble when ordinary text
 			// editing still works; if the message itself is no longer editable,
 			// send a fresh rich/plain message below.
+			//
+			// Recorded first: succeeding here leaves the reader looking at
+			// the plain renderer's output, which drops every table the
+			// model wrote, and the caller is told the finalize succeeded.
+			c.note("telegram: rich edit rejected, finalising as plain text",
+				"chat_id", chatID, "message_id", previewMessageID, "error", richEditErr)
 			if err := c.finalizeLegacyPreview(ctx, chatID, previewMessageID, chunk); err == nil {
 				continue
 			}
@@ -208,6 +214,14 @@ func (c *Client) sendRichWithFallback(ctx context.Context, chatID int64, text st
 	if richErr == nil && richResult != nil && richResult.Result.MessageID != 0 {
 		return nil
 	}
+
+	// The plain path below renders none of what rich renders — no tables,
+	// no headings, no italics. Silently swapping one for the other is
+	// indistinguishable from "formatting stopped working", with nothing
+	// anywhere to say why, so the discarded error is recorded before the
+	// fallback hides it.
+	c.note("telegram: rich message rejected, falling back to plain text",
+		"chat_id", chatID, "error", richErr)
 
 	for _, chunk := range splitMessage(text, maxTelegramMessageLength) {
 		if err := c.sendLegacyWithRetry(ctx, chatID, chunk); err != nil {

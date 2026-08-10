@@ -157,6 +157,10 @@ func (g *Gateway) loadDesiredBots(ctx context.Context) ([]bs.BotConfig, error) {
 func (g *Gateway) registerBot(parentCtx context.Context, cfg bs.BotConfig) error {
 	apiURL := g.deps.Config.Transport.Telegram.APIURL
 	client := telegram.NewClientWithAPIURL(cfg.Token, apiURL, g.deps.Config.Timeouts.TelegramClient)
+	// Without this the client's own recoveries — rich rejected, markup
+	// rejected — happen silently and look like the product changing
+	// behaviour on its own.
+	client.SetLogger(g.logger.With("bot_id", cfg.ID.String()))
 	poller := telegram.NewPollerWithAPIURL(cfg.Token, apiURL, g.deps.Config.Timeouts.TelegramPoll)
 
 	meCtx, meCancel := context.WithTimeout(parentCtx, 10*time.Second)
