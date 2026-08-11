@@ -32,7 +32,7 @@ func callTool(t *testing.T, h ToolHandler) string {
 func TestRegisterRemoteDoesNotClobberLocalTool(t *testing.T) {
 	r := NewToolRegistry()
 	r.Register("agent_task_status", "local", nil, handlerReturning("local"))
-	r.RegisterRemote("agent_task_status", "peer", nil, ToolModeSync, "liya", handlerReturning("peer"))
+	r.RegisterRemote("agent_task_status", "peer", nil, ToolModeSync, "peer-a", handlerReturning("peer"))
 
 	h, ok := r.HandlerByName("agent_task_status")
 	if !ok {
@@ -50,7 +50,7 @@ func TestRegisterRemoteDoesNotClobberLocalTool(t *testing.T) {
 // a snapshot before or after local modules register.
 func TestLocalToolWinsRegardlessOfOrder(t *testing.T) {
 	r := NewToolRegistry()
-	r.RegisterRemote("agent_task_status", "peer", nil, ToolModeSync, "liya", handlerReturning("peer"))
+	r.RegisterRemote("agent_task_status", "peer", nil, ToolModeSync, "peer-a", handlerReturning("peer"))
 	r.Register("agent_task_status", "local", nil, handlerReturning("local"))
 
 	h, _ := r.HandlerByName("agent_task_status")
@@ -64,9 +64,9 @@ func TestLocalToolWinsRegardlessOfOrder(t *testing.T) {
 func TestRemoteHandlerForPeerReachesShadowedTool(t *testing.T) {
 	r := NewToolRegistry()
 	r.Register("agent_task_accept", "local", nil, handlerReturning("local"))
-	r.RegisterRemote("agent_task_accept", "peer", nil, ToolModeSync, "liya", handlerReturning("peer"))
+	r.RegisterRemote("agent_task_accept", "peer", nil, ToolModeSync, "peer-a", handlerReturning("peer"))
 
-	h, ok := r.RemoteHandlerForPeer("liya", "agent_task_accept")
+	h, ok := r.RemoteHandlerForPeer("peer-a", "agent_task_accept")
 	if !ok {
 		t.Fatal("peer copy unreachable after local registration took the name")
 	}
@@ -80,7 +80,7 @@ func TestRemoteHandlerForPeerReachesShadowedTool(t *testing.T) {
 func TestRemoteHandlerForPeerFallsBackWhenUnambiguous(t *testing.T) {
 	r := NewToolRegistry()
 	r.Register("agent_task_accept", "local", nil, handlerReturning("local"))
-	r.RegisterRemote("agent_task_accept", "peer", nil, ToolModeSync, "liya", handlerReturning("peer"))
+	r.RegisterRemote("agent_task_accept", "peer", nil, ToolModeSync, "peer-a", handlerReturning("peer"))
 
 	h, ok := r.RemoteHandlerForPeer("2f9c-agent-id-not-the-name", "agent_task_accept")
 	if !ok {
@@ -95,19 +95,19 @@ func TestRemoteHandlerForPeerFallsBackWhenUnambiguous(t *testing.T) {
 // than hand the task to an arbitrary ship.
 func TestRemoteHandlerForPeerRefusesAmbiguousFallback(t *testing.T) {
 	r := NewToolRegistry()
-	r.RegisterRemote("agent_task_accept", "peer", nil, ToolModeSync, "liya", handlerReturning("liya"))
-	r.RegisterRemote("agent_task_accept", "peer", nil, ToolModeSync, "kate", handlerReturning("kate"))
+	r.RegisterRemote("agent_task_accept", "peer", nil, ToolModeSync, "peer-a", handlerReturning("peer-a"))
+	r.RegisterRemote("agent_task_accept", "peer", nil, ToolModeSync, "peer-b", handlerReturning("peer-b"))
 
 	if _, ok := r.RemoteHandlerForPeer("unknown-id", "agent_task_accept"); ok {
 		t.Error("ambiguous fallback resolved; want refusal")
 	}
 	// An exact peer match must still work when the fleet has many peers.
-	h, ok := r.RemoteHandlerForPeer("kate", "agent_task_accept")
+	h, ok := r.RemoteHandlerForPeer("peer-b", "agent_task_accept")
 	if !ok {
 		t.Fatal("exact peer match failed in a multi-peer fleet")
 	}
-	if got := callTool(t, h); got != "kate" {
-		t.Errorf("exact match dispatched to %q, want kate", got)
+	if got := callTool(t, h); got != "peer-b" {
+		t.Errorf("exact match dispatched to %q, want peer-b", got)
 	}
 }
 
@@ -115,9 +115,9 @@ func TestRemoteHandlerForPeerRefusesAmbiguousFallback(t *testing.T) {
 // be callable by its bare name from the cortex.
 func TestRemoteOnlyToolKeepsBareName(t *testing.T) {
 	r := NewToolRegistry()
-	r.RegisterRemote("code_repo_sync", "peer", nil, ToolModeSync, "liya", handlerReturning("peer"))
+	r.RegisterRemote("peer_only_tool", "peer", nil, ToolModeSync, "peer-a", handlerReturning("peer"))
 
-	h, ok := r.HandlerByName("code_repo_sync")
+	h, ok := r.HandlerByName("peer_only_tool")
 	if !ok {
 		t.Fatal("remote-only tool missing from registry")
 	}
@@ -130,10 +130,10 @@ func TestRemoteOnlyToolKeepsBareName(t *testing.T) {
 // same peer rather than accumulate stale endpoints.
 func TestRegisterRemoteReplacesSamePeerRegistration(t *testing.T) {
 	r := NewToolRegistry()
-	r.RegisterRemote("code_repo_sync", "peer", nil, ToolModeSync, "liya", handlerReturning("stale"))
-	r.RegisterRemote("code_repo_sync", "peer", nil, ToolModeSync, "liya", handlerReturning("fresh"))
+	r.RegisterRemote("peer_only_tool", "peer", nil, ToolModeSync, "peer-a", handlerReturning("stale"))
+	r.RegisterRemote("peer_only_tool", "peer", nil, ToolModeSync, "peer-a", handlerReturning("fresh"))
 
-	h, _ := r.RemoteHandlerForPeer("liya", "code_repo_sync")
+	h, _ := r.RemoteHandlerForPeer("peer-a", "peer_only_tool")
 	if got := callTool(t, h); got != "fresh" {
 		t.Errorf("peer lookup returned %q, want the refreshed handler", got)
 	}
@@ -144,9 +144,9 @@ func TestRegisterRemoteReplacesSamePeerRegistration(t *testing.T) {
 func TestClonePreservesPeerAddressableTools(t *testing.T) {
 	r := NewToolRegistry()
 	r.Register("agent_task_accept", "local", nil, handlerReturning("local"))
-	r.RegisterRemote("agent_task_accept", "peer", nil, ToolModeSync, "liya", handlerReturning("peer"))
+	r.RegisterRemote("agent_task_accept", "peer", nil, ToolModeSync, "peer-a", handlerReturning("peer"))
 
-	h, ok := r.Clone().RemoteHandlerForPeer("liya", "agent_task_accept")
+	h, ok := r.Clone().RemoteHandlerForPeer("peer-a", "agent_task_accept")
 	if !ok {
 		t.Fatal("clone lost the peer copy; delegation would fail per turn")
 	}
@@ -158,10 +158,10 @@ func TestClonePreservesPeerAddressableTools(t *testing.T) {
 func TestSubsetPreservesPeerAddressableTools(t *testing.T) {
 	r := NewToolRegistry()
 	r.Register("agent_task_accept", "local", nil, handlerReturning("local"))
-	r.RegisterRemote("agent_task_accept", "peer", nil, ToolModeSync, "liya", handlerReturning("peer"))
+	r.RegisterRemote("agent_task_accept", "peer", nil, ToolModeSync, "peer-a", handlerReturning("peer"))
 
 	sub := r.SubsetForNames([]string{"agent_task_accept"})
-	h, ok := sub.RemoteHandlerForPeer("liya", "agent_task_accept")
+	h, ok := sub.RemoteHandlerForPeer("peer-a", "agent_task_accept")
 	if !ok {
 		t.Fatal("subset lost the peer copy")
 	}

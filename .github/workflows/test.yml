@@ -5,9 +5,11 @@ name: Test
 # dialogue window, the session store and every provider ran nowhere at all. This
 # is the repository the bugs users report live in, and nothing checked it.
 #
-# It was worse than absent: agent-isolation has failed on every commit for long
-# enough that red carries no information, so even its build verdict was buried.
-# This workflow is separate on purpose — its status means one thing.
+# It was worse than absent: agent-isolation had failed on every commit for long
+# enough that red carried no information, so even its build verdict was buried.
+# That gate is green again — its own test data named a real agent — so a red
+# there now means what it says. This workflow stays separate anyway: one status,
+# one meaning.
 
 on:
   push:

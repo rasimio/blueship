@@ -76,8 +76,9 @@ func memoryNoMatch(formattedTraces string) bool {
 }
 
 // RetrievalFailedStatus is the status a host reports when the memory
-// lookup did not complete. Mirrors entities.RetrievalFailed on the Arlene
-// side; kept as a bare string so blueship stays free of that dependency.
+// lookup did not complete. It mirrors a constant the host defines for its
+// own retrieval layer, and is kept as a bare string here so blueship needs
+// no dependency on whichever host it is running.
 const RetrievalFailedStatus = "retrieval_failed"
 
 // appendMemoryUnavailableGuidance states the one thing the model cannot
