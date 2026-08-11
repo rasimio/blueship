@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	bs "github.com/rasimio/blueship/internal/core"
+	"github.com/rasimio/blueship/runtime/agent"
 )
 
 // The debouncer folds a burst of Telegram messages into one turn and one
@@ -182,3 +183,65 @@ func TestReplyQuoteSurvivesALookupFailure(t *testing.T) {
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
+
+type recordingUserMessageSink struct {
+	bs.ResponseSink
+	announced []string
+	err       error
+}
+
+func (s *recordingUserMessageSink) SendUserMessagePersisted(_ context.Context, messageID string) error {
+	s.announced = append(s.announced, messageID)
+	return s.err
+}
+
+// The durable id has to reach a client that already drew the message. Until
+// it did, a bubble kept a local id for the whole session, so a reply to
+// anything said in it could not name its parent and the quote had nothing to
+// scroll to.
+func TestAnnounceUserMessageIDTellsTheClient(t *testing.T) {
+	sink := &recordingUserMessageSink{}
+	cfg := &agent.RunConfig{SessionID: "session"}
+
+	announceUserMessageID(cfg, sink, testLogger())
+	cfg.OnUserMessagePersisted(context.Background(), bs.PersistedMessage{ID: "durable-uuid"})
+
+	if len(sink.announced) != 1 || sink.announced[0] != "durable-uuid" {
+		t.Fatalf("announced = %#v", sink.announced)
+	}
+}
+
+// The attachment/link binding owns the same hook. Announcing must compose
+// with it, not replace it: a turn that dropped either half loses its files
+// or strands the client on a local id, and both show up only later.
+func TestAnnounceUserMessageIDKeepsTheExistingHook(t *testing.T) {
+	sink := &recordingUserMessageSink{}
+	prior := ""
+	cfg := &agent.RunConfig{
+		SessionID: "session",
+		OnUserMessagePersisted: func(_ context.Context, receipt bs.PersistedMessage) {
+			prior = receipt.ID
+		},
+	}
+
+	announceUserMessageID(cfg, sink, testLogger())
+	cfg.OnUserMessagePersisted(context.Background(), bs.PersistedMessage{ID: "durable-uuid"})
+
+	if prior != "durable-uuid" {
+		t.Fatalf("the attachment hook was dropped: %q", prior)
+	}
+	if len(sink.announced) != 1 {
+		t.Fatalf("announced = %#v", sink.announced)
+	}
+}
+
+// A transport with no such client (Telegram) must be left exactly as it was.
+func TestAnnounceUserMessageIDLeavesOtherTransportsAlone(t *testing.T) {
+	cfg := &agent.RunConfig{SessionID: "session"}
+	announceUserMessageID(cfg, &plainSink{}, testLogger())
+	if cfg.OnUserMessagePersisted != nil {
+		t.Fatal("a hook was installed for a sink that cannot receive the id")
+	}
+}
+
+type plainSink struct{ bs.ResponseSink }

@@ -417,6 +417,32 @@ func (g *Gateway) bindInboundEnvelopeArtifacts(
 	}
 }
 
+// announceUserMessageID adds the durable-id announcement to whatever the turn
+// already does when the user's row commits, so a client that rendered the
+// message optimistically can adopt the real id.
+//
+// It composes rather than assigns: the attachment/link binding owns the same
+// hook, and it is set only for turns that have an attachment sink. Whichever
+// order they are wired in, both must run — a turn that dropped one of them
+// would either lose its files or leave the client on a local id, and both
+// failures surface a turn or a page-reload later.
+func announceUserMessageID(cfg *agent.RunConfig, sink bs.ResponseSink, logger *slog.Logger) {
+	announcer, ok := sink.(bs.UserMessageSink)
+	if cfg == nil || !ok {
+		return
+	}
+	prior := cfg.OnUserMessagePersisted
+	cfg.OnUserMessagePersisted = func(appendCtx context.Context, receipt bs.PersistedMessage) {
+		if prior != nil {
+			prior(appendCtx, receipt)
+		}
+		if err := announcer.SendUserMessagePersisted(appendCtx, receipt.ID); err != nil {
+			logger.Warn("reply: could not announce the user message id",
+				"session_id", cfg.SessionID, "message_id", receipt.ID, "error", err)
+		}
+	}
+}
+
 type telegramReplyLookup interface {
 	LookupByTGMessageID(ctx context.Context, sessionID string, tgMessageID int64) (string, error)
 }
@@ -1032,6 +1058,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	runCfg.VisibleUserText = visibleUserText
 	if !ephemeral && g.deps.AttachmentSink != nil && sessionUUID != uuid.Nil {
 		g.bindInboundEnvelopeArtifacts(&runCfg, us, sessionUUID, msgs, policyText)
+	}
+	if !ephemeral {
+		announceUserMessageID(&runCfg, sink, g.logger)
 	}
 	g.applyTurnToolPolicy(ctx, turnRegistry, &runCfg, msgText, forcedCortexTools, ephemeral, turnPolicy)
 	g.logger.Info("turn policy applied",

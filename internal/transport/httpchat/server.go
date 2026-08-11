@@ -771,6 +771,19 @@ func (s *sseSink) SendMeta(ctx context.Context, sessionID, messageID string) err
 	return nil
 }
 
+// SendUserMessagePersisted implements bs.UserMessageSink: tell the client the
+// durable id of the message it just sent, so the bubble it rendered
+// optimistically stops carrying a local id nothing can address. It rides the
+// meta frame the client already parses, under its own key — `message_id`
+// means the ASSISTANT's row and a relayer links tool_calls by it.
+func (s *sseSink) SendUserMessagePersisted(ctx context.Context, messageID string) error {
+	if messageID == "" {
+		return nil
+	}
+	s.emit(map[string]string{"type": "meta", "user_message_id": messageID})
+	return nil
+}
+
 // SendTurnStart implements bs.TurnStartSink: name this turn before anything
 // streams, so the cabinet's stop button can address it and cannot stop a
 // later one by accident. It rides the meta frame the client already parses.

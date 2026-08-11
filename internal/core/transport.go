@@ -88,6 +88,20 @@ type MetaSink interface {
 	SendMeta(ctx context.Context, sessionID, messageID string) error
 }
 
+// UserMessageSink is an optional sink capability for transports whose client
+// renders the message optimistically, before the server has written it.
+//
+// Such a client holds a local id for its own message and for the answer, and
+// a local id names no row: a reply to something said earlier in the same,
+// not-yet-reloaded session cannot be addressed, and clicking its quote cannot
+// find the parent. The gateway announces the durable id the moment the row
+// commits, so the client can adopt it and stop guessing.
+//
+// Fired once per turn, before any text streams.
+type UserMessageSink interface {
+	SendUserMessagePersisted(ctx context.Context, messageID string) error
+}
+
 // TurnStartSink is an optional sink capability for transports whose client
 // renders its own stop control. The gateway announces the id of the turn it
 // has just registered, so a stop can name the generation it means and cannot
