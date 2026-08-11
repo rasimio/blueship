@@ -59,9 +59,10 @@ type Gateway struct {
 	platformGreetMu sync.Mutex
 	platformGreet   string
 
-	// Platform prompt layers for souls in the vaelum tenancy model. Loaded
-	// once from vaelum.platform_prompts and cached by platformPrompts; the
-	// database is the runtime source of truth for system prompts.
+	// Platform prompt layers for hosts with a multi-tenant persona model.
+	// Resolved once through the host's ResolvePlatformPrompts hook and
+	// cached by platformPrompts. Where those layers live — files, a table,
+	// anything else — is the host's business, not the framework's.
 	ppMu       sync.Mutex
 	ppLoaded   bool
 	ppPreamble string
@@ -656,9 +657,13 @@ type personaCacheEntry struct {
 	at     time.Time
 }
 
-// platformPrompts returns the platform preamble and agents layers, loaded
-// once from vaelum.platform_prompts and cached for the process lifetime.
+// platformPrompts returns the platform preamble and agents layers,
+// resolved once through the host hook and cached for the process lifetime.
 // A failed load is not cached, so a transient error is retried next call.
+//
+// Cached deliberately: the layers are composed into every turn, and a host
+// backing them with files would otherwise read from disk on each one. The
+// price is that an edit needs a restart to take effect.
 func (g *Gateway) platformPrompts(ctx context.Context) (preamble, agents string, err error) {
 	g.ppMu.Lock()
 	defer g.ppMu.Unlock()
