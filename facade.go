@@ -221,6 +221,19 @@ const (
 	MetricCounter = core.MetricCounter
 )
 
+// --- Why an autonomous turn produced no message ---
+//
+// Hosts distinguish these to decide whether asking again is sensible. Only
+// ModelDeclined reflects a choice; the rest report facts about the
+// conversation that a second call would restate rather than change — and
+// retrying UserActive in particular would interrupt someone mid-sentence.
+const (
+	AutonomousNoOpUserActive    = core.AutonomousNoOpUserActive
+	AutonomousNoOpNoDialog      = core.AutonomousNoOpNoDialog
+	AutonomousNoOpRuleSilent    = core.AutonomousNoOpRuleSilent
+	AutonomousNoOpModelDeclined = core.AutonomousNoOpModelDeclined
+)
+
 // --- Strategy constants (agent_task dispatch) ---
 const (
 	StrategyDirect     = core.StrategyDirect

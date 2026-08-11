@@ -30,15 +30,37 @@ type AutonomousTurnRequest struct {
 	Prompt          string
 }
 
+// Reasons a draft can come back empty. NoOp on its own says a turn was not
+// produced; it does not say whether that was a decision or a protection, and
+// callers need to tell those apart. A handler retrying "the model declined"
+// is reasonable; retrying "the user is typing right now" is a bug that
+// interrupts a live conversation.
+const (
+	// AutonomousNoOpUserActive — the person wrote, or is writing, after the
+	// anchor this draft was requested for. Never retry: they are here.
+	AutonomousNoOpUserActive = "user_active"
+	// AutonomousNoOpNoDialog — the session carries no dialog message to
+	// anchor a turn to. Structural, not a judgement.
+	AutonomousNoOpNoDialog = "no_dialog"
+	// AutonomousNoOpRuleSilent — an active rule with Silent matched. This is
+	// configuration expressing intent, so it is honoured as written.
+	AutonomousNoOpRuleSilent = "rule_silent"
+	// AutonomousNoOpModelDeclined — the cortex returned [no-op] or produced
+	// no visible text. The only reason that reflects a choice rather than a
+	// fact about the conversation, and the only one worth reconsidering.
+	AutonomousNoOpModelDeclined = "model_declined"
+)
+
 // AutonomousTurnDraft is an immutable candidate produced from the live chat
-// session. NoOp means the cortex chose not to contact the user (or the anchor
-// was already stale).
+// session. NoOp means no turn was produced; NoOpReason says why, and is one of
+// the AutonomousNoOp* constants above.
 type AutonomousTurnDraft struct {
 	Text            string
 	SessionID       string
 	DialogMessageID string
 	ActivityToken   string
 	NoOp            bool
+	NoOpReason      string
 }
 
 // AutonomousTurnDrafter is the late-bound gateway capability exposed to

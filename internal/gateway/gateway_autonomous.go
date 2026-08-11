@@ -176,20 +176,26 @@ func (g *Gateway) DraftAutonomousTurn(ctx context.Context, req bs.AutonomousTurn
 	activity := g.activitySnapshot(req.UserID, req.SoulID)
 	if anchor.ID == "" || anchor.ID != req.AnchorMessageID ||
 		activity.Pending > 0 || activity.LastInboundAt.After(anchor.CreatedAt) {
-		return bs.AutonomousTurnDraft{SessionID: sess.ID, NoOp: true}, nil
+		return bs.AutonomousTurnDraft{
+			SessionID: sess.ID, NoOp: true, NoOpReason: bs.AutonomousNoOpUserActive,
+		}, nil
 	}
 	dialogMessageID, err := g.store.LatestDialogMessageID(ctx, sess.ID)
 	if err != nil {
 		return bs.AutonomousTurnDraft{}, fmt.Errorf("draft autonomous turn: dialog version lookup: %w", err)
 	}
 	if dialogMessageID == "" {
-		return bs.AutonomousTurnDraft{SessionID: sess.ID, NoOp: true}, nil
+		return bs.AutonomousTurnDraft{
+			SessionID: sess.ID, NoOp: true, NoOpReason: bs.AutonomousNoOpNoDialog,
+		}, nil
 	}
 
 	priorContext := g.buildPriorContext(ctx, sess.ID, 6)
 	injectedCtx, reflexGuidance, silent := g.prepareAutonomousContext(ctx, us, priorContext)
 	if silent {
-		return bs.AutonomousTurnDraft{SessionID: sess.ID, NoOp: true}, nil
+		return bs.AutonomousTurnDraft{
+			SessionID: sess.ID, NoOp: true, NoOpReason: bs.AutonomousNoOpRuleSilent,
+		}, nil
 	}
 
 	prepared, err := g.prepareCortexTurn(ctx, us, sess, injectedCtx, reflexGuidance, nil, true)
@@ -209,12 +215,16 @@ func (g *Gateway) DraftAutonomousTurn(ctx context.Context, req bs.AutonomousTurn
 	}
 	text = strings.TrimSpace(sanitizeLeakedToolCalls(text))
 	if text == "" || strings.EqualFold(text, autonomousTurnNoOp) {
-		return bs.AutonomousTurnDraft{SessionID: sess.ID, NoOp: true}, nil
+		return bs.AutonomousTurnDraft{
+			SessionID: sess.ID, NoOp: true, NoOpReason: bs.AutonomousNoOpModelDeclined,
+		}, nil
 	}
 	currentActivity := g.activitySnapshot(req.UserID, req.SoulID)
 	if currentActivity.Pending > 0 || currentActivity.Token != activity.Token ||
 		currentActivity.LastInboundAt.After(anchor.CreatedAt) {
-		return bs.AutonomousTurnDraft{SessionID: sess.ID, NoOp: true}, nil
+		return bs.AutonomousTurnDraft{
+			SessionID: sess.ID, NoOp: true, NoOpReason: bs.AutonomousNoOpUserActive,
+		}, nil
 	}
 	return bs.AutonomousTurnDraft{
 		Text:            text,
