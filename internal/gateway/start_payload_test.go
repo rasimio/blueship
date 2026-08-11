@@ -34,6 +34,13 @@ func TestStartPayloadNamingAHostCommandRunsIt(t *testing.T) {
 		// A command that exists but is not host-handled must not be
 		// summoned this way — it would run outside the model's turn.
 		{"/start help", "", false},
+		// Only /start. Any two-word message whose second word happens to
+		// name a command would otherwise fire it: "а что за plus" is a
+		// question, and answering it by opening a payment sheet is the
+		// bot taking a sentence as an instruction.
+		{"/help plus", "", false},
+		{"скажи plus", "", false},
+		{"/plus plus", "", false},
 	} {
 		name, run := g.startPayloadCommand(tc.text)
 		if run != tc.wantRun || name != tc.wantName {
