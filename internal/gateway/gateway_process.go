@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -854,6 +855,17 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		policyRegistry, &allowedToolsSnapshot,
 	)
 	if err != nil {
+		// A canceled turn is not a broken one. Pressing stop aborts the
+		// context mid-preparation, the persona lookup fails with it, and
+		// this used to be filed as "cannot resolve system prompt" at Error
+		// — a person exercising a button we shipped, logged as a fault in
+		// the prompt stack, and forwarded to whoever the alerter pages. A
+		// daemon restart during a turn lands here the same way.
+		if turnCanceled(ctx, err) {
+			g.logger.Info("cortex: turn canceled before the model was called",
+				"soul_id", us.SoulID.String(), "chat_id", us.ChatID)
+			return
+		}
 		g.logger.Error("cortex: cannot resolve system prompt, aborting turn",
 			"soul_id", us.SoulID.String(), "chat_id", us.ChatID, "error", err)
 		return
@@ -884,6 +896,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	if g.deps.Config.Gateway.InteractionTier && g.reflexInteractionPrompt != "" {
 		rp, rerr := g.reflexSystemPromptForSoul(ctx, us.SoulID)
 		if rerr != nil {
+			if turnCanceled(ctx, rerr) {
+				g.logger.Info("reflex: turn canceled before the model was called",
+					"soul_id", us.SoulID.String(), "chat_id", us.ChatID)
+				return
+			}
 			g.logger.Error("reflex: cannot resolve system prompt, aborting turn",
 				"soul_id", us.SoulID.String(), "chat_id", us.ChatID, "error", rerr)
 			return
@@ -1294,3 +1311,16 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 // runs its memory state machine asynchronously without blocking the response
 // loop. Sessions whose ID isn't a valid UUID are skipped with a warning —
 // shouldn't happen in production but defensive against future schema drift.
+
+// turnCanceled reports whether a turn failed because it was called off
+// rather than because something is wrong.
+//
+// Both signals are checked. errors.Is covers a cancellation that arrived
+// wrapped through a lookup; ctx.Err covers a driver that reports the same
+// condition as an error of its own, which is how it reaches us from the
+// database. A deadline is deliberately NOT included: running out of time
+// is a fault worth an Error, and the callers already retry it where a
+// retry makes sense.
+func turnCanceled(ctx context.Context, err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled)
+}
