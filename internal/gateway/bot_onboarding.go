@@ -453,7 +453,18 @@ func (g *Gateway) onboardingInstant(
 	greet bool,
 ) bool {
 	flow := g.flow()
-	_, _, err := g.deps.BotOnboarding.CompleteOnboarding(ctx, bs.BotOnboardingComplete{
+
+	// A payload that names a host command is an errand, not an
+	// acquisition channel: someone was sent here to finish something the
+	// other chat could not do. Recording "plus" as where a customer came
+	// from would quietly corrupt the one field that has to stay a small
+	// closed set to be worth counting.
+	errand, isErrand := g.startPayloadCommand("/start " + source)
+	if isErrand {
+		source = ""
+	}
+
+	userID, soulID, err := g.deps.BotOnboarding.CompleteOnboarding(ctx, bs.BotOnboardingComplete{
 		BotID:           bi.id,
 		TGUserID:        tgUserID,
 		TGChatID:        tgChatID,
@@ -488,6 +499,14 @@ func (g *Gateway) onboardingInstant(
 	g.logger.Info("gateway: instant onboarding created account",
 		"tg_user", tgUserID, "bot_id", bi.id.String())
 	g.invalidateTelegramUser(bi.id, chatID)
+
+	// Run the errand the link was for, once the account it needs exists.
+	// Deferred to the end so the greeting lands first: arriving mid-task
+	// still starts with being told where you are.
+	if isErrand && userID != uuid.Nil {
+		defer g.runHostCommand(ctx, bi, tgChatID, tgUserID,
+			&UserState{UserID: userID, SoulID: soulID}, errand, "")
+	}
 
 	// Arm the deferred persona offer. Only instant accounts get one:
 	// a wizard user chose their persona deliberately a moment ago and

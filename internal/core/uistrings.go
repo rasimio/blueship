@@ -118,6 +118,15 @@ type BotCommandRequest struct {
 	Args   string // everything after the command, trimmed
 	UserID uuid.UUID
 	SoulID uuid.UUID
+
+	// BotID and BotKind identify the bot the command was typed into, as
+	// the host registered it. A multi-bot deployment can answer the same
+	// command differently depending on whose bot is asking — which some
+	// answers require rather than merely prefer: an invoice created by a
+	// bot is paid to that bot, so a host selling something has to know
+	// whether this one is its own.
+	BotID   uuid.UUID
+	BotKind string
 }
 
 // BotCommandResult is what the host wants said back. Text is required;

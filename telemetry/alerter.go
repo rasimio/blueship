@@ -80,6 +80,25 @@ func (a *Alerter) Send(ctx context.Context, level slog.Level, msg string, attrs 
 	go a.post(text)
 }
 
+// Notify sends an already-composed message to the same chat, bypassing
+// both the level formatting and the throttle.
+//
+// The throttle is the reason this is not Send at Info: it dedupes by
+// (level, message), which is right for an error screaming in a retry
+// loop and wrong for a stream of distinct good news — two signups a
+// minute apart are two events, and the second one must not be swallowed
+// because it reads like the first.
+//
+// Text is passed through untouched, so callers own the escaping. That is
+// deliberate: these messages are composed from templates that want bold
+// and links, unlike log records, which arrive as raw untrusted strings.
+func (a *Alerter) Notify(text string) {
+	if a == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	go a.post(text)
+}
+
 func (a *Alerter) format(level slog.Level, msg string, attrs []slog.Attr) string {
 	var icon string
 	switch {

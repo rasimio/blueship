@@ -777,6 +777,7 @@ func (g *Gateway) sendDenial(ctx context.Context, bi *botInstance, tgChatID int6
 func (g *Gateway) runHostCommand(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, us *UserState, name, args string) {
 	result, err := g.deps.CommandHandler(ctx, bs.BotCommandRequest{
 		Name: name, Args: args, UserID: us.UserID, SoulID: us.SoulID,
+		BotID: bi.id, BotKind: bi.kind,
 	})
 	if err != nil {
 		g.logger.Error("gateway: host command failed",
@@ -858,13 +859,17 @@ func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, tgCh
 		return false
 	}
 	name := strings.ToLower(strings.TrimPrefix(cmd, "/"))
-	if !g.isHostCommand(name) {
-		return false
-	}
-
 	args := ""
 	if i := strings.IndexByte(strings.TrimSpace(text), ' '); i >= 0 {
 		args = strings.TrimSpace(strings.TrimSpace(text)[i+1:])
+	}
+
+	if deep, ok := g.startPayloadCommand(text); ok {
+		name, args = deep, ""
+	}
+
+	if !g.isHostCommand(name) {
+		return false
 	}
 	// Consumed either way, including on failure: the alternative is
 	// handing "/plus foo@bar" to the model as though it were conversation.
@@ -1727,3 +1732,33 @@ func (g *Gateway) notifyOwnerError(ctx context.Context, source string, err error
 
 // ProcessInbound is the public entry point for external transports (WebSocket, etc.).
 // Resolves user, converts InboundMessage to internal format, and runs the full pipeline.
+
+// startPayloadCommand reads a deep link that names a host command.
+//
+// A deep link carries exactly one thing — the /start payload — and it is
+// the only way one chat can hand a person to another. A host needs that
+// when the bot someone is in cannot finish what they came to do: an
+// invoice is paid to the bot that created it, so a purchase begun on
+// somebody else's bot has to be completed on the seller's.
+//
+// Only host-answered commands qualify. Anything else stays a payload and
+// reaches acquisition reporting unchanged, which is what most of them
+// are.
+func (g *Gateway) startPayloadCommand(text string) (string, bool) {
+	fields := strings.Fields(strings.TrimSpace(text))
+	if len(fields) != 2 {
+		return "", false
+	}
+	head := strings.ToLower(fields[0])
+	if at := strings.IndexByte(head, '@'); at >= 0 {
+		head = head[:at]
+	}
+	if head != "/start" {
+		return "", false
+	}
+	payload := strings.ToLower(fields[1])
+	if !g.isHostCommand(payload) {
+		return "", false
+	}
+	return payload, true
+}
