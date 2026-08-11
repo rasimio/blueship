@@ -351,6 +351,12 @@ type pendingMsg struct {
 	// natively); 0 / empty for Telegram inbound. When both are set
 	// the direct id wins.
 	replyToMessageID string
+	// replyQuoteFallback is the quote as the transport delivered it,
+	// used only when neither id resolves to a row we can read — a
+	// parent older than the id index. The transcript is preferred
+	// because it holds the processed representation (a document's
+	// extracted text) that the wire quote is only a preview of.
+	replyQuoteFallback string
 	// ephemeral marks a private, read-only notebook ask:
 	// context from memory, but no persistence — see core.WithEphemeral.
 	ephemeral bool

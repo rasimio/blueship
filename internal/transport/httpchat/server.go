@@ -164,6 +164,14 @@ type chatRequest struct {
 	// quote chip. Empty for non-reply turns; Telegram replies use
 	// the gateway's tg_message_id index instead.
 	ReplyToMessageID string `json:"reply_to_message_id,omitempty"`
+	// ReplyQuote carries the quoted text for a reply whose parent id
+	// the client does not know yet — a message sent earlier in this
+	// same, not-yet-reloaded session still has only a local id. The
+	// quote never travels inside Text: a reply is one relational
+	// fact, and encoding it in the prose put a raw uuid in front of
+	// the user's words, in the prompt and in every index built from
+	// the transcript.
+	ReplyQuote string `json:"reply_quote,omitempty"`
 	// Source tags the origin. "notebook" → an ephemeral, private ask:
 	// the turn uses memory for context but persists nothing and never
 	// appears in the chat thread. Empty = a normal chat turn.
@@ -614,6 +622,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			Text:             text,
 			Images:           images,
 			ReplyToMessageID: req.ReplyToMessageID,
+			ReplyQuote:       req.ReplyQuote,
 			Ephemeral:        req.Source == "notebook",
 		}}, sink); err != nil && workCtx.Err() == nil {
 		s.logger.Warn("httpchat: process error", "error", err)

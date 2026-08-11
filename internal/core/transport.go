@@ -19,6 +19,12 @@ type InboundMessage struct {
 	// session store's tg_message_id index — that path doesn't use
 	// this field.
 	ReplyToMessageID string
+	// ReplyQuote is the parent's text as the client already had it,
+	// used only when ReplyToMessageID names no row we can read — a
+	// client that has not yet learned the parent's durable id. The
+	// gateway prefers the transcript, which holds the processed
+	// representation this is only a preview of.
+	ReplyQuote string
 	// Ephemeral marks a private, read-only ask (e.g. a notebook ask on
 	// selected text): use the soul's memory for context but
 	// persist nothing — no chat_messages, no memory encoding, no

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -189,11 +190,12 @@ func (g *Gateway) ProcessInboundForUser(ctx context.Context, userID, soulID uuid
 		}
 		visibleText := m.Text
 		pending = append(pending, pendingMsg{
-			text:             m.Text,
-			images:           m.Images,
-			visibleText:      &visibleText,
-			replyToMessageID: m.ReplyToMessageID,
-			ephemeral:        m.Ephemeral,
+			text:               m.Text,
+			images:             m.Images,
+			visibleText:        &visibleText,
+			replyToMessageID:   m.ReplyToMessageID,
+			replyQuoteFallback: m.ReplyQuote,
+			ephemeral:          m.Ephemeral,
 		})
 	}
 	if len(pending) == 0 {
@@ -486,6 +488,75 @@ func providerContentFromBlocks(blocks []bs.ContentBlock) any {
 	return blocks
 }
 
+// replyParentReader reads the parent row a reply points at. Narrow on
+// purpose: the quote builder needs one lookup and nothing else.
+type replyParentReader interface {
+	MessageForReply(ctx context.Context, sessionID, messageID string) (role string, text string, err error)
+}
+
+// replyQuoteLimit bounds a quote that is only there to identify which
+// message is being answered. The parent's own words are already in the
+// dialogue window; this is a pointer, not a second copy.
+const replyQuoteLimit = 500
+
+// prependReplyQuoteBlock puts the parent's words in front of the turn, so
+// the model knows which message the user is answering.
+//
+// This is the ONLY place a reply quote is rendered, deliberately. It used to
+// be built per transport — Telegram glued `[reply to: …]` onto the text in
+// handleUpdate, the cabinet's frontend glued `[reply to:<uuid>:…]` onto the
+// text it sent — and the two drifted into different shapes stored in
+// different places, so the same reply rendered on one surface and vanished on
+// the other. A reply is one relational fact: `reply_to_message_id`. Everything
+// else is a projection of it, built here, provider-only, never persisted.
+//
+// The parent is read from the transcript rather than quoted off the wire
+// because the transcript holds the processed representation — a document's
+// extracted text, a video's transcript — which the wire quote is at best a
+// preview of and, for a Rich Message, is not at all.
+func prependReplyQuoteBlock(
+	ctx context.Context,
+	parents replyParentReader,
+	logger *slog.Logger,
+	sessionID, replyToMessageID string,
+	msgs []pendingMsg,
+	blocks []bs.ContentBlock,
+) []bs.ContentBlock {
+	quote, whole := "", false
+	if replyToMessageID != "" && parents != nil {
+		role, text, err := parents.MessageForReply(ctx, sessionID, replyToMessageID)
+		if err != nil {
+			logger.Warn("reply-quote: parent lookup failed",
+				"session_id", sessionID, "parent_id", replyToMessageID, "error", err)
+		} else if text != "" {
+			quote = text
+			// Only the human side is kept whole: a user turn may be a
+			// processed attachment, and that expansion is not in the
+			// dialogue window — it is the thing being asked about.
+			whole = role != "assistant"
+		}
+	}
+	if quote == "" && len(msgs) > 0 {
+		quote = msgs[0].replyQuoteFallback
+	}
+	if strings.TrimSpace(quote) == "" {
+		return blocks
+	}
+	// Cut by runes: a byte cut lands mid-codepoint on any non-ASCII text and
+	// hands the model broken UTF-8.
+	if !whole {
+		if runes := []rune(quote); len(runes) > replyQuoteLimit {
+			quote = string(runes[:replyQuoteLimit]) + "..."
+		}
+	}
+	out := make([]bs.ContentBlock, 0, len(blocks)+1)
+	out = append(out, bs.ContentBlock{
+		Type: "text",
+		Text: fmt.Sprintf("[reply to: %s]", quote),
+	})
+	return append(out, blocks...)
+}
+
 func (g *Gateway) prependReplyAttachmentBlocks(
 	ctx context.Context,
 	us *UserState,
@@ -700,6 +771,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			"session_id", sess.ID, "tg_id", msgs[0].replyToTGMessageID, "err", replyErr)
 	}
 	replyAttachmentsStarted := time.Now()
+	// Quote first, then the parent's files in front of it: the turn reads
+	// files, quote, message — the same order a person sees in the chat.
+	blocks = prependReplyQuoteBlock(ctx, g.store, g.logger, sess.ID, replyToMessageID, msgs, blocks)
 	blocks = g.prependReplyAttachmentBlocks(ctx, us, replyToMessageID, blocks)
 	content = providerContentFromBlocks(blocks)
 	timings.RecordSince("gateway.reply_attachments", replyAttachmentsStarted,

@@ -1260,65 +1260,23 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		}
 	}
 
-	// Prepend quoted reply context so the model sees what message the user is replying to
+	// The quote the model reads is NOT built here. It is built once, for
+	// every transport, from the resolved parent row (see
+	// prependReplyQuoteBlock) — the reply is one relational fact, and a
+	// transport that renders its own copy is how the two drifted apart.
+	//
+	// What Telegram contributes is the raw wire quote, kept only as a
+	// fallback for a parent our transcript cannot resolve: a message that
+	// pre-dates the id index. Rich Messages arrive with no text at all, so
+	// this is empty for anything the soul sent.
+	var replyQuoteFallback string
 	if msg.ReplyToMessage != nil {
-		quoted := msg.ReplyToMessage.Text
-		// restored says the quote came out of our own transcript rather than
-		// off the wire; wholeParent says how much of it to keep.
-		restored, wholeParent := false, false
-		if quoted == "" {
-			quoted = msg.ReplyToMessage.Caption
+		replyQuoteFallback = msg.ReplyToMessage.Text
+		if replyQuoteFallback == "" {
+			replyQuoteFallback = msg.ReplyToMessage.Caption
 		}
-		if quoted == "" {
-			replyCtx := bs.WithUserID(ctx, us.UserID)
-			replyCtx = bs.WithSoulID(replyCtx, us.SoulID)
-			sess, sessErr := g.GetOrCreateSession(replyCtx, us)
-			if sessErr != nil {
-				g.logger.Warn("reply-to processed content: session lookup failed",
-					"reply_msg_id", msg.ReplyToMessage.MessageID, "error", sessErr)
-			} else {
-				parentID, lookupErr := g.store.LookupByTGMessageID(
-					replyCtx, sess.ID, int64(msg.ReplyToMessage.MessageID),
-				)
-				if lookupErr != nil {
-					g.logger.Warn("reply-to processed content: parent lookup failed",
-						"reply_msg_id", msg.ReplyToMessage.MessageID, "error", lookupErr)
-				} else if parentID != "" {
-					var parentRole string
-					parentRole, quoted, lookupErr = g.store.MessageForReply(replyCtx, sess.ID, parentID)
-					if lookupErr != nil {
-						g.logger.Warn("reply-to processed content: text lookup failed",
-							"reply_msg_id", msg.ReplyToMessage.MessageID, "error", lookupErr)
-					} else {
-						// Only the human side is kept whole. A recovered user
-						// message may be a processed attachment — the only
-						// durable copy of the transcript being asked about —
-						// while the soul's own answer is already in the
-						// dialogue window, so quoting it whole would just
-						// duplicate it at the top of the turn.
-						restored = quoted != ""
-						wholeParent = restored && parentRole != "assistant"
-						if restored {
-							g.logger.Info("reply-to content restored from transcript",
-								"reply_msg_id", msg.ReplyToMessage.MessageID,
-								"parent_role", parentRole, "chars", len(quoted))
-						}
-					}
-				}
-			}
-		}
-		if quoted != "" {
-			// Raw Telegram quotes are previews; so is a recovered answer. The
-			// cut is by runes: a byte cut lands mid-codepoint on any non-ASCII
-			// text and hands the model broken UTF-8.
-			if !wholeParent {
-				if runes := []rune(quoted); len(runes) > 500 {
-					quoted = string(runes[:500]) + "..."
-				}
-			}
-			text = fmt.Sprintf("[reply to: %s]\n\n%s", quoted, text)
-		} else {
-			g.logger.Warn("reply-to message has no text/caption",
+		if replyQuoteFallback == "" {
+			g.logger.Info("reply-to carries no wire quote — resolving from the transcript",
 				"reply_msg_id", msg.ReplyToMessage.MessageID,
 				"has_document", msg.ReplyToMessage.Document != nil,
 			)
@@ -1340,6 +1298,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		visibleText:        &visibleText,
 		rawAttachments:     rawAttachments,
 		replyToTGMessageID: replyToTGID,
+		replyQuoteFallback: replyQuoteFallback,
 		activityVersion:    admissionVersion,
 	}}
 	pending[0].activityTracked = true
