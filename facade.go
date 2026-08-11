@@ -111,23 +111,31 @@ type (
 
 // --- Config tree ---
 type (
-	Config                = core.Config
-	ModelsConfig          = core.ModelsConfig
-	LimitsConfig          = core.LimitsConfig
-	TimeoutsConfig        = core.TimeoutsConfig
-	RetryConfig           = core.RetryConfig
-	GatewayConfig         = core.GatewayConfig
-	UIStrings             = core.UIStrings
-	OnboardingMessages    = core.OnboardingMessages
-	OnboardingVoice       = core.OnboardingVoice
-	OnboardingTrait       = core.OnboardingTrait
-	OnboardingFlow        = core.OnboardingFlow
-	OnboardingMode        = core.OnboardingMode
-	OnboardingSeedButton  = core.OnboardingSeedButton
-	BotCommand            = core.BotCommand
-	BotCommandRequest     = core.BotCommandRequest
-	BotCommandResult      = core.BotCommandResult
-	BotCommandHandler     = core.BotCommandHandler
+	Config               = core.Config
+	ModelsConfig         = core.ModelsConfig
+	LimitsConfig         = core.LimitsConfig
+	TimeoutsConfig       = core.TimeoutsConfig
+	RetryConfig          = core.RetryConfig
+	GatewayConfig        = core.GatewayConfig
+	UIStrings            = core.UIStrings
+	OnboardingMessages   = core.OnboardingMessages
+	OnboardingVoice      = core.OnboardingVoice
+	OnboardingTrait      = core.OnboardingTrait
+	OnboardingFlow       = core.OnboardingFlow
+	OnboardingMode       = core.OnboardingMode
+	OnboardingSeedButton = core.OnboardingSeedButton
+	BotCommand           = core.BotCommand
+	BotCommandRequest    = core.BotCommandRequest
+	BotCommandResult     = core.BotCommandResult
+	BotCommandHandler    = core.BotCommandHandler
+	BotCommandButton     = core.BotCommandButton
+
+	// In-chat payments: the host decides what a purchase means, the
+	// transport carries it.
+	PreCheckout           = core.PreCheckout
+	PaymentReceipt        = core.PaymentReceipt
+	ApprovePaymentFunc    = core.ApprovePaymentFunc
+	PaymentReceivedFunc   = core.PaymentReceivedFunc
 	BotPersonaEditor      = core.BotPersonaEditor
 	BotPersonaUpdate      = core.BotPersonaUpdate
 	OwnerConfig           = core.OwnerConfig
@@ -258,4 +266,5 @@ var (
 	ErrBotOnboardingAlreadyDone = core.ErrBotOnboardingAlreadyDone
 	ErrBotPersonaNoSoul         = core.ErrBotPersonaNoSoul
 	ErrExecutionDenied          = core.ErrExecutionDenied
+	ErrPaymentUnavailable       = core.ErrPaymentUnavailable
 )

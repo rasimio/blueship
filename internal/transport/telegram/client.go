@@ -128,6 +128,10 @@ type SendMessageResult struct {
 	Result      struct {
 		MessageID int `json:"message_id"`
 	} `json:"result"`
+	// Raw is the untouched `result` value, for the handful of methods
+	// whose result is not a message object — createInvoiceLink returns a
+	// bare string, and Result above would silently stay zero.
+	Raw json.RawMessage `json:"-"`
 }
 
 // ResponseParameters carries structured recovery hints returned by the
@@ -372,7 +376,7 @@ func (c *Client) postJSON(ctx context.Context, method string, payload map[string
 		return nil, fmt.Errorf("telegram %s decode response: %w", method, decodeErr)
 	}
 
-	result := &SendMessageResult{OK: envelope.OK, Description: envelope.Description}
+	result := &SendMessageResult{OK: envelope.OK, Description: envelope.Description, Raw: envelope.Result}
 	trimmedResult := bytes.TrimSpace(envelope.Result)
 	if len(trimmedResult) > 0 && trimmedResult[0] == '{' {
 		if err := json.Unmarshal(trimmedResult, &result.Result); err != nil {
@@ -845,4 +849,75 @@ func markdownToHTML(text string) string {
 	text = reBold.ReplaceAllString(text, "<b>$1</b>")
 
 	return text
+}
+
+// InvoiceRequest describes a purchase to put in front of a person.
+//
+// Telegram Stars only, which is why there is no provider token: paying in
+// Stars is the one case where a bot needs no payment provider account,
+// and the API requires the token to be absent rather than empty-ish.
+type InvoiceRequest struct {
+	Title       string
+	Description string
+	// Payload is echoed back on the pre-checkout query and the receipt.
+	// It never reaches the buyer.
+	Payload string
+	// Stars is the price in whole stars.
+	Stars int
+	// SubscriptionPeriod, when set, makes this a recurring subscription
+	// that Telegram renews and charges on its own. Telegram accepts only
+	// 30 days today, and the price of a live subscription cannot be
+	// changed afterwards.
+	SubscriptionPeriod time.Duration
+}
+
+// CreateInvoiceLink returns a t.me link that opens the payment sheet.
+//
+// A link rather than sendInvoice so the caller can put it under whatever
+// message it likes, beside other ways to pay — sendInvoice would post an
+// invoice of its own and make the choice look like two separate offers.
+func (c *Client) CreateInvoiceLink(ctx context.Context, in InvoiceRequest) (string, error) {
+	if in.Stars <= 0 {
+		return "", fmt.Errorf("telegram: invoice price must be positive, got %d", in.Stars)
+	}
+	payload := map[string]any{
+		"title":       in.Title,
+		"description": in.Description,
+		"payload":     in.Payload,
+		"currency":    "XTR",
+		"prices":      []map[string]any{{"label": in.Title, "amount": in.Stars}},
+	}
+	if in.SubscriptionPeriod > 0 {
+		payload["subscription_period"] = int(in.SubscriptionPeriod.Seconds())
+	}
+
+	res, err := c.postJSON(ctx, "createInvoiceLink", payload)
+	if err != nil {
+		return "", err
+	}
+	var link string
+	if err := json.Unmarshal(res.Raw, &link); err != nil {
+		return "", fmt.Errorf("telegram: createInvoiceLink returned %s: %w", string(res.Raw), err)
+	}
+	if link == "" {
+		return "", fmt.Errorf("telegram: createInvoiceLink returned an empty link")
+	}
+	return link, nil
+}
+
+// AnswerPreCheckoutQuery approves or refuses a confirmed purchase.
+//
+// A non-empty reason refuses it and is shown to the buyer, so it has to
+// be a sentence they can act on. Telegram gives roughly ten seconds
+// before it cancels the payment itself.
+func (c *Client) AnswerPreCheckoutQuery(ctx context.Context, queryID, refusal string) error {
+	payload := map[string]any{
+		"pre_checkout_query_id": queryID,
+		"ok":                    refusal == "",
+	}
+	if refusal != "" {
+		payload["error_message"] = refusal
+	}
+	_, err := c.postJSON(ctx, "answerPreCheckoutQuery", payload)
+	return err
 }

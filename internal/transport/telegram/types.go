@@ -5,6 +5,36 @@ type Update struct {
 	UpdateID      int            `json:"update_id"`
 	Message       *Message       `json:"message,omitempty"`
 	CallbackQuery *CallbackQuery `json:"callback_query,omitempty"`
+	// PreCheckoutQuery must be answered within about ten seconds or
+	// Telegram cancels the payment and tells the buyer it failed.
+	PreCheckoutQuery *PreCheckoutQuery `json:"pre_checkout_query,omitempty"`
+}
+
+// PreCheckoutQuery is Telegram asking whether a confirmed purchase may go
+// through.
+type PreCheckoutQuery struct {
+	ID             string `json:"id"`
+	From           *User  `json:"from"`
+	Currency       string `json:"currency"`
+	TotalAmount    int    `json:"total_amount"`
+	InvoicePayload string `json:"invoice_payload"`
+}
+
+// SuccessfulPayment arrives as a field on an otherwise empty message.
+//
+// The subscription fields are populated only for recurring Star
+// invoices: SubscriptionExpirationDate is a Unix timestamp, IsRecurring
+// marks any charge under a subscription, and IsFirstRecurring marks the
+// one that opened it.
+type SuccessfulPayment struct {
+	Currency                   string `json:"currency"`
+	TotalAmount                int    `json:"total_amount"`
+	InvoicePayload             string `json:"invoice_payload"`
+	TelegramPaymentChargeID    string `json:"telegram_payment_charge_id"`
+	ProviderPaymentChargeID    string `json:"provider_payment_charge_id"`
+	SubscriptionExpirationDate int64  `json:"subscription_expiration_date"`
+	IsRecurring                bool   `json:"is_recurring"`
+	IsFirstRecurring           bool   `json:"is_first_recurring"`
 }
 
 // CallbackQuery represents a Telegram inline button callback.
@@ -28,6 +58,9 @@ type Message struct {
 	VideoNote      *VideoNote  `json:"video_note,omitempty"`
 	Photo          []PhotoSize `json:"photo,omitempty"`
 	ReplyToMessage *Message    `json:"reply_to_message,omitempty"`
+	// SuccessfulPayment comes on a message with no text and no
+	// attachment, which is exactly the shape the inbound path drops.
+	SuccessfulPayment *SuccessfulPayment `json:"successful_payment,omitempty"`
 }
 
 // PhotoSize represents one size variant of a Telegram photo.

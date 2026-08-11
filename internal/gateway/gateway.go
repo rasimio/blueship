@@ -797,13 +797,19 @@ func (g *Gateway) runHostCommand(ctx context.Context, bi *botInstance, tgChatID,
 	if strings.TrimSpace(result.Text) == "" {
 		return
 	}
-	if result.ButtonURL == "" || result.ButtonLabel == "" {
+	if len(result.Buttons) == 0 && (result.ButtonURL == "" || result.ButtonLabel == "") {
 		g.sendOnboardingText(ctx, bi, tgChatID, result.Text)
 		return
 	}
 	rows := [][]telegram.InlineKeyboardButton{{
 		{Text: result.ButtonLabel, URL: result.ButtonURL},
 	}}
+	if len(result.Buttons) > 0 {
+		rows = rows[:0]
+		for _, b := range result.Buttons {
+			rows = append(rows, []telegram.InlineKeyboardButton{{Text: b.Label, URL: b.URL}})
+		}
+	}
 	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, result.Text, rows); err != nil {
 		g.logger.Warn("gateway: host command reply failed", "command", name, "error", err)
 	}
@@ -1004,6 +1010,19 @@ func (g *Gateway) prepareTelegramInbound(
 }
 
 func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update telegram.Update) {
+	// Payments first, and before the inbound path, because both carry a
+	// deadline or a debt: a pre-checkout query expires in seconds, and a
+	// successful payment rides on a message with no text and no
+	// attachment — which the admission checks below discard.
+	if q := update.PreCheckoutQuery; q != nil {
+		g.handlePreCheckout(ctx, bi, q)
+		return
+	}
+	if m := update.Message; m != nil && m.SuccessfulPayment != nil {
+		g.handleSuccessfulPayment(ctx, m)
+		return
+	}
+
 	// Handle callback queries (inline button presses).
 	// LEGACY: the /model command's inline-keyboard callbacks land here; the
 	// dispatch is parked behind the `legacy_commands` build tag along with

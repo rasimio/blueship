@@ -127,6 +127,14 @@ type BotCommandResult struct {
 	ButtonLabel string
 	ButtonURL   string
 
+	// Buttons offers several links instead of one, each on its own row.
+	// Set this and the single-button fields above are ignored — they are
+	// the one-link shorthand, kept because most replies need exactly one.
+	//
+	// Rows rather than a grid: these are choices with prices on them, and
+	// side by side they read as one control with two halves.
+	Buttons []BotCommandButton
+
 	// AwaitReply, when set, claims the person's next message and delivers
 	// it back to the handler as the Args of a command by this name.
 	//
@@ -136,6 +144,12 @@ type BotCommandResult struct {
 	// per-(user, bot) state for onboarding and reuses it here rather than
 	// asking every host to build the same thing.
 	AwaitReply string
+}
+
+// BotCommandButton is one link under a host command's reply.
+type BotCommandButton struct {
+	Label string
+	URL   string
 }
 
 // BotCommandHandler answers host-handled commands. Nil means no command

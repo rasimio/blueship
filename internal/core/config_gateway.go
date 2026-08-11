@@ -162,6 +162,18 @@ type GatewayConfig struct {
 	// caches the result for the process lifetime. Required when souls are used.
 	ResolvePlatformPrompts func(ctx context.Context) (preamble, agents string, err error) `yaml:"-" json:"-"`
 
+	// ApprovePayment answers the provider's confirmation step for an
+	// in-chat purchase. Nil means the transport declines every payment:
+	// a bot that cannot answer must not take money, and silently
+	// approving on the host's behalf would sell something nobody agreed
+	// to. See PreCheckout for the deadline this runs against.
+	ApprovePayment ApprovePaymentFunc `yaml:"-" json:"-"`
+
+	// PaymentReceived hands over a completed payment. Nil with payments in
+	// use means money moves and nothing records it, so the transport says
+	// so loudly rather than dropping the receipt quietly.
+	PaymentReceived PaymentReceivedFunc `yaml:"-" json:"-"`
+
 	// ResolveSkills returns the persona-prompt bodies for the given skill
 	// slugs, in the requested order (a "skill" is a reusable role like
 	// programmer / analyst). The background handler composes these into the

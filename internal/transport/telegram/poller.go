@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -49,7 +50,7 @@ type getUpdatesResponse struct {
 // Poll makes a single getUpdates call and returns updates.
 func (p *Poller) Poll(ctx context.Context) ([]Update, error) {
 	url := fmt.Sprintf(
-		"%s/bot%s/getUpdates?offset=%d&timeout=30&allowed_updates=[\"message\",\"callback_query\"]",
+		"%s/bot%s/getUpdates?offset=%d&timeout=30&allowed_updates="+allowedUpdatesJSON(),
 		p.baseURL(), p.token, p.offset,
 	)
 
@@ -121,4 +122,21 @@ func (p *Poller) Run(ctx context.Context, ch chan<- Update) {
 			}
 		}
 	}
+}
+
+// AllowedUpdates is what the bot asks Telegram to deliver.
+//
+// An update type missing from this list is not delivered at all, and
+// there is no error anywhere — the bot simply never hears about it.
+// pre_checkout_query is the expensive one: unanswered, Telegram cancels
+// the payment and tells the buyer it failed, which looks like a broken
+// card rather than a line missing from a query string.
+var AllowedUpdates = []string{"message", "callback_query", "pre_checkout_query"}
+
+func allowedUpdatesJSON() string {
+	quoted := make([]string, len(AllowedUpdates))
+	for i, u := range AllowedUpdates {
+		quoted[i] = strconv.Quote(u)
+	}
+	return "[" + strings.Join(quoted, ",") + "]"
 }
