@@ -319,10 +319,14 @@ func (s *Ship) Run(ctx context.Context) error {
 									"message_id", receipt.MessageID, "error", parseErr)
 							}
 						}
+						var tgMessageIDs []int64
+						if tgMessageID != 0 {
+							tgMessageIDs = []int64{tgMessageID}
+						}
 						if historyErr := msgStore.Append(historyCtx, sessID, core.Message{
-							Role:        "assistant",
-							Content:     core.NormalizeContent(text),
-							TGMessageID: tgMessageID,
+							Role:         "assistant",
+							Content:      core.NormalizeContent(text),
+							TGMessageIDs: tgMessageIDs,
 						}); historyErr != nil {
 							s.logger.WarnContext(historyCtx, "agent-tasks: notification history append failed",
 								"session_id", sessID, "error", historyErr)

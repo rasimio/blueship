@@ -30,11 +30,19 @@ type Message struct {
 	// parent row by it to render a relational reply-quote chip.
 	// Empty for non-reply turns.
 	ReplyToMessageID string `json:"-"`
-	// TGMessageID is the Telegram-side message id of an inbound user message or
-	// a confirmed outbound notification. Lets the gateway resolve a future
-	// `msg.ReplyToMessage.MessageID` into our chat_messages.id when
-	// the same chat replies to it. 0 = not from Telegram or unknown.
-	TGMessageID int64 `json:"-"`
+	// TGMessageIDs are the Telegram-side message ids this durable row stands
+	// for. Lets the gateway resolve a future `msg.ReplyToMessage.MessageID`
+	// into our chat_messages.id when the same chat replies to it.
+	//
+	// A list, not a single id, because one row can stand for several Telegram
+	// messages: the debouncer folds a burst ("Договор ок?" + the PDF sent a
+	// second later) into one turn and one row. Recording only the first left
+	// every other message in the burst unaddressable — a reply to the PDF
+	// resolved to nothing, so neither its quote nor its attachment reached the
+	// turn and the soul answered that she had never seen the file.
+	//
+	// Empty = not from Telegram, or an id we never learned.
+	TGMessageIDs []int64 `json:"-"`
 	// CreatedAt is the persistence timestamp of a stored message, populated
 	// when the session store renders dialog history for the API. Never
 	// serialized to providers — prompt-assembly layers use it to annotate

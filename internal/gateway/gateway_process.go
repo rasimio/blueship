@@ -349,7 +349,7 @@ func (g *Gateway) appendInteractionUser(
 		Content:          durableContent,
 		VisibleText:      cfg.VisibleUserText,
 		ReplyToMessageID: cfg.ReplyToMessageID,
-		TGMessageID:      cfg.TGMessageID,
+		TGMessageIDs:     cfg.TGMessageIDs,
 	})
 	if err != nil {
 		return err
@@ -419,27 +419,64 @@ type telegramReplyLookup interface {
 	LookupByTGMessageID(ctx context.Context, sessionID string, tgMessageID int64) (string, error)
 }
 
+// resolveReplyMetadata reports which durable row this turn replies to, and
+// which Telegram messages the turn's own row will stand for.
+//
+// Every message in the batch contributes its id, not just the first. The
+// debouncer folds a burst into one turn and one row, and a reply targets a
+// specific message inside that burst — a caption-less document sent a second
+// after the question about it is the ordinary case. Keeping only msgs[0] left
+// every other message in the burst permanently unaddressable.
 func resolveReplyMetadata(
 	ctx context.Context,
 	lookup telegramReplyLookup,
 	sessionID string,
 	msgs []pendingMsg,
-) (replyToMessageID string, tgMessageID int64, err error) {
+) (replyToMessageID string, tgMessageIDs []int64, err error) {
 	if len(msgs) == 0 {
-		return "", 0, nil
+		return "", nil, nil
+	}
+	for _, m := range msgs {
+		if m.messageID != 0 {
+			tgMessageIDs = append(tgMessageIDs, int64(m.messageID))
+		}
 	}
 	first := msgs[0]
-	if first.messageID != 0 {
-		tgMessageID = int64(first.messageID)
-	}
 	if first.replyToMessageID != "" {
-		return first.replyToMessageID, tgMessageID, nil
+		return first.replyToMessageID, tgMessageIDs, nil
 	}
 	if first.replyToTGMessageID == 0 {
-		return "", tgMessageID, nil
+		return "", tgMessageIDs, nil
 	}
 	parentID, err := lookup.LookupByTGMessageID(ctx, sessionID, int64(first.replyToTGMessageID))
-	return parentID, tgMessageID, err
+	return parentID, tgMessageIDs, err
+}
+
+// rememberDeliveredMessageID stamps the Telegram id an answer was delivered
+// as onto its transcript row. Best-effort by nature — the answer is already
+// on the reader's screen and nothing about this turn depends on it — but a
+// failure is logged rather than swallowed, because the symptom it produces
+// lands a turn later and looks like a memory problem: the next reply arrives
+// quoting nothing.
+//
+// A preview id of 0 means the placeholder never posted and the answer went
+// out as a fresh message whose id the transport did not report back; that
+// reply stays unaddressable, which is the pre-existing behaviour for every
+// answer.
+func (g *Gateway) rememberDeliveredMessageID(
+	ctx context.Context,
+	sessionID, messageID string,
+	tgMessageID int,
+	ephemeral bool,
+) {
+	if ephemeral || sessionID == "" || messageID == "" || tgMessageID == 0 {
+		return
+	}
+	if err := g.store.AttachTGMessageID(ctx, sessionID, messageID, int64(tgMessageID)); err != nil {
+		g.logger.Warn("reply: could not index the delivered answer",
+			"session_id", sessionID, "message_id", messageID,
+			"tg_message_id", tgMessageID, "error", err)
+	}
 }
 
 func providerContentFromBlocks(blocks []bs.ContentBlock) any {
@@ -657,7 +694,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// Resolve the relational parent only after the session exists. Cabinet
 	// replies already carry chat_messages.id; Telegram replies carry a
 	// transport id that must be looked up inside this exact session.
-	replyToMessageID, tgMessageID, replyErr := resolveReplyMetadata(ctx, g.store, sess.ID, msgs)
+	replyToMessageID, tgMessageIDs, replyErr := resolveReplyMetadata(ctx, g.store, sess.ID, msgs)
 	if replyErr != nil {
 		g.logger.Warn("reply: tg parent lookup failed",
 			"session_id", sess.ID, "tg_id", msgs[0].replyToTGMessageID, "err", replyErr)
@@ -675,7 +712,12 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		_ = ms.SendMeta(ctx, sess.ID, "")
 	}
 
-	// Collect message text for context injection (msgText already set above for single-block).
+	// Collect message text for context injection — every message in the
+	// batch, joined. It is rebuilt from scratch rather than appended to the
+	// value computed above: appending re-added the first block's text, so a
+	// one-message turn reached memory retrieval, the rule engine and the turn
+	// policy as «вот он вот он».
+	msgText = ""
 	for _, m := range msgs {
 		if m.text != "" {
 			if msgText != "" {
@@ -912,7 +954,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	runCfg.ReplyToMessageID = replyToMessageID
-	runCfg.TGMessageID = tgMessageID
+	runCfg.TGMessageIDs = tgMessageIDs
 	runCfg.VisibleUserText = visibleUserText
 	if !ephemeral && g.deps.AttachmentSink != nil && sessionUUID != uuid.Nil {
 		g.bindInboundEnvelopeArtifacts(&runCfg, us, sessionUUID, msgs, policyText)
@@ -1231,6 +1273,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			preview.noteTool(ctx, name)
 		},
 	})
+	// Which answer the transcript ended on before this turn wrote its own.
+	// Read now so the id stamped after delivery can be checked against it:
+	// if this turn's append failed, "the latest answer" is the PREVIOUS one,
+	// and indexing it under a message it was never sent as would make a
+	// later reply quote the wrong thing — a quieter fault than the append
+	// error that caused it.
+	priorAssistantRowID, _ := g.store.LatestAssistantMessageID(ctx, sess.ID)
 	interactionStarted := time.Now()
 	reply, cortexTraces, _, err := g.runInteraction(ctx, loop, reflexLoop, runCfg, reflexSystem, content, nil, tgCb, nil)
 	timings.RecordSince("interaction.total", interactionStarted, "transport=telegram")
@@ -1255,9 +1304,13 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// when the user is on mobile. Mirror of the non-Telegram branch
 	// above; here we look up the assistant message id directly because
 	// the meta-sink path doesn't run on Telegram.
+	var assistantRowID string
 	{
 		var assistantMsgID uuid.UUID
 		if msgID, lookupErr := g.store.LatestAssistantMessageID(ctx, sess.ID); lookupErr == nil && msgID != "" {
+			if msgID != priorAssistantRowID {
+				assistantRowID = msgID
+			}
 			if parsed, perr := uuid.Parse(msgID); perr == nil {
 				assistantMsgID = parsed
 			}
@@ -1277,12 +1330,19 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	} else {
 		deliveryErr = sink.SendText(deliveryCtx, reply)
 	}
-	cancelDelivery()
 	if deliveryErr != nil {
 		g.logger.Error("telegram final delivery failed",
 			"chat_id", us.ChatID, "preview_message_id", preview.messageIDForDelivery(),
 			"reply_runes", len([]rune(reply)), "error", deliveryErr)
+	} else {
+		// Index the answer under the message it was delivered as, so a reply
+		// to it resolves back to this row. The transport is the only place
+		// that knows the id, and it only knows it now — which is why the row
+		// went unindexed and every reply to one of the soul's own answers
+		// reached the next turn with no parent and no quote.
+		g.rememberDeliveredMessageID(deliveryCtx, sess.ID, assistantRowID, preview.messageIDForDelivery(), ephemeral)
 	}
+	cancelDelivery()
 
 	if !ephemeral {
 		g.emitTurnCompleted(us, sess)

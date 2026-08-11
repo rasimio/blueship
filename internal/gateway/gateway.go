@@ -1263,7 +1263,9 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	// Prepend quoted reply context so the model sees what message the user is replying to
 	if msg.ReplyToMessage != nil {
 		quoted := msg.ReplyToMessage.Text
-		processedReply := false
+		// restored says the quote came out of our own transcript rather than
+		// off the wire; wholeParent says how much of it to keep.
+		restored, wholeParent := false, false
 		if quoted == "" {
 			quoted = msg.ReplyToMessage.Caption
 		}
@@ -1282,28 +1284,39 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 					g.logger.Warn("reply-to processed content: parent lookup failed",
 						"reply_msg_id", msg.ReplyToMessage.MessageID, "error", lookupErr)
 				} else if parentID != "" {
-					quoted, lookupErr = g.store.MessageText(replyCtx, sess.ID, parentID)
+					var parentRole string
+					parentRole, quoted, lookupErr = g.store.MessageForReply(replyCtx, sess.ID, parentID)
 					if lookupErr != nil {
 						g.logger.Warn("reply-to processed content: text lookup failed",
 							"reply_msg_id", msg.ReplyToMessage.MessageID, "error", lookupErr)
 					} else {
-						processedReply = quoted != ""
+						// Only the human side is kept whole. A recovered user
+						// message may be a processed attachment — the only
+						// durable copy of the transcript being asked about —
+						// while the soul's own answer is already in the
+						// dialogue window, so quoting it whole would just
+						// duplicate it at the top of the turn.
+						restored = quoted != ""
+						wholeParent = restored && parentRole != "assistant"
+						if restored {
+							g.logger.Info("reply-to content restored from transcript",
+								"reply_msg_id", msg.ReplyToMessage.MessageID,
+								"parent_role", parentRole, "chars", len(quoted))
+						}
 					}
 				}
 			}
 		}
 		if quoted != "" {
-			// Raw Telegram quotes are previews. A processed attachment
-			// representation must stay complete: it may be the only durable
-			// copy of a transcript the user is explicitly asking about.
-			if !processedReply && len(quoted) > 500 {
-				quoted = quoted[:500] + "..."
+			// Raw Telegram quotes are previews; so is a recovered answer. The
+			// cut is by runes: a byte cut lands mid-codepoint on any non-ASCII
+			// text and hands the model broken UTF-8.
+			if !wholeParent {
+				if runes := []rune(quoted); len(runes) > 500 {
+					quoted = string(runes[:500]) + "..."
+				}
 			}
 			text = fmt.Sprintf("[reply to: %s]\n\n%s", quoted, text)
-			if processedReply {
-				g.logger.Info("reply-to processed content restored",
-					"reply_msg_id", msg.ReplyToMessage.MessageID, "chars", len(quoted))
-			}
 		} else {
 			g.logger.Warn("reply-to message has no text/caption",
 				"reply_msg_id", msg.ReplyToMessage.MessageID,

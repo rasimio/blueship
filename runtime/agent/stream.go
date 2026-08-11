@@ -35,7 +35,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			Content:          durableUserContent(cfg, userMessage),
 			VisibleText:      cfg.VisibleUserText,
 			ReplyToMessageID: cfg.ReplyToMessageID,
-			TGMessageID:      cfg.TGMessageID,
+			TGMessageIDs:     cfg.TGMessageIDs,
 		})
 		emitTiming(cfg, "agent.append_user", started, "role="+cfg.Role)
 		if err != nil {

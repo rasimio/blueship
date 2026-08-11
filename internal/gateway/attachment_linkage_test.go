@@ -163,14 +163,14 @@ func TestTelegramReplyResolvesAndReplaysParentAttachmentProviderOnly(t *testing.
 		messageID:          101,
 		replyToTGMessageID: 55,
 	}}
-	replyID, tgMessageID, err := resolveReplyMetadata(
+	replyID, tgMessageIDs, err := resolveReplyMetadata(
 		context.Background(), lookup, sessionID.String(), pending,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replyID != parentMessageID.String() || tgMessageID != 101 {
-		t.Fatalf("resolved reply = (%q, %d), want (%q, 101)", replyID, tgMessageID, parentMessageID)
+	if replyID != parentMessageID.String() || len(tgMessageIDs) != 1 || tgMessageIDs[0] != 101 {
+		t.Fatalf("resolved reply = (%q, %v), want (%q, [101])", replyID, tgMessageIDs, parentMessageID)
 	}
 	if lookup.sessionID != sessionID.String() || lookup.tgMessageID != 55 {
 		t.Fatalf("Telegram lookup scope = (%q, %d)", lookup.sessionID, lookup.tgMessageID)
@@ -205,7 +205,7 @@ func TestTelegramReplyResolvesAndReplaysParentAttachmentProviderOnly(t *testing.
 		MessageBudget:    6000,
 		VisibleUserText:  &visible,
 		ReplyToMessageID: replyID,
-		TGMessageID:      tgMessageID,
+		TGMessageIDs:     tgMessageIDs,
 	}
 	g.bindInboundEnvelopeArtifacts(&runCfg, us, sessionID, pending, visible)
 	if _, _, _, err := g.runInteraction(
@@ -223,7 +223,7 @@ func TestTelegramReplyResolvesAndReplaysParentAttachmentProviderOnly(t *testing.
 		t.Fatalf("reply-parent bytes leaked into durable child row: %s", storedJSON)
 	}
 	if store.messages[0].ReplyToMessageID != parentMessageID.String() ||
-		store.messages[0].TGMessageID != 101 {
+		len(store.messages[0].TGMessageIDs) != 1 || store.messages[0].TGMessageIDs[0] != 101 {
 		t.Fatalf("durable reply metadata = %#v", store.messages[0])
 	}
 	requestJSON, err := json.Marshal(provider.requests[0].Messages)

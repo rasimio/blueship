@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 
 	bs "github.com/rasimio/blueship/internal/core"
 )
@@ -239,12 +240,36 @@ func (s *Store) AppendAutonomousAssistant(
 	return nil
 }
 
+// telegramMessageIDColumns splits the ids a row stands for into its two
+// columns: the first id for the scalar (which is all a row written before
+// the array column has) and the whole set for the array. Both come back nil
+// for a row that isn't from Telegram, so the columns stay NULL.
+func telegramMessageIDColumns(ids []int64) (first any, all any) {
+	filtered := make([]int64, 0, len(ids))
+	seen := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		if id == 0 || seen[id] {
+			continue
+		}
+		seen[id] = true
+		filtered = append(filtered, id)
+	}
+	if len(filtered) == 0 {
+		return nil, nil
+	}
+	return filtered[0], pq.Array(filtered)
+}
+
 // LookupByTGMessageID finds the chat_messages row id for a Telegram
-// reply target. session-scoped so a tg_message_id from another chat
+// reply target. session-scoped so a Telegram id from another chat
 // (same numeric value, different conversation) doesn't false-match.
 // Returns ("", nil) when not found — caller treats that as "parent
 // pre-dates the relational reply path" and falls back to the inline
 // text quote.
+//
+// Both columns are searched. tg_message_ids holds every id folded into the
+// row, which is what a debounced burst needs; tg_message_id is the only one
+// rows written before that column have.
 func (s *Store) LookupByTGMessageID(ctx context.Context, sessionID string, tgMessageID int64) (string, error) {
 	if tgMessageID == 0 {
 		return "", nil
@@ -252,7 +277,8 @@ func (s *Store) LookupByTGMessageID(ctx context.Context, sessionID string, tgMes
 	var id string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT id::text FROM chat_messages
-		  WHERE session_id = $1 AND tg_message_id = $2
+		  WHERE session_id = $1
+		    AND (tg_message_id = $2 OR tg_message_ids @> ARRAY[$2::bigint])
 		  ORDER BY created_at DESC LIMIT 1`,
 		sessionID, tgMessageID,
 	).Scan(&id)
@@ -265,30 +291,61 @@ func (s *Store) LookupByTGMessageID(ctx context.Context, sessionID string, tgMes
 	return id, nil
 }
 
-// MessageText returns the text blocks stored for one session-scoped message.
-// It is used to recover the processed representation of Telegram attachments
-// (for example a video transcript) when a reply target has no raw caption.
-func (s *Store) MessageText(ctx context.Context, sessionID, messageID string) (string, error) {
+// AttachTGMessageID records that a durable row was delivered as, or otherwise
+// stands for, one more Telegram message — so a reply pointing at that message
+// resolves back to this row.
+//
+// It exists for the assistant side, where the id is only known after the turn
+// has been written and sent. Without it every reply to one of the soul's own
+// answers arrived with no parent at all: outbound answers go out as Telegram
+// Rich Messages, whose `reply_to_message` carries no plain `text` for the
+// gateway to quote, and the row had no id to look up either. Both halves of
+// the reply were then silently empty.
+func (s *Store) AttachTGMessageID(ctx context.Context, sessionID, messageID string, tgMessageID int64) error {
+	if sessionID == "" || messageID == "" || tgMessageID == 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE chat_messages
+		    SET tg_message_id = COALESCE(tg_message_id, $3),
+		        tg_message_ids = (
+		            SELECT ARRAY(SELECT DISTINCT unnest(COALESCE(tg_message_ids, '{}'::bigint[]) || $3::bigint))
+		        )
+		  WHERE session_id = $1 AND id = $2`,
+		sessionID, messageID, tgMessageID,
+	)
+	if err != nil {
+		return fmt.Errorf("attach tg message id: %w", err)
+	}
+	return nil
+}
+
+// MessageForReply returns the role and text blocks stored for one
+// session-scoped message. It recovers what a reply target actually said when
+// the raw Telegram quote is empty — a processed attachment representation
+// (for example a video transcript), or any answer the soul sent as a Rich
+// Message.
+func (s *Store) MessageForReply(ctx context.Context, sessionID, messageID string) (role string, text string, err error) {
 	if sessionID == "" || messageID == "" {
-		return "", nil
+		return "", "", nil
 	}
 	var raw json.RawMessage
-	err := s.db.QueryRowContext(ctx,
-		`SELECT content FROM chat_messages
+	err = s.db.QueryRowContext(ctx,
+		`SELECT role, content FROM chat_messages
 		  WHERE session_id = $1 AND id = $2
 		  LIMIT 1`,
 		sessionID, messageID,
-	).Scan(&raw)
+	).Scan(&role, &raw)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return "", nil
+			return "", "", nil
 		}
-		return "", fmt.Errorf("get message text: %w", err)
+		return "", "", fmt.Errorf("get message text: %w", err)
 	}
 
 	var blocks []bs.ContentBlock
 	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return "", fmt.Errorf("decode message text: %w", err)
+		return "", "", fmt.Errorf("decode message text: %w", err)
 	}
 	texts := make([]string, 0, len(blocks))
 	for _, block := range blocks {
@@ -296,7 +353,7 @@ func (s *Store) MessageText(ctx context.Context, sessionID, messageID string) (s
 			texts = append(texts, block.Text)
 		}
 	}
-	return strings.Join(texts, "\n\n"), nil
+	return role, strings.Join(texts, "\n\n"), nil
 }
 
 func (s *Store) appendInternal(ctx context.Context, sessionID string, msg bs.Message, blocks []bs.ContentBlock, toolUseID *string, tokens int) (*Message, error) {
@@ -316,17 +373,17 @@ func (s *Store) appendInternal(ctx context.Context, sessionID string, msg bs.Mes
 		}
 	}
 
-	// Relational reply metadata. Nullable on both ends — empty
-	// string and zero TGMessageID land as NULL so non-reply turns
-	// don't pollute the column.
+	// Relational reply metadata. Nullable on both ends — an empty
+	// string and no Telegram ids land as NULL so non-reply turns
+	// don't pollute the columns.
 	var replyTo any
 	if msg.ReplyToMessageID != "" {
 		replyTo = msg.ReplyToMessageID
 	}
-	var tgMID any
-	if msg.TGMessageID != 0 {
-		tgMID = msg.TGMessageID
-	}
+	// tg_message_id keeps the first id and tg_message_ids the whole set. The
+	// scalar is not redundant: every row written before the array column
+	// existed has only that, and the reply lookup reads both.
+	tgMID, tgMIDs := telegramMessageIDColumns(msg.TGMessageIDs)
 
 	tx, err := s.db.BeginTxx(ctx, nil)
 	if err != nil {
@@ -338,13 +395,13 @@ func (s *Store) appendInternal(ctx context.Context, sessionID string, msg bs.Mes
 	err = tx.QueryRowxContext(ctx,
 		`INSERT INTO chat_messages
 		    (soul_id, session_id, role, content, tool_use_id, token_estimate,
-		     reply_to_message_id, tg_message_id, visible_text, projection_status,
-		     projection_reason, projector_version)
-		 VALUES ($6::uuid, $1, $2, $3, $4, $5, $7, $8, $9, $10, $11, $12)
+		     reply_to_message_id, tg_message_id, tg_message_ids, visible_text,
+		     projection_status, projection_reason, projector_version)
+		 VALUES ($6::uuid, $1, $2, $3, $4, $5, $7, $8, $9::bigint[], $10, $11, $12, $13)
 		 RETURNING id, session_id, role, content, visible_text, projection_status,
 		           projection_reason, projector_version, tool_use_id, token_estimate, created_at`,
 		sessionID, msg.Role, contentJSON, toolUseID, tokens, bs.SoulIDFromContext(ctx),
-		replyTo, tgMID, projection.VisibleText, projection.Status,
+		replyTo, tgMID, tgMIDs, projection.VisibleText, projection.Status,
 		projectionReasonArg(projection), projection.ProjectorVersion,
 	).StructScan(&m)
 	if err != nil {

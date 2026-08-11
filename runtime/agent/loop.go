@@ -39,11 +39,12 @@ type RunConfig struct {
 	// can render a relational reply-quote chip pointing at the
 	// parent. Empty for non-reply turns.
 	ReplyToMessageID string
-	// TGMessageID is the Telegram-side id of this inbound user
-	// message. Stamped on the row so a future Telegram reply
-	// targeting it can be resolved into our chat_messages.id via
-	// session.Store.LookupByTGMessageID. 0 = not from Telegram.
-	TGMessageID int64
+	// TGMessageIDs are the Telegram-side ids of the inbound messages
+	// this turn answers — several when the debouncer folded a burst
+	// into one turn. Stamped on the row so a future Telegram reply
+	// targeting ANY of them resolves into our chat_messages.id via
+	// session.Store.LookupByTGMessageID. Empty = not from Telegram.
+	TGMessageIDs []int64
 	// InjectedContext is added to the per-run turn context (not stored in session).
 	// Used for automatic memory/context injection before the LLM call without
 	// consuming the visible dialogue message budget.
