@@ -807,8 +807,36 @@ func (g *Gateway) runHostCommand(ctx context.Context, bi *botInstance, tgChatID,
 	if len(result.Buttons) > 0 {
 		rows = rows[:0]
 		for _, b := range result.Buttons {
-			rows = append(rows, []telegram.InlineKeyboardButton{{Text: b.Label, URL: b.URL}})
+			url := b.URL
+			if b.Invoice != nil {
+				link, err := bi.client.CreateInvoiceLink(ctx, telegram.InvoiceRequest{
+					Title:              b.Invoice.Title,
+					Description:        b.Invoice.Description,
+					Payload:            b.Invoice.Payload,
+					Stars:              b.Invoice.Stars,
+					SubscriptionPeriod: b.Invoice.SubscriptionPeriod,
+				})
+				if err != nil {
+					// Drop this button, keep the rest. The other ways to
+					// pay still work, and offering a dead one is worse
+					// than offering one fewer.
+					g.logger.Error("payments: could not create an invoice link",
+						"command", name, "payload", b.Invoice.Payload, "error", err)
+					continue
+				}
+				url = link
+			}
+			if url == "" || b.Label == "" {
+				continue
+			}
+			rows = append(rows, []telegram.InlineKeyboardButton{{Text: b.Label, URL: url}})
 		}
+	}
+	if len(result.Buttons) > 0 && len(rows) == 0 {
+		// Every button failed to build. The text alone still says
+		// something useful; a keyboard-less message beats none.
+		g.sendOnboardingText(ctx, bi, tgChatID, result.Text)
+		return
 	}
 	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, result.Text, rows); err != nil {
 		g.logger.Warn("gateway: host command reply failed", "command", name, "error", err)

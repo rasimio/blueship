@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -150,6 +151,30 @@ type BotCommandResult struct {
 type BotCommandButton struct {
 	Label string
 	URL   string
+
+	// Invoice, when set, makes this a payment button: the transport
+	// creates the invoice with its own credentials and uses the
+	// resulting link as the URL. Set it instead of URL, not as well.
+	//
+	// Declarative because the host has no client to create one with, and
+	// handing it one would put the transport inside the product for the
+	// sake of a single call.
+	Invoice *InvoiceOffer
+}
+
+// InvoiceOffer is a purchase to put behind a button, priced in Telegram
+// Stars.
+type InvoiceOffer struct {
+	Title       string
+	Description string
+	// Payload comes back on the confirmation and the receipt, and never
+	// reaches the buyer — it is where a host puts what it needs to know
+	// who bought what.
+	Payload string
+	Stars   int
+	// SubscriptionPeriod makes this a recurring charge Telegram renews on
+	// its own. Zero sells it once.
+	SubscriptionPeriod time.Duration
 }
 
 // BotCommandHandler answers host-handled commands. Nil means no command
