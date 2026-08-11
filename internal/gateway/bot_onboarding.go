@@ -476,13 +476,21 @@ func (g *Gateway) onboardingInstant(
 	})
 	switch {
 	case errors.Is(err, bs.ErrBotOnboardingAlreadyDone):
-		// This Telegram identity already owns a soul, but this chat is
-		// not linked to it — reachable when the person onboarded through
-		// a different bot. Creating a second tenant for them would be
-		// worse than saying so.
+		// The person already owns a soul; nothing was created. Whether
+		// this chat now reaches it is the host's business — a host that
+		// links it says so by returning the ids, and one that refuses
+		// returns none.
 		g.logger.Info("gateway: instant onboarding skipped, identity already has a soul",
-			"tg_user", tgUserID, "bot_id", bi.id.String())
+			"tg_user", tgUserID, "bot_id", bi.id.String(), "linked", userID != uuid.Nil)
+		g.invalidateTelegramUser(bi.id, chatID)
 		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().ErrAlreadyOnboarded)
+		// Someone who arrived on an errand came to do a thing, not to be
+		// told they have an account. Run it, now that we know who they
+		// are — this is the whole point of the link they followed.
+		if isErrand && userID != uuid.Nil {
+			g.runHostCommand(ctx, bi, tgChatID, tgUserID,
+				&UserState{UserID: userID, SoulID: soulID}, errand, "")
+		}
 		return true
 	case err != nil:
 		g.logger.Error("gateway: instant onboarding failed",
