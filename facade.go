@@ -179,6 +179,9 @@ type (
 
 // --- Constructors & helpers (value re-exports preserve signatures) ---
 var (
+	WithAttachmentIntents            = core.WithAttachmentIntents
+	RecordAttachmentIntent           = core.RecordAttachmentIntent
+	EnsureAttachmentMarkers          = core.EnsureAttachmentMarkers
 	NewToolRegistry                  = core.NewToolRegistry
 	NewModelConfigStore              = core.NewModelConfigStore
 	NewFilePromptStore               = core.NewFilePromptStore

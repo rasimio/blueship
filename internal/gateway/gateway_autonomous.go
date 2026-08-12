@@ -220,9 +220,18 @@ func (g *Gateway) DraftAutonomousTurn(ctx context.Context, req bs.AutonomousTurn
 	prepared.config.MaxTurns, prepared.config.ToolOverride, prepared.config.AllowedTools =
 		autonomousTurnToolConfig(granted)
 
-	text, _, err := prepared.loop.RunStream(ctx, prepared.config, strings.TrimSpace(req.Prompt), nil)
+	// Arm intent collection before the loop: a tool that resolves an
+	// attachment records it, so the turn does not depend on the model pasting
+	// the marker back into its own prose.
+	turnCtx, intents := bs.WithAttachmentIntents(ctx)
+	text, _, err := prepared.loop.RunStream(turnCtx, prepared.config, strings.TrimSpace(req.Prompt), nil)
 	if err != nil {
 		return bs.AutonomousTurnDraft{}, fmt.Errorf("draft autonomous turn: cortex: %w", err)
+	}
+	if recovered, added := bs.EnsureAttachmentMarkers(text, intents.IDs()); len(added) > 0 {
+		text = recovered
+		g.logger.Info("autonomous turn: recovered attachments the reply forgot to reference",
+			"soul_id", req.SoulID.String(), "count", len(added))
 	}
 	text = strings.TrimSpace(sanitizeLeakedToolCalls(text))
 	if text == "" || strings.EqualFold(text, autonomousTurnNoOp) {
