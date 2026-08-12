@@ -205,9 +205,8 @@ func (g *Gateway) DraftAutonomousTurn(ctx context.Context, req bs.AutonomousTurn
 	prepared.config.PromptOnlyInput = true
 	prepared.config.Ephemeral = true
 	prepared.config.EmptyVisibleFallback = autonomousTurnNoOp
-	prepared.config.MaxTurns = 1
-	prepared.config.ToolOverride = []string{}
-	prepared.config.AllowedTools = []string{}
+	prepared.config.MaxTurns, prepared.config.ToolOverride, prepared.config.AllowedTools =
+		autonomousTurnToolConfig(req.Tools)
 
 	text, _, err := prepared.loop.RunStream(ctx, prepared.config, strings.TrimSpace(req.Prompt), nil)
 	if err != nil {
@@ -232,6 +231,26 @@ func (g *Gateway) DraftAutonomousTurn(ctx context.Context, req bs.AutonomousTurn
 		DialogMessageID: dialogMessageID,
 		ActivityToken:   activity.Token,
 	}, nil
+}
+
+// autonomousTurnToolConfig decides how many passes an autonomous turn gets and
+// what it may reach for.
+//
+// The two move together on purpose. Granting tool names without extra passes
+// produces a turn that spends its only pass calling a tool and has none left
+// to say anything about the result — which reaches the user as silence and the
+// operator as a broken feature. Granting passes without names just burns them.
+func autonomousTurnToolConfig(tools []string) (maxTurns int, override, allowed []string) {
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		if t = strings.TrimSpace(t); t != "" {
+			names = append(names, t)
+		}
+	}
+	if len(names) == 0 {
+		return 1, []string{}, []string{}
+	}
+	return bs.AutonomousTurnToolPasses, names, append([]string(nil), names...)
 }
 
 func (g *Gateway) prepareAutonomousContext(ctx context.Context, us *UserState, associationSeed string) (injectedCtx, reflexGuidance string, silent bool) {

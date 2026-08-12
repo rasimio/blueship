@@ -28,7 +28,28 @@ type AutonomousTurnRequest struct {
 	SoulID          uuid.UUID
 	AnchorMessageID string
 	Prompt          string
+	// Tools names what the soul may reach for during this turn. Empty — the
+	// default, and what every cadence-driven turn uses — means none, and the
+	// turn is a single pass that either produces prose or nothing.
+	//
+	// A turn that is allowed tools is a different animal: it needs more than
+	// one pass, because the first one is spent calling and the answer only
+	// exists after the result comes back. So MaxTurns follows from this field
+	// rather than being a second knob a caller can get wrong.
+	//
+	// The reason to grant any at all is that some prompts are not "say
+	// something" but "do something and then say it" — draw a picture, look up
+	// the week, attach a file. Without tools the soul can only describe what
+	// it would have done.
+	Tools []string
 }
+
+// AutonomousTurnToolPasses bounds a tool-using autonomous turn: one pass to
+// call, one to answer with the result, and a little room for a soul that
+// reaches twice. Deliberately small — this is a single unprompted message,
+// not an agent loop, and an unbounded one would let a cadence tick turn into
+// a research session nobody asked for.
+const AutonomousTurnToolPasses = 4
 
 // Reasons a draft can come back empty. NoOp on its own says a turn was not
 // produced; it does not say whether that was a decision or a protection, and
