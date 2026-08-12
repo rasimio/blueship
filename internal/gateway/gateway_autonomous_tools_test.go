@@ -82,3 +82,31 @@ func TestAutonomousCommitSeparatesMarkersFromText(t *testing.T) {
 		}
 	})
 }
+
+// The soul's own ceiling survives a tool request.
+//
+// A perception naming image_generate must not hand it to a soul whose owner
+// switched drawing off in the cabinet. The request narrows what the turn may
+// use; it never widens it.
+func TestIntersectTools(t *testing.T) {
+	ceiling := []string{"image_generate", "attachment_include", "notes"}
+
+	got := intersectTools([]string{"image_generate", "web_search"}, ceiling)
+	if len(got) != 1 || got[0] != "image_generate" {
+		t.Fatalf("intersect = %v — a disabled tool was granted", got)
+	}
+
+	if got := intersectTools([]string{"web_search"}, ceiling); len(got) != 0 {
+		t.Fatalf("intersect = %v, want nothing the soul may not use", got)
+	}
+
+	// No policy configured is the framework-consumer case: there is nothing to
+	// filter against, which is not the same as filtering everything out.
+	if got := intersectTools([]string{"image_generate"}, nil); len(got) != 1 {
+		t.Fatalf("intersect against a nil ceiling = %v, want the request intact", got)
+	}
+
+	if got := intersectTools(nil, ceiling); len(got) != 0 {
+		t.Fatalf("intersect = %v, want nothing when nothing was asked for", got)
+	}
+}

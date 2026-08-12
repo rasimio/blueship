@@ -198,15 +198,27 @@ func (g *Gateway) DraftAutonomousTurn(ctx context.Context, req bs.AutonomousTurn
 		}, nil
 	}
 
-	prepared, err := g.prepareCortexTurn(ctx, us, sess, injectedCtx, reflexGuidance, nil, true)
+	// noTools replaces the turn registry with an empty one, so naming tools
+	// while it is set resolves every name against nothing: the model is told
+	// it has hands and finds none. Production said so out loud — "доступ к
+	// рисованию в этот момент пропал" — with zero tools in the prompt.
+	prepared, err := g.prepareCortexTurn(ctx, us, sess, injectedCtx, reflexGuidance, nil, len(req.Tools) == 0)
 	if err != nil {
 		return bs.AutonomousTurnDraft{}, fmt.Errorf("draft autonomous turn: system prompt: %w", err)
 	}
 	prepared.config.PromptOnlyInput = true
 	prepared.config.Ephemeral = true
 	prepared.config.EmptyVisibleFallback = autonomousTurnNoOp
+	// The soul's own ceiling still applies. prepareCortexTurn filled
+	// AllowedTools with what this soul may reach for at all — a caller asking
+	// for something the owner switched off in the cabinet does not get it.
+	granted := intersectTools(req.Tools, prepared.config.AllowedTools)
+	if len(req.Tools) > 0 && len(granted) == 0 {
+		g.logger.Warn("autonomous turn: requested tools are all disabled for this soul",
+			"soul_id", req.SoulID.String(), "requested", req.Tools)
+	}
 	prepared.config.MaxTurns, prepared.config.ToolOverride, prepared.config.AllowedTools =
-		autonomousTurnToolConfig(req.Tools)
+		autonomousTurnToolConfig(granted)
 
 	text, _, err := prepared.loop.RunStream(ctx, prepared.config, strings.TrimSpace(req.Prompt), nil)
 	if err != nil {
@@ -231,6 +243,28 @@ func (g *Gateway) DraftAutonomousTurn(ctx context.Context, req bs.AutonomousTurn
 		DialogMessageID: dialogMessageID,
 		ActivityToken:   activity.Token,
 	}, nil
+}
+
+// intersectTools keeps the requested names the soul is actually allowed.
+//
+// A nil ceiling means "no policy configured", which is the framework-consumer
+// case and not permission to ignore one — there is simply nothing to filter
+// against, so the request stands.
+func intersectTools(requested, ceiling []string) []string {
+	if len(requested) == 0 || ceiling == nil {
+		return requested
+	}
+	allowed := make(map[string]bool, len(ceiling))
+	for _, n := range ceiling {
+		allowed[n] = true
+	}
+	kept := make([]string, 0, len(requested))
+	for _, n := range requested {
+		if allowed[n] {
+			kept = append(kept, n)
+		}
+	}
+	return kept
 }
 
 // autonomousTurnToolConfig decides how many passes an autonomous turn gets and
