@@ -189,6 +189,16 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		a.logger.Info("LLM response", responseAttrs...)
 		usedEmptyVisibleFallback := false
 		if !hasVisibleOutput(resp.Content) && (resp.StopReason == "end_turn" || resp.StopReason == "max_tokens") {
+			// A called-off turn arrives here looking exactly like a model that
+			// produced nothing: the provider hands back an empty end_turn with
+			// zero tokens. Falling back then writes "the model refused your
+			// request — rephrase it" into the chat, which blames the person for
+			// pressing a button we shipped. Observed live 2026-08-12, on
+			// somebody's first minute with the product. Cancellation has its own
+			// path upstream; leave the reply to it and say nothing here.
+			if ctx.Err() != nil {
+				return accumulated.String(), traces, ctx.Err()
+			}
 			text := a.emptyVisibleFallback(cfg)
 			a.logger.Warn("LLM returned terminal response with no visible output; using fallback",
 				"model", cfg.Model,

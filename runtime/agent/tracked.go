@@ -205,6 +205,12 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		a.logger.Info("LLM response", responseAttrs...)
 		usedEmptyVisibleFallback := false
 		if !hasVisibleOutput(resp.Content) && (resp.StopReason == "end_turn" || resp.StopReason == "max_tokens") {
+			// Same guard as the streaming loop: a cancelled turn is
+			// indistinguishable here from a model that produced nothing, and
+			// the fallback tells the person their request was refused.
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			text := a.emptyVisibleFallback(cfg)
 			a.logger.Warn("LLM returned terminal response with no visible output; using fallback",
 				"model", cfg.Model,
