@@ -1048,7 +1048,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			return
 		}
 		reflexSystem = fmt.Sprintf("[current_datetime: %s]\n\n%s\n\n%s",
-			now.Format("2006-01-02 15:04 MST (Monday)"), rp, g.reflexInteractionPrompt)
+			now.Format("2006-01-02 15:04 -07:00 (MST, Monday)"), rp, g.reflexInteractionPrompt)
 		reflexRegistry := turnRegistry.SubsetForNames([]string{tool.ToolEscalate})
 		reflexLoop = agent.NewLoop(g.provider, g.store, reflexRegistry, g.deps.RoleTools, g.deps.Config, g.logger)
 	}

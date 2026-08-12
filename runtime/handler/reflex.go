@@ -58,7 +58,7 @@ func runReflexPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Locati
 	reflexSystemPrompt, _ := deps.Prompts.Get(ctx, "reflex-system")
 	now := time.Now().In(tz)
 	reflexSystem := fmt.Sprintf("[current_datetime: %s]\n\n%s",
-		now.Format("2006-01-02 15:04 MST (Monday)"), reflexSystemPrompt)
+		now.Format("2006-01-02 15:04 -07:00 (MST, Monday)"), reflexSystemPrompt)
 
 	notesBlock := rc.ActiveNotes
 	if notesBlock == "" {

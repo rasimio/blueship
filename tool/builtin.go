@@ -45,8 +45,15 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 			now := time.Now().In(loc)
 			return map[string]string{
 				"datetime": now.Format("2006-01-02 15:04:05"),
-				"timezone": loc.String(),
-				"weekday":  now.Weekday().String(),
+				// The numeric offset, spelled out. An IANA name alone makes
+				// the model translate "Europe/Moscow" into +03:00 by itself
+				// whenever it writes a timestamp back — and it gets that
+				// wrong, which lands a reminder on the neighbouring day.
+				// RFC3339 is the form it needs, so hand it over verbatim.
+				"datetime_iso": now.Format(time.RFC3339),
+				"utc_offset":   now.Format("-07:00"),
+				"timezone":     loc.String(),
+				"weekday":      now.Weekday().String(),
 			}, nil
 		},
 	)

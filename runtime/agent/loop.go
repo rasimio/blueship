@@ -505,10 +505,16 @@ func effectiveSystemPrompt(systemPrompt, compactSummary string) string {
 	return effective
 }
 
-// dialogDatetimeFormat is how the current time is stamped for the model. Kept
-// identical to the wording handlers used when they prepended it themselves, so
-// the move changes where it is read, not what it says.
-const dialogDatetimeFormat = "2006-01-02 15:04 MST (Monday)"
+// dialogDatetimeFormat is how the current time is stamped for the model.
+//
+// The numeric offset is spelled out alongside the abbreviation because the
+// model writes ISO timestamps back — note due dates, calendar events — and an
+// abbreviation alone forces it to translate "MSK" into "+03:00" from memory.
+// Observed 2026-08-12: it produced +02:00, and since a reminder with no stated
+// time is filed at 23:59, the one-hour error rolled the whole thing past
+// midnight and a birthday landed on the day after the birthday. Handing over
+// the offset turns a conversion into a copy.
+const dialogDatetimeFormat = "2006-01-02 15:04 -07:00 (MST, Monday)"
 
 // withCurrentDatetime puts the clock at the head of the turn context.
 //

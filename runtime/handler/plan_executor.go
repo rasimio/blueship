@@ -211,7 +211,7 @@ func (e *StructuredGoalExecutor) planPhase(ctx context.Context, task core.AgentT
 		return core.IterationResult{}, fmt.Errorf("load prompt goal-plan-system: %w", err)
 	}
 	now := time.Now().In(e.tz)
-	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s", now.Format("2006-01-02 15:04 MST (Monday)"), systemPrompt)
+	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s", now.Format("2006-01-02 15:04 -07:00 (MST, Monday)"), systemPrompt)
 
 	goalPlanUser, _ := deps.Prompts.Get(ctx, "goal-plan-user")
 	planPrompt := fmt.Sprintf(goalPlanUser, task.Title, desc, buildToolsList(deps))

@@ -41,7 +41,7 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 	// Inject current datetime so reflex can compute dates for temporal_recall.
 	now := time.Now().In(g.tz)
 	reflexSystem := fmt.Sprintf("[current_datetime: %s]\n\n%s",
-		now.Format("2006-01-02 15:04 MST (Monday)"), g.reflexSystemPrompt)
+		now.Format("2006-01-02 15:04 -07:00 (MST, Monday)"), g.reflexSystemPrompt)
 
 	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
 		Model:        model,

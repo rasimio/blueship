@@ -379,7 +379,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// user's wall-clock, not the server's.
 	now := time.Now().In(deps.Config.Gateway.TimezoneFor(ctx, b.tz))
 	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s",
-		now.Format("2006-01-02 15:04 MST (Monday)"), systemPrompt)
+		now.Format("2006-01-02 15:04 -07:00 (MST, Monday)"), systemPrompt)
 
 	var preloadedTraces []agent.ToolTrace
 	var preloadedBlock string
