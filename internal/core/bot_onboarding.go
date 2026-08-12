@@ -224,4 +224,21 @@ type BotOnboardingComplete struct {
 	// assistant's name. Empty falls back to Name so hosts that have not
 	// been updated keep their previous behaviour.
 	UserDisplayName string
+
+	// UserHandle is the person's public @name on the transport (Telegram's
+	// from.username), stored without the leading "@". It is OPTIONAL on
+	// Telegram's side — a large share of accounts have never set one — so an
+	// empty value means "this person has no handle", not "we failed to read
+	// it". Never treat it as an identifier: handles are reassignable, and
+	// TGUserID is the only stable key.
+	//
+	// Worth carrying anyway because it is the only thing in an update that
+	// lets a human being find the account again from outside the database.
+	UserHandle string
+
+	// UserLanguage is the IETF tag of the sender's Telegram client
+	// ("ru", "en-GB"), from from.language_code. It rides along because it
+	// arrives on the same field set and is the only deterministic language
+	// signal an account carries before it has said anything.
+	UserLanguage string
 }

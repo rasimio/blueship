@@ -186,7 +186,18 @@ func (g *Gateway) invalidateTelegramUser(botID uuid.UUID, chatID string) {
 // is empty for everyone except users with an edit or an offer in flight.
 // Cheap, and the alternative — an in-memory "is an edit running" hint —
 // loses the flag on restart and strands whoever was mid-wizard.
-func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, chatID string, tgChatID, tgUserID int64, text, senderName string) bool {
+// tgSender is who sent the update, as far as an account cares: the parts of
+// Telegram's `from` that describe the person rather than the message. Passed
+// as one value because these travel together through every onboarding path,
+// and threading them as loose strings turns a seven-argument function into a
+// nine-argument one every time the transport starts carrying something new.
+type tgSender struct {
+	Name     string // from.first_name
+	Handle   string // from.username, no leading "@"; empty is normal
+	Language string // from.language_code
+}
+
+func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, chatID string, tgChatID, tgUserID int64, text string, sender tgSender) bool {
 	if g.deps.BotOnboarding == nil || bi == nil || bi.id == uuid.Nil {
 		return false
 	}
@@ -290,7 +301,7 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 	// No state row yet.
 	if step == "" {
 		if g.flow().Mode == bs.OnboardingModeInstant {
-			return g.onboardingInstant(ctx, bi, chatID, tgChatID, tgUserID, senderName, g.signupSource(bi, text), isStart)
+			return g.onboardingInstant(ctx, bi, chatID, tgChatID, tgUserID, sender, g.signupSource(bi, text), isStart)
 		}
 		// Wizard: only /start kicks off the flow — random text from an
 		// unknown chat still hits the standard unpaired-chat policy
@@ -414,7 +425,7 @@ func (g *Gateway) maybeRunBotOnboardingCallback(ctx context.Context, bi *botInst
 		if step != onbStepConfirm {
 			return true
 		}
-		return g.onboardingFinalize(ctx, bi, tgChatID, tgUserID, data, cq.From.FirstName)
+		return g.onboardingFinalize(ctx, bi, tgChatID, tgUserID, data, tgSender{Name: cq.From.FirstName, Handle: cq.From.Username, Language: cq.From.LanguageCode})
 	case d == onbCallbackConfirmBack:
 		if step != onbStepConfirm {
 			return true
@@ -449,7 +460,8 @@ func (g *Gateway) onboardingInstant(
 	bi *botInstance,
 	chatID string,
 	tgChatID, tgUserID int64,
-	senderName, source string,
+	sender tgSender,
+	source string,
 	greet bool,
 ) bool {
 	flow := g.flow()
@@ -469,7 +481,9 @@ func (g *Gateway) onboardingInstant(
 		TGUserID:        tgUserID,
 		TGChatID:        tgChatID,
 		Name:            flow.DefaultName,
-		UserDisplayName: senderName,
+		UserDisplayName: sender.Name,
+		UserHandle:      sender.Handle,
+		UserLanguage:    sender.Language,
 		SignupSource:    source,
 		VoiceID:         flow.DefaultVoice,
 		CharacterTags:   flow.DefaultTags,
@@ -963,7 +977,7 @@ func (g *Gateway) personaFinalize(
 
 // -- Step 5: confirm ----------------------------------------------------------
 
-func (g *Gateway) onboardingFinalize(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, data map[string]any, senderName string) bool {
+func (g *Gateway) onboardingFinalize(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, data map[string]any, sender tgSender) bool {
 	name, _ := data[onbDataName].(string)
 	voiceID, _ := data[onbDataVoice].(string)
 	tags := tagsFromData(data)
@@ -988,7 +1002,9 @@ func (g *Gateway) onboardingFinalize(ctx context.Context, bi *botInstance, tgCha
 		TGUserID:             tgUserID,
 		TGChatID:             tgChatID,
 		Name:                 name,
-		UserDisplayName:      senderName,
+		UserDisplayName:      sender.Name,
+		UserHandle:           sender.Handle,
+		UserLanguage:         sender.Language,
 		SignupSource:         sourceFromData(data),
 		VoiceID:              voiceID,
 		CharacterTags:        tags,

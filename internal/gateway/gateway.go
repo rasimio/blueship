@@ -952,7 +952,11 @@ func (g *Gateway) prepareTelegramInbound(
 	if g.maybeRunDeeplinkLink(ctx, bi, rawChatID, tgUserID, text) {
 		return nil, 0, false
 	}
-	if g.maybeRunBotOnboarding(ctx, bi, chatID, rawChatID, tgUserID, text, msg.From.FirstName) {
+	if g.maybeRunBotOnboarding(ctx, bi, chatID, rawChatID, tgUserID, text, tgSender{
+		Name:     msg.From.FirstName,
+		Handle:   msg.From.Username,
+		Language: msg.From.LanguageCode,
+	}) {
 		return nil, 0, false
 	}
 
