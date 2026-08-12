@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	"github.com/rasimio/blueship/telemetry"
@@ -106,3 +107,33 @@ type ProviderError struct {
 }
 
 func (e *ProviderError) Error() string { return e.Message }
+
+// GenerateImage satisfies ImageGenerator by delegating to a registered
+// provider that can draw.
+//
+// Routing images by model name the way completions are routed would not
+// work: the role that asks for a picture (cortex, today on a provider with
+// no image support at all) is not the surface that produces one. So the
+// router answers the capability question instead of the model question —
+// callers hold deps.LLM and simply assert on ImageGenerator.
+//
+// The default provider is preferred, then the rest in sorted name order.
+// Sorted rather than range order because Go randomises map iteration, and a
+// registry with two capable providers would otherwise pick a different one
+// per process start — with different cost and quality behind it.
+func (r *LLMRouter) GenerateImage(ctx context.Context, prompt string) (ImageResult, error) {
+	if gen, ok := r.defaultProvider.(ImageGenerator); ok {
+		return gen.GenerateImage(ctx, prompt)
+	}
+	names := make([]string, 0, len(r.providers))
+	for name := range r.providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if gen, ok := r.providers[name].(ImageGenerator); ok {
+			return gen.GenerateImage(ctx, prompt)
+		}
+	}
+	return ImageResult{}, ErrProviderNotConfigured
+}

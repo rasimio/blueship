@@ -57,11 +57,15 @@ type reasoningConfig struct {
 	Effort string `json:"effort"`
 }
 
+// responseTool is either a function tool the host declared or a built-in the
+// backend owns. Built-ins carry only a type — image_generation is sent as a
+// bare {"type":"image_generation"} — so the remaining fields omit rather than
+// serialise as empty strings and a null schema, which the backend rejects.
 type responseTool struct {
-	Type        string          `json:"type"` // "function"
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	Parameters  json.RawMessage `json:"parameters"`
+	Type        string          `json:"type"` // "function" | "image_generation"
+	Name        string          `json:"name,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
 }
 
 // Input item types for the Responses API.

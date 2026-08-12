@@ -84,6 +84,8 @@ type (
 	ExecutionDecision             = core.ExecutionDecision
 	DecisionAction                = core.DecisionAction
 	ExecutionAuthorizer           = core.ExecutionAuthorizer
+	ImageGenerator                = core.ImageGenerator
+	ImageResult                   = core.ImageResult
 	AutonomousTurnRequest         = core.AutonomousTurnRequest
 	AutonomousTurnDraft           = core.AutonomousTurnDraft
 	AutonomousTurnDrafter         = core.AutonomousTurnDrafter
