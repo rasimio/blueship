@@ -1,6 +1,11 @@
 package gateway
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	bs "github.com/rasimio/blueship/internal/core"
+)
 
 // Passes and tool names move together. The failure this pins is quiet: a turn
 // granted tools but only one pass calls something, never gets a second pass to
@@ -30,6 +35,50 @@ func TestAutonomousTurnToolConfig(t *testing.T) {
 		passes, _, allowed := autonomousTurnToolConfig([]string{"  ", ""})
 		if passes != 1 || len(allowed) != 0 {
 			t.Fatalf("passes = %d, allowed = %v — whitespace was taken for a tool", passes, allowed)
+		}
+	})
+}
+
+// A soul that draws has to be able to hand the picture over.
+//
+// The ordinary agent-task notify path resolves `[attached: UUID]` into a file
+// send; this one shipped the sentinel as literal text. Production showed
+// exactly that: the marker in the chat, the 2.6 MB image sitting in the store,
+// and a message that announced a drawing nobody received.
+func TestAutonomousCommitSeparatesMarkersFromText(t *testing.T) {
+	const drawn = "b97e0477-7f3b-495e-9fed-0c098de95acf"
+
+	t.Run("marker is stripped and the id recovered", func(t *testing.T) {
+		ids, cleaned, ok := bs.ParseAttachmentMarkers(
+			"Вот он ты — каким я тебя знаю (^_^)\n\n[attached: " + drawn + "]")
+		if !ok || len(ids) != 1 || ids[0].String() != drawn {
+			t.Fatalf("ids = %v, ok = %v", ids, ok)
+		}
+		if strings.Contains(cleaned, "attached:") {
+			t.Fatalf("marker survived into the delivered text: %q", cleaned)
+		}
+		if !strings.Contains(cleaned, "каким я тебя знаю") {
+			t.Fatalf("stripping ate the message: %q", cleaned)
+		}
+	})
+
+	t.Run("text without markers is untouched", func(t *testing.T) {
+		const plain = "просто сообщение без вложений"
+		ids, cleaned, ok := bs.ParseAttachmentMarkers(plain)
+		if ok || len(ids) != 0 || cleaned != plain {
+			t.Fatalf("plain text was rewritten: ok=%v ids=%v cleaned=%q", ok, ids, cleaned)
+		}
+	})
+
+	t.Run("a message that is only a marker has nothing to say", func(t *testing.T) {
+		_, cleaned, ok := bs.ParseAttachmentMarkers("[attached: " + drawn + "]")
+		if !ok {
+			t.Fatal("marker not recognised")
+		}
+		// The commit path refuses this rather than sending an empty message or
+		// inventing a caption on the soul's behalf.
+		if strings.TrimSpace(cleaned) != "" {
+			t.Fatalf("cleaned = %q, want empty", cleaned)
 		}
 	})
 }

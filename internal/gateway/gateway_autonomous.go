@@ -253,6 +253,35 @@ func autonomousTurnToolConfig(tools []string) (maxTurns int, override, allowed [
 	return bs.AutonomousTurnToolPasses, names, append([]string(nil), names...)
 }
 
+// sendAutonomousAttachments ships the files a committed turn referenced.
+//
+// Best-effort by construction: it runs after the text has landed, so every
+// failure here is reported rather than returned. Scoped to the commit's own
+// user and soul, so a marker naming somebody else's attachment resolves to
+// nothing instead of crossing tenants.
+func (g *Gateway) sendAutonomousAttachments(ctx context.Context, commit bs.AutonomousTurnCommit, ids []uuid.UUID) {
+	if g.deps.AttachmentSink == nil {
+		g.logger.Warn("autonomous turn: attachment referenced but no sink configured",
+			"user_id", commit.UserID.String(), "count", len(ids))
+		return
+	}
+	for _, id := range ids {
+		rec, data, err := g.deps.AttachmentSink.Get(ctx, commit.UserID, commit.SoulID, id)
+		if err != nil || rec == nil {
+			g.logger.Error("autonomous turn: attachment not resolved",
+				"attachment_id", id.String(), "user_id", commit.UserID.String(), "error", err)
+			continue
+		}
+		if err := g.SendToUserAttachment(ctx, commit.UserID, *rec, data); err != nil {
+			g.logger.Error("autonomous turn: attachment not sent",
+				"attachment_id", id.String(), "user_id", commit.UserID.String(), "error", err)
+			continue
+		}
+		g.logger.Info("autonomous turn: attachment sent",
+			"attachment_id", id.String(), "bytes", len(data), "name", rec.Name)
+	}
+}
+
 func (g *Gateway) prepareAutonomousContext(ctx context.Context, us *UserState, associationSeed string) (injectedCtx, reflexGuidance string, silent bool) {
 	strategy := ""
 	if us.Deps != nil && us.Deps.ReflexPreparer != nil {
@@ -374,9 +403,34 @@ func (g *Gateway) CommitAutonomousTurn(ctx context.Context, commit bs.Autonomous
 		return receipt, bs.PermanentlyNotSent(errAutonomousTurnStale)
 	}
 
-	receipt, err = g.SendToUserOnce(ctx, commit.UserID, strings.TrimSpace(commit.Text))
+	// Resolve `[attached: UUID]` into real file sends. The ordinary
+	// agent-task notify path learned to do this; this one did not, so a soul
+	// that drew something announced it and shipped the sentinel as literal
+	// text — the marker visible in the chat, the picture nowhere.
+	text := strings.TrimSpace(commit.Text)
+	attachmentIDs, cleaned, hasMarkers := bs.ParseAttachmentMarkers(text)
+	if hasMarkers {
+		if cleaned == "" {
+			// Nothing but a marker. There is no message to deliver and no
+			// receipt to journal, and guessing a caption here would put words
+			// in the soul's mouth.
+			return receipt, bs.PermanentlyNotSent(
+				fmt.Errorf("commit autonomous turn: text is only an attachment marker"))
+		}
+		text = cleaned
+	}
+
+	receipt, err = g.SendToUserOnce(ctx, commit.UserID, text)
 	if err != nil {
 		return receipt, err
+	}
+	// Files go after the words, and their failure does not undo the send that
+	// already happened: the message is externally visible from the line above,
+	// and reporting it as not-sent would have the journal retry it into a
+	// duplicate. A missing picture is logged and lives on as a message without
+	// its attachment, which is recoverable; a doubled message is not.
+	if hasMarkers {
+		g.sendAutonomousAttachments(ctx, commit, attachmentIDs)
 	}
 	// Admission was blocked through the external send. Once Telegram has
 	// acknowledged the pulse, inbound messages may be admitted, but their
@@ -395,7 +449,7 @@ func (g *Gateway) CommitAutonomousTurn(ctx context.Context, commit bs.Autonomous
 		tgMessageID, _ = strconv.ParseInt(receipt.MessageID, 10, 64)
 	}
 	if err := g.store.AppendAutonomousAssistant(
-		historyCtx, attemptID, sess.ID, commit.Text, tgMessageID, receipt.DeliveredAt,
+		historyCtx, attemptID, sess.ID, text, tgMessageID, receipt.DeliveredAt,
 	); err != nil {
 		// Delivery is already confirmed. Never return a retryable transport
 		// error and risk misclassifying a sent message; the atomic append
