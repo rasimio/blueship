@@ -95,6 +95,11 @@ func (u *UIStrings) applyDefaults() {
 // Name and Description are host copy in the host's language; the
 // framework has no commands and no words of its own.
 type BotCommand struct {
+	// Menu marks a command that opens the inline menu instead of being
+	// answered. The host writes no handler for it: what it does is
+	// entirely described by Config.Gateway.Menu.
+	Menu bool
+
 	// Name without the leading slash, lowercase — Telegram rejects
 	// anything else.
 	Name        string

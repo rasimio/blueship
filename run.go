@@ -46,6 +46,12 @@ func (s *Ship) Run(ctx context.Context) error {
 			return err
 		}
 	}
+	// Unconditional, unlike the flow above: a menu does not need
+	// onboarding to exist, and a button leading nowhere is a dead end in
+	// front of a person — invisible until somebody taps it.
+	if err := s.cfg.Gateway.Menu.Valid(s.cfg.Gateway.Commands); err != nil {
+		return fmt.Errorf("gateway: %w", err)
+	}
 
 	// 1. Initialize deps
 	deps, err := InitDeps(&s.cfg, s.logger)

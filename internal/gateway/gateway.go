@@ -855,7 +855,7 @@ func (g *Gateway) runHostCommand(ctx context.Context, bi *botInstance, tgChatID,
 // something the chat cannot produce on its own, a payment page being the
 // case this was built for.
 func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, us *UserState, text string) bool {
-	if g.deps.CommandHandler == nil || us == nil {
+	if us == nil {
 		return false
 	}
 	cmd, forUs := g.parseCommand(bi, text)
@@ -872,13 +872,32 @@ func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, tgCh
 		name, args = deep, ""
 	}
 
-	if !g.isHostCommand(name) {
+	// A menu command is answered by the transport: what it does is the
+	// menu, and there is no handler for the host to write.
+	if g.isMenuCommand(name) {
+		return g.openMenu(ctx, bi, tgChatID)
+	}
+
+	if g.deps.CommandHandler == nil || !g.isHostCommand(name) {
 		return false
 	}
 	// Consumed either way, including on failure: the alternative is
 	// handing "/plus foo@bar" to the model as though it were conversation.
 	g.runHostCommand(ctx, bi, tgChatID, tgUserID, us, name, args)
 	return true
+}
+
+// isMenuCommand reports whether this command opens the inline menu.
+func (g *Gateway) isMenuCommand(name string) bool {
+	if len(g.menu().Nodes) == 0 {
+		return false
+	}
+	for _, c := range g.deps.Config.Gateway.Commands {
+		if c.Menu && strings.EqualFold(strings.TrimPrefix(strings.TrimSpace(c.Name), "/"), name) {
+			return true
+		}
+	}
+	return false
 }
 
 // isHostCommand reports whether the configured menu marks this name as
@@ -1076,6 +1095,11 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 			return
 		}
 		bi.client.AnswerCallbackQuery(ctx, cq.ID)
+		// Menu taps first: they are pure navigation and must not fall
+		// through to a flow that reads them as an answer to a question.
+		if g.maybeHandleMenuCallback(ctx, bi, cq) {
+			return
+		}
 		// Bot-onboarding inline keyboards (preset picker) land here.
 		// Handled before the legacy model dispatch so a fresh user's
 		// keyboard taps reach the FSM finalizer even without the

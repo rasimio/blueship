@@ -162,6 +162,10 @@ type GatewayConfig struct {
 	// caches the result for the process lifetime. Required when souls are used.
 	ResolvePlatformPrompts func(ctx context.Context) (preamble, agents string, err error) `yaml:"-" json:"-"`
 
+	// Menu is the inline menu a menu-marked command opens. Empty means
+	// the deployment has no menu, which is a legitimate state.
+	Menu BotMenu `yaml:"-" json:"-"`
+
 	// ApprovePayment answers the provider's confirmation step for an
 	// in-chat purchase. Nil means the transport declines every payment:
 	// a bot that cannot answer must not take money, and silently

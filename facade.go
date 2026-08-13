@@ -132,6 +132,9 @@ type (
 	BotCommandHandler    = core.BotCommandHandler
 	BotCommandButton     = core.BotCommandButton
 	InvoiceOffer         = core.InvoiceOffer
+	BotMenu              = core.BotMenu
+	BotMenuNode          = core.BotMenuNode
+	BotMenuItem          = core.BotMenuItem
 
 	// In-chat payments: the host decides what a purchase means, the
 	// transport carries it.
