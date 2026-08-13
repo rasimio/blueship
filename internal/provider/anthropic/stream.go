@@ -74,6 +74,7 @@ func (p *Provider) streamOnce(ctx context.Context, req bs.CompletionRequest, cb 
 			apiMsgs = trimmed
 		}
 	}
+	applyMessageCacheBreakpoints(apiMsgs)
 
 	apiReq := apiRequest{
 		Model:     req.Model,

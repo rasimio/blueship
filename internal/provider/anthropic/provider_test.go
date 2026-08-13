@@ -3,6 +3,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -174,5 +175,111 @@ func TestAPIKeyKeepsTrailingAssistant(t *testing.T) {
 	provider := NewProvider("test-key", time.Second, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if got := lastWireRole(t, provider); got != "assistant" {
 		t.Fatalf("API-key wire array ends with %q, want assistant left intact", got)
+	}
+}
+
+func TestApplyMessageCacheBreakpoints(t *testing.T) {
+	mk := func(blockCounts ...int) []apiMessage {
+		out := make([]apiMessage, len(blockCounts))
+		for i, n := range blockCounts {
+			blocks := make([]apiContentBlock, n)
+			for j := range blocks {
+				blocks[j] = apiContentBlock{Type: "text", Text: "x"}
+			}
+			out[i] = apiMessage{Role: "user", Content: blocks}
+		}
+		return out
+	}
+	marks := func(msgs []apiMessage) []string {
+		var got []string
+		for i, m := range msgs {
+			for j, b := range m.Content {
+				if b.CacheControl != nil {
+					got = append(got, fmt.Sprintf("%d.%d", i, j))
+				}
+			}
+		}
+		return got
+	}
+
+	cases := []struct {
+		name string
+		in   []apiMessage
+		want []string
+	}{
+		{"last two messages, final blocks only", mk(1, 2, 3), []string{"1.1", "2.2"}},
+		{"single message", mk(2), []string{"0.1"}},
+		{"empty-content message skipped", append(mk(1, 1), apiMessage{Role: "user"}), []string{"0.0", "1.0"}},
+		{"no messages", nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			applyMessageCacheBreakpoints(tc.in)
+			got := marks(tc.in)
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("cache_control marks at %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompleteSetsMessageCacheBreakpointsOnWire(t *testing.T) {
+	provider := NewProvider("test-key", time.Second, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var wireMarks []string
+	provider.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			var payload struct {
+				Messages []struct {
+					Content []struct {
+						CacheControl *struct {
+							Type string `json:"type"`
+						} `json:"cache_control"`
+					} `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+			for i, m := range payload.Messages {
+				for j, b := range m.Content {
+					if b.CacheControl != nil {
+						if b.CacheControl.Type != "ephemeral" {
+							t.Fatalf("cache_control type = %q, want ephemeral", b.CacheControl.Type)
+						}
+						wireMarks = append(wireMarks, fmt.Sprintf("%d.%d", i, j))
+					}
+				}
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"m","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":3}}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+	_, err := provider.Complete(context.Background(), bs.CompletionRequest{
+		Model:     "claude-sonnet-5",
+		MaxTokens: 128,
+		Messages: []bs.Message{
+			{Role: "user", Content: []bs.ContentBlock{{Type: "text", Text: "q1"}}},
+			{Role: "assistant", Content: []bs.ContentBlock{
+				{Type: "text", Text: "calling"},
+				{Type: "tool_use", ID: "t1", Name: "web_search", Input: json.RawMessage(`{"q":"x"}`)},
+			}},
+			{Role: "user", Content: []bs.ContentBlock{
+				{Type: "tool_result", ToolUseID: "t1", Content: "result"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Complete error: %v", err)
+	}
+	// Final block of the last two messages: the tool_result and the tool_use.
+	if fmt.Sprint(wireMarks) != fmt.Sprint([]string{"1.1", "2.0"}) {
+		t.Fatalf("wire cache_control marks at %v, want [1.1 2.0]", wireMarks)
 	}
 }

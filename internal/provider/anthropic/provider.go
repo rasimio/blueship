@@ -142,15 +142,16 @@ type apiMessage struct {
 }
 
 type apiContentBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Content   any             `json:"content,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
-	Source    *bs.ImageSource `json:"source,omitempty"`
+	Type         string          `json:"type"`
+	Text         string          `json:"text,omitempty"`
+	ID           string          `json:"id,omitempty"`
+	Name         string          `json:"name,omitempty"`
+	Input        json.RawMessage `json:"input,omitempty"`
+	ToolUseID    string          `json:"tool_use_id,omitempty"`
+	Content      any             `json:"content,omitempty"`
+	IsError      bool            `json:"is_error,omitempty"`
+	Source       *bs.ImageSource `json:"source,omitempty"`
+	CacheControl *cacheControl   `json:"cache_control,omitempty"`
 }
 
 // apiRequest is the wire format for Anthropic Messages API.
@@ -230,6 +231,7 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 			apiMsgs = trimmed
 		}
 	}
+	applyMessageCacheBreakpoints(apiMsgs)
 
 	apiReq := apiRequest{
 		Model:     req.Model,
@@ -375,6 +377,29 @@ func trimTrailingAssistant(msgs []apiMessage) ([]apiMessage, int) {
 		dropped++
 	}
 	return msgs, dropped
+}
+
+// applyMessageCacheBreakpoints marks the final content block of the last two
+// messages with cache_control, turning the conversation into a moving-prefix
+// cache: each request re-caches everything up to its own tail, and the next
+// request's lookup lands on the breakpoint the previous one wrote. Two marks,
+// not one, because the API resolves a hit by scanning at most ~20 content
+// blocks upward from each breakpoint — a turn that appends a wide parallel
+// tool-result batch can push the previous single mark out of that window.
+// Without these marks only system+tools cache, and the growing dialogue
+// (messages, AME context, tool results) is re-billed at full input price
+// every turn. Budget: system(≤1) + last tool(1) + these(≤2) = 4, the API max.
+// Must run AFTER trimTrailingAssistant so marks land on messages actually sent.
+func applyMessageCacheBreakpoints(msgs []apiMessage) {
+	marked := 0
+	for i := len(msgs) - 1; i >= 0 && marked < 2; i-- {
+		content := msgs[i].Content
+		if len(content) == 0 {
+			continue
+		}
+		content[len(content)-1].CacheControl = &cacheControl{Type: "ephemeral"}
+		marked++
+	}
 }
 
 func buildMessages(messages []bs.Message) []apiMessage {
