@@ -211,6 +211,14 @@ type ModelsConfig struct {
 type LimitsConfig struct {
 	MaxContext           int // fallback max context for usage/status when role config is absent (default: 180000)
 	ChatMessageBudget    int // fallback recent-message budget when model_config.message_budget is unset (default: 6000)
+	// DialogBudget, when positive, gives the dialogue window its OWN token
+	// lane instead of the remainder after overhead. The remainder design
+	// collapsed on production: memory context and tool schemas grew until the
+	// arithmetic silently handed the dialogue 628 tokens and the soul
+	// "forgot" a conversation from three minutes earlier. With a lane, the
+	// elastic part is the turn context (ranked, safe to trim from the tail),
+	// never the conversation. Zero keeps the legacy remainder mode.
+	DialogBudget int
 	SoftSummaryThreshold int // create non-destructive summaries above this stored-token count (default: 80000)
 	SoftSummaryMinNew    int // minimum new stored tokens before another soft summary (default: 30000)
 	CompactThreshold     int // trigger compaction above this (default: 40000)

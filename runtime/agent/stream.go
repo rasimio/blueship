@@ -52,7 +52,18 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	compactSummary := cfg.CompactSummary
 	toolObservationContext := a.recentToolObservationContext(ctx, cfg)
 	turnContext := withCurrentDatetime(buildTurnContextForTools(cfg.ReflexGuidance, cfg.InjectedContext, tools, toolObservationContext), cfg.TurnNow)
-	dialogDecision := effectiveDialogBudgetDecision(tokenBudget, cfg.SystemPrompt, compactSummary, turnContext, tools)
+	lane := 0
+	if a.cfg != nil {
+		lane = a.cfg.Limits.DialogBudget
+	}
+	dialogDecision, lanedContext := effectiveDialogBudgetDecisionLane(tokenBudget, lane, cfg.SystemPrompt, compactSummary, turnContext, tools)
+	if dialogDecision.ContextTrimmedTokens > 0 {
+		a.logger.Warn("dialog lane: turn context trimmed to protect the dialogue window",
+			"trimmed_tokens", dialogDecision.ContextTrimmedTokens,
+			"dialog_budget", dialogDecision.DialogBudget,
+			"session_id", cfg.SessionID)
+	}
+	turnContext = lanedContext
 	dialogBudget := dialogBudgetAfterCurrentExpansion(
 		dialogDecision.DialogBudget, cfg, userMessage,
 	)

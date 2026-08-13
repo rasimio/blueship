@@ -665,6 +665,7 @@ const (
 	dialogBudgetModeTotalPrompt    = "total_prompt"
 	dialogBudgetModeDialogFallback = "dialog_budget_overhead_exceeded"
 	dialogBudgetModeUnbounded      = "unbounded"
+	dialogBudgetModeLane           = "dialog_lane"
 )
 
 type dialogBudgetDecision struct {
@@ -672,6 +673,97 @@ type dialogBudgetDecision struct {
 	PromptOverhead              int
 	Mode                        string
 	PromptOverheadExceedsBudget bool
+	// ContextTrimmedTokens is how much of the turn context the lane pushed
+	// out. Non-zero means the elastic part actually flexed — worth a WARN,
+	// because chronic trimming says the budgets need retuning.
+	ContextTrimmedTokens int
+}
+
+// contextTrimMarker tells the model the tail was cut deliberately, so a
+// truncated shelf reads as policy rather than as corrupted data.
+const contextTrimMarker = "\n[context_trimmed: lower-ranked context dropped to protect the dialogue window]"
+
+// effectiveDialogBudgetDecisionLane is the lane-mode budget: the dialogue owns
+// a fixed allocation and the TURN CONTEXT is the elastic part, trimmed from
+// the tail when the ceiling is tight. The remainder design it replaces had
+// the elasticity backwards for a conversational product: memory (a ranked
+// sample, cheap to shorten) squeezed the conversation (irreplaceable — the
+// person just said those words) down to nothing, and production noticed only
+// when a soul denied a three-minute-old exchange.
+//
+// System prompt and tool schemas are never trimmed: a cut schema is a broken
+// tool call, a cut persona is a different character. If they alone crowd the
+// ceiling, the lane shrinks and PromptOverheadExceedsBudget flags the turn.
+func effectiveDialogBudgetDecisionLane(totalPromptBudget, lane int, systemPrompt, compactSummary, turnContext string, tools []bs.ToolDefinition) (dialogBudgetDecision, string) {
+	if lane <= 0 || totalPromptBudget <= 0 {
+		return effectiveDialogBudgetDecision(totalPromptBudget, systemPrompt, compactSummary, turnContext, tools), turnContext
+	}
+	fixed := estimateTextTokens(effectiveSystemPrompt(systemPrompt, compactSummary)) + estimateToolSchemaTokens(tools)
+
+	laneEff := lane
+	if fixed+laneEff > totalPromptBudget {
+		laneEff = totalPromptBudget - fixed
+	}
+	if laneEff < 1 {
+		// Untrimmable overhead alone exceeds the whole budget; same terminal
+		// shape as the legacy fallback, so callers keep one degraded path.
+		return dialogBudgetDecision{
+			DialogBudget:                totalPromptBudget,
+			PromptOverhead:              fixed,
+			Mode:                        dialogBudgetModeDialogFallback,
+			PromptOverheadExceedsBudget: true,
+		}, turnContext
+	}
+
+	allowance := totalPromptBudget - fixed - laneEff
+	trimmed := 0
+	if strings.TrimSpace(turnContext) != "" {
+		before := estimateTextTokens(turnContextEnvelope(turnContext))
+		if before > allowance {
+			turnContext = trimContextToBudget(turnContext, allowance)
+			after := 0
+			if strings.TrimSpace(turnContext) != "" {
+				after = estimateTextTokens(turnContextEnvelope(turnContext))
+			}
+			trimmed = before - after
+		}
+	}
+	overhead := fixed
+	if strings.TrimSpace(turnContext) != "" {
+		overhead += estimateTextTokens(turnContextEnvelope(turnContext))
+	}
+	return dialogBudgetDecision{
+		DialogBudget:         laneEff,
+		PromptOverhead:       overhead,
+		Mode:                 dialogBudgetModeLane,
+		ContextTrimmedTokens: trimmed,
+	}, turnContext
+}
+
+// trimContextToBudget keeps whole leading lines while they fit. Leading,
+// because every context surface here renders best-first — memory shelves are
+// ranked, rules are capped by priority — so the tail is always the cheapest
+// part to lose. An empty result is legitimate: allowance can be zero.
+func trimContextToBudget(turnContext string, allowance int) string {
+	if allowance <= 0 {
+		return ""
+	}
+	lines := strings.Split(turnContext, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		candidate := strings.Join(append(kept, line), "\n")
+		if estimateTextTokens(turnContextEnvelope(candidate+contextTrimMarker)) > allowance {
+			break
+		}
+		kept = append(kept, line)
+	}
+	if len(kept) == 0 {
+		return ""
+	}
+	if len(kept) == len(lines) {
+		return turnContext
+	}
+	return strings.Join(kept, "\n") + contextTrimMarker
 }
 
 func effectiveDialogBudget(totalPromptBudget int, systemPrompt, compactSummary, turnContext string, tools []bs.ToolDefinition) (dialogBudget int, promptOverhead int) {
