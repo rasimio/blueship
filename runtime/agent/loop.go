@@ -712,7 +712,7 @@ func effectiveDialogBudgetDecision(totalPromptBudget int, systemPrompt, compactS
 func maxToolTurnsForRole(role string) int {
 	switch role {
 	case "cortex":
-		return 6
+		return 20
 	case "background":
 		return 8
 	default:
