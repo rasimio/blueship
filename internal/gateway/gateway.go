@@ -571,11 +571,15 @@ func (g *Gateway) loadSystemPrompts(dir string) error {
 }
 
 // systemPromptForSoul returns the fully composed system prompt for a soul:
-// the platform preamble + the soul's own persona + the platform agents
-// layer, all read from the database. A soul without a vaelum.soul_personas
-// row is a misconfiguration and surfaces as an error — there is no silent
-// fallback to file-loaded prompts. Framework consumers that do not use the
-// vaelum soul model (soulID is nil) get the file-loaded process prompt.
+// platform preamble + platform agents layer + the soul's own persona, in
+// that order — persona LAST, so all souls share a byte-identical cacheable
+// prefix and the voice gets the attention-favored final position. The
+// platform layers come from the host's ResolvePlatformPrompts hook (files
+// on disk for Arlene); the persona comes from the ResolveSoulPersona hook
+// (a vaelum.soul_personas row). A soul without a persona row is a
+// misconfiguration and surfaces as an error — there is no silent fallback
+// to file-loaded prompts. Framework consumers that do not use the vaelum
+// soul model (soulID is nil) get the file-loaded process prompt.
 func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID) (string, error) {
 	if soulID == uuid.Nil {
 		return g.systemPrompt, nil
