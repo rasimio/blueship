@@ -62,6 +62,18 @@ type Scheduler struct {
 	onStatusChange  func(ctx context.Context, task core.AgentTask)
 	logger          *slog.Logger
 
+	// bootReap runs once per process, on the first tick: every task the
+	// PREVIOUS process left in 'running' is orphaned by definition — there
+	// is exactly one daemon, so at boot nobody can be executing anything.
+	// The periodic ResetStale still covers mid-life hangs, but its
+	// 10-minute threshold is a hang detector's caution, and after a deploy
+	// it read as a silent 10-minute limbo for whatever the restart killed.
+	bootReap sync.Once
+	// resetStale is the store's ResetStale, seamed so the boot reap is
+	// testable without a database. NewScheduler binds it; a nil value
+	// falls back to the store at call time.
+	resetStale func(ctx context.Context, staleAfter time.Duration) (int64, error)
+
 	mu   sync.Mutex
 	busy map[string]bool // task ID → currently executing
 	// dailyAtWarned dedups the malformed-daily_at config warning per task:
@@ -105,6 +117,40 @@ func (s *Scheduler) SetRegistryBuilder(b func(userDeps *core.Deps) *core.ToolReg
 	s.registryBuilder = b
 }
 
+// reapOrphansAtBoot requeues, exactly once per process, every task the
+// previous process abandoned in 'running'.
+//
+// Production sequence this removes: a deploy restarts the daemon seconds
+// after a task is claimed; the task sits in 'running' where PendingTasks
+// cannot see it, and nothing reports anything — the periodic ResetStale
+// picks it up only after its 10-minute hang threshold. Twice in two days an
+// operator saw the limbo and requeued by hand, and once recorded "there is
+// no reaper" as fact. At boot the threshold is dead weight: this process
+// has claimed nothing yet and no other process exists, so 'running' can
+// only mean orphaned.
+func (s *Scheduler) reapOrphansAtBoot(ctx context.Context) {
+	s.bootReap.Do(func() {
+		reset := s.resetStale
+		if reset == nil {
+			if s.store == nil {
+				return
+			}
+			reset = s.store.ResetStale
+		}
+		n, err := reset(ctx, 0)
+		if err != nil {
+			// A failed lifecycle write must be loud: every orphan stays
+			// invisible until the 10-minute detector, which is exactly the
+			// limbo this exists to remove.
+			s.logger.ErrorContext(ctx, "agent-tasks: boot reap failed", "error", err)
+			return
+		}
+		if n > 0 {
+			s.logger.InfoContext(ctx, "agent-tasks: boot reap requeued tasks orphaned by the previous process", "count", n)
+		}
+	})
+}
+
 // NewScheduler creates an agent task scheduler.
 func NewScheduler(
 	store *core.AgentTaskStore,
@@ -131,6 +177,7 @@ func NewScheduler(
 		notify:           notify,
 		notifyJournal:    notifyJournal,
 		notifyTask:       store.Get,
+		resetStale:       store.ResetStale,
 		logger:           logger,
 		busy:             make(map[string]bool),
 		sem:              make(chan struct{}, maxConcurrentTasks),
@@ -155,6 +202,7 @@ func (s *Scheduler) WakeFromCallback(ctx context.Context, peerTaskID string) {
 }
 
 func (s *Scheduler) Run(ctx context.Context) error {
+	s.reapOrphansAtBoot(ctx)
 	s.logger.Info("agent-tasks: tick")
 	// When a live gateway owns autonomous-history coordination, it drains and
 	// projects under the same pair-scoped turn lock used by interactive Cortex
