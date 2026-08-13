@@ -295,7 +295,10 @@ func TestFinalizeResponseFallsBackToLegacyEdit(t *testing.T) {
 		return jsonResponse(http.StatusOK, `{"ok":true,"result":{"message_id":7}}`), nil
 	})
 
-	if err := c.FinalizeResponse(context.Background(), 42, 7, "# Report\n\nBody"); err != nil {
+	// A table, because the subject here is the fallback when a rich edit
+	// is rejected — and a heading no longer takes the rich path at all.
+	if err := c.FinalizeResponse(context.Background(), 42, 7,
+		"| a | b |\n|---|---|\n| 1 | 2 |"); err != nil {
 		t.Fatal(err)
 	}
 	if len(payloads) != 2 {

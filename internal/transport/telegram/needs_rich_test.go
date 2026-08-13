@@ -88,3 +88,72 @@ func TestSendRichLongUsesTheOrdinaryPathForProse(t *testing.T) {
 		}
 	}
 }
+
+// FinalizeResponse is the path a chat answer actually takes: the streamed
+// preview is an ordinary message, and finalising used to swap it for a
+// Rich one — which is where a reply stopped being copyable.
+//
+// The first attempt at this fix changed SendRichLong, which chat replies
+// never touch, so nothing about the symptom changed. Hence a test naming
+// the method that runs.
+func TestFinalizeKeepsProseAsAnOrdinaryMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		text       string
+		previewID  int
+		wantMethod string
+	}{
+		{"prose edits the preview in place", "Готово. Лимит снят.", 77, "editMessageText"},
+		{"prose with bold", "Списание **10 сентября**.", 77, "editMessageText"},
+		{"a table still needs rich", "| a | b |\n|---|---|\n| 1 | 2 |", 77, "editMessageText"},
+		{"prose with no preview", "Готово.", 0, "sendMessage"},
+	} {
+		var called []string
+		var richFlag []bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			called = append(called, parts[len(parts)-1])
+			richFlag = append(richFlag, strings.Contains(string(body), `"rich_message"`))
+			io.WriteString(w, `{"ok":true,"result":{"message_id":77}}`)
+		}))
+
+		err := NewClientWithAPIURL("token", srv.URL, time.Second).
+			FinalizeResponse(context.Background(), 42, tc.previewID, tc.text)
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%s: finalize: %v", tc.name, err)
+		}
+		if len(called) != 1 || called[0] != tc.wantMethod {
+			t.Fatalf("%s: called %v, want [%s]", tc.name, called, tc.wantMethod)
+		}
+		// Both a rich edit and a plain edit are "editMessageText"; the
+		// difference is the rich_message field, and that is the whole
+		// point of the change.
+		wantRich := NeedsRich(tc.text)
+		if richFlag[0] != wantRich {
+			t.Errorf("%s: rich_message present = %v, want %v", tc.name, richFlag[0], wantRich)
+		}
+	}
+}
+
+// Telegram has no headings. Once prose stopped going out as a Rich
+// Message, an unconverted "## Итог" reached the reader as literal hash
+// marks — a fix for one thing breaking another in the same breath.
+func TestHeadingsBecomeBoldOnTheOrdinaryPath(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"## Итог\n\nВсё готово.", "<b>Итог</b>\n\nВсё готово."},
+		{"# Отчёт", "<b>Отчёт</b>"},
+		{"###### Мелкий", "<b>Мелкий</b>"},
+		{"## Итог ##", "<b>Итог</b>"},
+		// Not a heading: no space after the hashes, or hashes mid-line.
+		{"#хештег", "#хештег"},
+		{"Смотри #5 в списке", "Смотри #5 в списке"},
+		// Bold inside a heading must not nest.
+		{"## **Итог**", "<b>Итог</b>"},
+	} {
+		if got := markdownToHTML(tc.in); got != tc.want {
+			t.Errorf("markdownToHTML(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

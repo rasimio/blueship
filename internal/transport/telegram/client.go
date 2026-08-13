@@ -834,6 +834,12 @@ var latexToUnicode = strings.NewReplacer(
 	`\Omega`, `Ω`,
 )
 
+// reHeading matches a Markdown heading line. Telegram has none, so on the
+// ordinary-message path an unconverted heading reaches the reader as
+// literal hash marks — which is exactly what starts happening the moment
+// prose stops going out as a Rich Message.
+var reHeading = regexp.MustCompile(`(?m)^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*#*[ \t]*$`)
+
 func markdownToHTML(text string) string {
 	// Pre-pass 1: rewrite LaTeX inside `$...$` wrappers to a plain-text
 	// approximation, then drop the wrappers themselves. Done BEFORE HTML
@@ -860,6 +866,20 @@ func markdownToHTML(text string) string {
 
 	text = reCodeBlock.ReplaceAllString(text, "<pre>$1</pre>")
 	text = reInline.ReplaceAllString(text, "<code>$1</code>")
+	// Headings before bold, so "## **Итог**" does not end up nested.
+	// Telegram has no headings at all, and an unconverted one reaches the
+	// reader as literal hash marks — which is what happens the moment
+	// ordinary prose stops going out as a Rich Message.
+	text = reHeading.ReplaceAllStringFunc(text, func(line string) string {
+		title := reHeading.FindStringSubmatch(line)[1]
+		// A heading is already emphasis; bold inside one would nest, and
+		// "## **Итог**" is a thing models write.
+		title = strings.TrimSpace(reBold.ReplaceAllString(title, "$1"))
+		if title == "" {
+			return ""
+		}
+		return "<b>" + title + "</b>"
+	})
 	text = reBold.ReplaceAllString(text, "<b>$1</b>")
 
 	return text

@@ -192,7 +192,7 @@ func hasPipeTable(text string) bool {
 // otherwise, so the text can be copied. Falls back to ordinary text
 // chunks when rich parsing is rejected.
 func (c *Client) SendRichLong(ctx context.Context, chatID int64, text string) error {
-	if !NeedsRich(text) {
+	if !NeedsRich(text) && len([]rune(text)) <= maxTelegramMessageLength {
 		return c.SendLong(ctx, chatID, text)
 	}
 	for _, chunk := range splitMessage(text, maxTelegramRichChunkLength) {
@@ -208,6 +208,24 @@ func (c *Client) SendRichLong(ctx context.Context, chatID int64, text string) er
 // when the preview edit failed, the response exceeds a classic 4096-character
 // message, or Telegram temporarily rejects a request.
 func (c *Client) FinalizeResponse(ctx context.Context, chatID int64, previewMessageID int, text string) error {
+	// This is the path a chat answer actually takes, and it is where the
+	// reply stops being copyable: the streamed preview is an ordinary
+	// message, and finalising swapped it for a Rich one. Only content that
+	// needs rich rendering gets it; the rest stays an ordinary message,
+	// which Telegram lets a reader select and copy.
+	//
+	// Above the ordinary message limit rich wins anyway: Telegram caps a
+	// normal message at 4096 characters and a rich one at 32000, so the
+	// alternative is scattering one answer across ten bubbles. Something
+	// that long is a document already, and the complaint this fixes is
+	// about ordinary replies.
+	if !NeedsRich(text) && len([]rune(text)) <= maxTelegramMessageLength {
+		if previewMessageID != 0 {
+			return c.finalizeLegacyPreview(ctx, chatID, previewMessageID, text)
+		}
+		return c.SendLong(ctx, chatID, text)
+	}
+
 	chunks := splitMessage(text, maxTelegramRichChunkLength)
 	for i, chunk := range chunks {
 		if i == 0 && previewMessageID != 0 {
