@@ -134,9 +134,67 @@ func (c *Client) EditRichMessage(ctx context.Context, chatID int64, messageID in
 	return err
 }
 
-// SendRichLong delivers arbitrary Markdown as one or more Rich Messages and
-// falls back to ordinary Telegram text chunks when rich parsing is rejected.
+// NeedsRich reports whether a message actually requires a Rich Message to
+// render — a table, a fenced code block, or a display formula.
+//
+// Everything else goes as an ordinary Telegram message, and that is not a
+// cosmetic choice: text inside a Rich Message cannot be selected and
+// copied out of the chat. Sending every reply as one made a bot whose
+// answers you can read and cannot use — and the ordinary path renders
+// bold, italics and links perfectly well, as copyable entities.
+//
+// Deliberately narrow. Headings and bullet lists are not on this list:
+// they render as ordinary text well enough, and prose in a chat should
+// not be a document anyway.
+func NeedsRich(text string) bool {
+	if strings.Contains(text, "```") {
+		return true
+	}
+	if strings.Contains(text, "<tg-math-block>") ||
+		richDollarMathBlock.MatchString(text) || richBracketMathBlock.MatchString(text) {
+		return true
+	}
+	return hasPipeTable(text)
+}
+
+// hasPipeTable looks for a Markdown table: a header row followed by a
+// divider. A lone pipe is not enough — prose uses them, and "a | b" is
+// not a table.
+func hasPipeTable(text string) bool {
+	lines := strings.Split(text, "\n")
+	for i := 0; i+1 < len(lines); i++ {
+		header := strings.TrimSpace(lines[i])
+		divider := strings.TrimSpace(lines[i+1])
+		if !strings.Contains(header, "|") || !strings.Contains(divider, "|") {
+			continue
+		}
+		cells := splitPipeTableRow(divider)
+		if len(cells) < 2 {
+			continue
+		}
+		allDividers := true
+		for _, cell := range cells {
+			if !richTableDividerCell.MatchString(strings.TrimSpace(cell)) {
+				allDividers = false
+				break
+			}
+		}
+		if allDividers {
+			return true
+		}
+	}
+	return false
+}
+
+// SendRichLong delivers Markdown to a chat.
+//
+// Rich Messages only when the content needs them; ordinary messages
+// otherwise, so the text can be copied. Falls back to ordinary text
+// chunks when rich parsing is rejected.
 func (c *Client) SendRichLong(ctx context.Context, chatID int64, text string) error {
+	if !NeedsRich(text) {
+		return c.SendLong(ctx, chatID, text)
+	}
 	for _, chunk := range splitMessage(text, maxTelegramRichChunkLength) {
 		if err := c.sendRichWithFallback(ctx, chatID, chunk); err != nil {
 			return err

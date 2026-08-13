@@ -451,7 +451,18 @@ func (g *Gateway) SendToUserOnce(ctx context.Context, userID uuid.UUID, text str
 	if !bi.client.IsConfigured() {
 		return receipt, bs.PermanentlyNotSent(fmt.Errorf("telegram bot not configured"))
 	}
-	result, err := bi.client.SendRichMessage(ctx, tgChatID, text)
+	// Rich only when the content needs it. A reminder is prose, and prose
+	// inside a Rich Message cannot be copied out of the chat — which for
+	// a reminder carrying an address or a code is most of its use. Both
+	// calls are a single delivered message, so the receipt contract holds
+	// either way: the plain path only re-sends after an explicit markup
+	// rejection, which creates nothing.
+	var result *telegram.SendMessageResult
+	if telegram.NeedsRich(text) {
+		result, err = bi.client.SendRichMessage(ctx, tgChatID, text)
+	} else {
+		result, err = bi.client.SendMessage(ctx, strconv.FormatInt(tgChatID, 10), text)
+	}
 	if err != nil {
 		if apiErr, rejected := explicitTelegramRejection(err); rejected {
 			// Telegram explicitly rejected this request (including 429). The
