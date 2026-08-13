@@ -62,6 +62,14 @@ func executeToolWithTimeout(ctx context.Context, registry *bs.ToolRegistry, name
 	case result := <-done:
 		return result.output, result.isError, false
 	case <-toolCtx.Done():
-		return fmt.Sprintf("tool %s timed out after %s: %v", name, timeout, toolCtx.Err()), true, true
+		// The result text doubles as the model's recovery instruction. A bare
+		// deadline error reads as "try again", and for a tool with side
+		// effects the retry pays the full cost a second time — production
+		// showed image generations re-run from scratch while the first one's
+		// file had already landed. Cancellation can race completion, so the
+		// effect may exist even though this call reports failure.
+		return fmt.Sprintf(
+			"tool %s timed out after %s: %v. The call was cancelled, but its effect may still have landed. If this tool creates or changes something, verify first (list or read the target) instead of repeating the call; repeat at most once, and if that fails too, tell the user plainly.",
+			name, timeout, toolCtx.Err()), true, true
 	}
 }
