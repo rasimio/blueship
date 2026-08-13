@@ -1262,7 +1262,20 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 						name: msg.Document.FileName, mime: docMime, kind: "docx", data: data,
 					})
 				case "text":
-					text = appendDocInline(text, fmt.Sprintf("[file: %s]\n```\n%s\n```", msg.Document.FileName, strings.ReplaceAll(string(data), "\r\n", "\n")))
+					// DecodeText, not string(data): a .txt exported by a
+					// Windows editor is UTF-16 or Windows-1251, and raw
+					// bytes would reach the prompt as mojibake.
+					body, ok := attachment.DecodeText(data)
+					if !ok {
+						// Classifier and decoder read the same probe, so this
+						// is unreachable in practice — but a silent break here
+						// would leave a document-only message with empty text
+						// and no reply at all.
+						g.logger.Warn("text document classified but not decodable", "file", msg.Document.FileName, "size", len(data))
+						text = appendDocInline(text, fmt.Sprintf("[file: %s — the text came through unreadable]", msg.Document.FileName))
+						break
+					}
+					text = appendDocInline(text, fmt.Sprintf("[file: %s]\n```\n%s\n```", msg.Document.FileName, body))
 					mime := msg.Document.MimeType
 					if mime == "" {
 						mime = "text/plain"
@@ -1276,8 +1289,14 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 					// dropping it silently — a document-only message would
 					// otherwise leave `text` empty, trip the `text=="" && no
 					// images` guard below, and the bot would never reply at all.
-					g.logger.Info("unsupported document — inlining notice", "file", msg.Document.FileName, "mime", msg.Document.MimeType)
-					text = appendDocInline(text, fmt.Sprintf("[file: %s — I can't read this format yet; send a PDF, a .docx, or a text file]", msg.Document.FileName))
+					// The bytes are logged as a hex prefix, not stored: a
+					// rejected file leaves nothing behind, and without this
+					// the next "why can't you read my .txt" has no evidence
+					// to work from.
+					g.logger.Info("unsupported document — inlining notice",
+						"file", msg.Document.FileName, "mime", msg.Document.MimeType,
+						"size", len(data), "head_hex", fmt.Sprintf("% x", data[:min(16, len(data))]))
+					text = appendDocInline(text, fmt.Sprintf("[file: %s — the bytes are binary, not a format I can read; a PDF, .docx, .xlsx, an image, or a text file works]", msg.Document.FileName))
 				}
 			}
 		}

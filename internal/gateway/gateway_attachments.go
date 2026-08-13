@@ -119,9 +119,13 @@ func (g *Gateway) attachmentBlocksByIDs(ctx context.Context, us *UserState, ids 
 				Text: fmt.Sprintf("[%s: %s — docx]\n%s", labelPrefix, rec.Name, docText),
 			})
 		case "text":
+			body, ok := attachment.DecodeText(data)
+			if !ok {
+				continue
+			}
 			out = append(out, bs.ContentBlock{
 				Type: "text",
-				Text: fmt.Sprintf("[%s: %s]\n```\n%s\n```", labelPrefix, rec.Name, string(data)),
+				Text: fmt.Sprintf("[%s: %s]\n```\n%s\n```", labelPrefix, rec.Name, body),
 			})
 		}
 	}

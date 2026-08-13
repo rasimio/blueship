@@ -572,8 +572,15 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		case "text":
 			// Mirror Telegram's text-doc inlining: fenced code block keeps the
 			// model honest about where the file starts and ends, the filename
-			// gives it something to cite.
-			text = appendInlineFile(text, fmt.Sprintf("[file: %s]\n```\n%s\n```", att.Name, strings.ReplaceAll(string(data), "\r\n", "\n")))
+			// gives it something to cite. DecodeText handles the non-UTF-8
+			// exports (UTF-16, Windows-1251) the same way there.
+			body, ok := attachment.DecodeText(data)
+			if !ok {
+				s.logger.Warn("httpchat: text attachment not decodable", "name", att.Name, "size", len(data))
+				text = appendInlineFile(text, fmt.Sprintf("[file: %s — the text came through unreadable]", att.Name))
+				break
+			}
+			text = appendInlineFile(text, fmt.Sprintf("[file: %s]\n```\n%s\n```", att.Name, body))
 		default:
 			s.logger.Warn("httpchat: unknown attachment kind", "kind", att.Kind, "name", att.Name)
 		}

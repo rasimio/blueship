@@ -92,8 +92,11 @@ func (g *Gateway) replyParentMedia(
 		text, xerr := attachment.ExtractXlsxMarkdown(data)
 		return replyParentText(g, parent, label, "xlsx", text, xerr)
 	case "text":
-		return replyParentText(g, parent, label, "file",
-			strings.ReplaceAll(string(data), "\r\n", "\n"), nil)
+		body, ok := attachment.DecodeText(data)
+		if !ok {
+			return nil
+		}
+		return replyParentText(g, parent, label, "file", body, nil)
 	}
 	return nil
 }

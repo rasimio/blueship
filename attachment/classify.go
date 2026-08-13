@@ -10,8 +10,6 @@
 // place to retune a cap is here.
 package attachment
 
-import "unicode/utf8"
-
 // Per-kind size caps. Bytes the daemon will accept for one attachment;
 // everything above gets rejected by the inbound transport before it
 // reaches the LLM. Aligned across Telegram + cabinet so a user gets
@@ -91,11 +89,13 @@ func Kind(mime, name string, data []byte) string {
 	if isZipSignature(data) && (ext == ".xlsx" || mimeLower == mimeXlsx) {
 		return "xlsx"
 	}
-	// Text: any UTF-8 buffer that isn't an image / PDF. Catches
-	// every source file we'd want to inline (incl. SVG, which is
-	// XML text — we'll send the markup as a fenced code block and
-	// let the model reason about it rather than try to render it).
-	if looksLikeUTF8Text(data) {
+	// Text: any buffer DetectTextEncoding can read — UTF-8, UTF-16,
+	// or a single-byte code page. Catches every source file we'd want
+	// to inline (incl. SVG, which is XML text — we'll send the markup
+	// as a fenced code block and let the model reason about it rather
+	// than try to render it), and a .txt exported by a Windows editor,
+	// which is not UTF-8 at all. DecodeText does the conversion.
+	if DetectTextEncoding(data) != "" {
 		return "text"
 	}
 	return ""
@@ -191,25 +191,6 @@ func isZipSignature(data []byte) bool {
 		((data[2] == 0x03 && data[3] == 0x04) ||
 			(data[2] == 0x05 && data[3] == 0x06) ||
 			(data[2] == 0x07 && data[3] == 0x08))
-}
-
-// looksLikeUTF8Text returns true when the buffer's first 8 KiB are
-// valid UTF-8 and contain no NUL byte. This is the same probe `git`
-// uses for is-it-text-or-binary; it covers every UTF-8 source format
-// we care about (.cpp / .rs / .kt / .swift / Dockerfile / Makefile /
-// configs without extensions) without needing a per-language
-// whitelist. Empty buffers count as text — they're harmless to inline.
-func looksLikeUTF8Text(data []byte) bool {
-	head := data
-	if len(head) > 8192 {
-		head = head[:8192]
-	}
-	for _, b := range head {
-		if b == 0x00 {
-			return false
-		}
-	}
-	return utf8.Valid(head)
 }
 
 // --- tiny string helpers (avoid pulling in `strings` for two trims) ---
