@@ -285,7 +285,7 @@ func (s *attachmentReceiptStore) MessagesForAPI(context.Context, string, int) ([
 	return append([]bs.Message(nil), s.messages...), nil
 }
 
-func (s *attachmentReceiptStore) DialogMessagesForAPI(context.Context, string, int) ([]bs.Message, error) {
+func (s *attachmentReceiptStore) DialogMessagesForAPI(context.Context, string, int, bool) ([]bs.Message, error) {
 	return append([]bs.Message(nil), s.messages...), nil
 }
 

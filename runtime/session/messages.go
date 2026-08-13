@@ -513,16 +513,26 @@ func (s *Store) MessagesForAPI(ctx context.Context, sessionID string, maxTokens 
 // The budget still decides. A block that does not fit advances by one block until
 // it does, so the anchor is always on a block boundary and the result is always
 // within budget — deterministic either way, never a token-by-token edge.
-func (s *Store) DialogMessagesForAPI(ctx context.Context, sessionID string, maxTokens int) ([]bs.Message, error) {
+func (s *Store) DialogMessagesForAPI(ctx context.Context, sessionID string, maxTokens int, anchorToSummary bool) ([]bs.Message, error) {
 	const selectDialogRows = `
 		SELECT id, session_id, role, content, visible_text, projection_status,
 		       projection_reason, projector_version, tool_use_id, token_estimate, created_at
 		FROM chat_messages
 		WHERE session_id = $1`
 
-	boundary, hasBoundary, err := s.softSummaryBoundary(ctx, sessionID)
-	if err != nil {
-		return nil, err
+	// The boundary is only consulted when the summary text is riding this
+	// prompt. Anchoring without the text would cut off everything before the
+	// boundary while carrying nothing in its place — which is exactly what
+	// happened whenever the summary load failed, and what disabling the
+	// feature would otherwise do to every session with an old summary row.
+	hasBoundary := false
+	var boundary time.Time
+	if anchorToSummary {
+		var err error
+		boundary, hasBoundary, err = s.softSummaryBoundary(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	if hasBoundary {

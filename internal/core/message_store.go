@@ -20,7 +20,14 @@ type MessageStore interface {
 	// DialogMessagesForAPI loads recent visible dialogue fitting within maxTokens
 	// budget. Tool transcripts and other internal blocks are excluded so the
 	// dialogue window is independent from tool scratch/history.
-	DialogMessagesForAPI(ctx context.Context, sessionID string, maxTokens int) ([]Message, error)
+	//
+	// anchorToSummary starts the window at the session's last soft-summary
+	// boundary. The caller passes whether a summary TEXT actually made it
+	// into this prompt — the two must travel together: a window anchored at
+	// a boundary whose summary is absent (feature disabled, or the load
+	// failed) hands the model strictly less history than a plain tail, with
+	// nothing carrying what fell off.
+	DialogMessagesForAPI(ctx context.Context, sessionID string, maxTokens int, anchorToSummary bool) ([]Message, error)
 
 	// RecentToolObservations loads compactable recent tool results for prompt
 	// context. These are provenance hints, not visible dialogue history.

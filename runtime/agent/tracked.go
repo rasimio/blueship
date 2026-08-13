@@ -96,7 +96,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 	)
 	promptOverhead := dialogDecision.PromptOverhead
 	loadStarted := time.Now()
-	dialogMessages, loadErr := a.store.DialogMessagesForAPI(ctx, cfg.SessionID, dialogBudget)
+	dialogMessages, loadErr := a.store.DialogMessagesForAPI(ctx, cfg.SessionID, dialogBudget, compactSummary != "")
 	emitTiming(cfg, "agent.load_dialog_messages", loadStarted, fmt.Sprintf("role=%s budget=%d effective_dialog_budget=%d prompt_overhead=%d mode=%s", cfg.Role, tokenBudget, dialogBudget, promptOverhead, dialogDecision.Mode))
 	if loadErr != nil {
 		return nil, fmt.Errorf("load dialog messages: %w", loadErr)

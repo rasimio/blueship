@@ -321,16 +321,29 @@ func (g *Gateway) prepareCortexTurnWithRegistry(
 	//
 	// A failure is logged and survived. Losing the summary costs older context;
 	// refusing the turn costs the conversation.
-	compactSummary := derefString(sess.CompactSummary)
-	if g.store == nil {
-		// No session persistence configured — there is no summary to read and
-		// nothing has been anchored, so the window is a plain tail. Same guard
-		// the other store readers here carry.
-	} else if soft, softErr := g.store.LatestSoftSummaryText(ctx, sess.ID); softErr != nil {
-		g.logger.Error("soft summary: load for prompt failed, older context is missing from this turn",
-			"session_id", sess.ID, "error", softErr)
-	} else {
-		compactSummary = composeSummaries(compactSummary, soft)
+	// A disabled threshold switches session summaries off COMPLETELY — the
+	// writer (gated in maybeScheduleSoftSummary) and this reader together.
+	// Gating only the writer would let the last stored summary outlive the
+	// decision to stop trusting summaries, riding every prompt indefinitely:
+	// production's freshest "summary" was a verbatim echo of one old reply
+	// about a router hookup, presented as the memory of 569 messages.
+	//
+	// The dialogue window pairs with this text downstream: the loop anchors
+	// at the summary boundary only when compactSummary is non-empty, so an
+	// empty summary here also returns the window to a plain budget tail.
+	compactSummary := ""
+	if summariesEnabled(g.deps.Config.Limits.SoftSummaryThreshold) {
+		compactSummary = derefString(sess.CompactSummary)
+		if g.store == nil {
+			// No session persistence configured — there is no summary to read
+			// and nothing has been anchored, so the window is a plain tail.
+			// Same guard the other store readers here carry.
+		} else if soft, softErr := g.store.LatestSoftSummaryText(ctx, sess.ID); softErr != nil {
+			g.logger.Error("soft summary: load for prompt failed, older context is missing from this turn",
+				"session_id", sess.ID, "error", softErr)
+		} else {
+			compactSummary = composeSummaries(compactSummary, soft)
+		}
 	}
 
 	return preparedCortexTurn{

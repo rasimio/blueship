@@ -25,7 +25,7 @@ func (g *Gateway) messageBudgetForRole(role string, ref core.ModelRef) core.Mess
 
 func (g *Gateway) maybeScheduleSoftSummary(us *UserState, sessionID string) {
 	limits := g.deps.Config.Limits
-	if limits.SoftSummaryThreshold <= 0 || sessionID == "" {
+	if !summariesEnabled(limits.SoftSummaryThreshold) || sessionID == "" {
 		return
 	}
 	go func() {
@@ -96,4 +96,16 @@ func estimateGatewayMessagesTokens(messages []core.Message) int {
 		total += core.EstimateTokens(core.NormalizeContent(msg.Content))
 	}
 	return total
+}
+
+// summariesEnabled is the single switch for the session-summary feature.
+//
+// The writer (maybeScheduleSoftSummary) and the prompt reader
+// (prepareCortexTurn) must agree on it: writer-only gating leaves the last
+// stored summary in every prompt forever, reader-only gating keeps paying
+// for summaries nobody reads. The threshold doubles as the off switch — the
+// host config passes a negative value through untouched, while zero means
+// "unset" there and becomes the default.
+func summariesEnabled(softSummaryThreshold int) bool {
+	return softSummaryThreshold > 0
 }

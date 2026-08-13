@@ -957,14 +957,15 @@ func (p *scriptedProvider) StreamComplete(_ context.Context, req bs.CompletionRe
 }
 
 type fakeMessageStore struct {
-	dialog           []bs.Message
-	observations     []bs.ToolObservation
-	dialogLoads      int
-	observationLoads int
-	lastDialogBudget int
-	rawLoads         int
-	appended         []bs.Message
-	appendedTokens   []int
+	dialog              []bs.Message
+	observations        []bs.ToolObservation
+	dialogLoads         int
+	observationLoads    int
+	lastDialogBudget    int
+	lastAnchorToSummary bool
+	rawLoads            int
+	appended            []bs.Message
+	appendedTokens      []int
 }
 
 func (s *fakeMessageStore) Append(_ context.Context, _ string, msg bs.Message) error {
@@ -983,9 +984,10 @@ func (s *fakeMessageStore) MessagesForAPI(context.Context, string, int) ([]bs.Me
 	return nil, nil
 }
 
-func (s *fakeMessageStore) DialogMessagesForAPI(_ context.Context, _ string, maxTokens int) ([]bs.Message, error) {
+func (s *fakeMessageStore) DialogMessagesForAPI(_ context.Context, _ string, maxTokens int, anchorToSummary bool) ([]bs.Message, error) {
 	s.dialogLoads++
 	s.lastDialogBudget = maxTokens
+	s.lastAnchorToSummary = anchorToSummary
 	return cloneMessages(s.dialog), nil
 }
 
@@ -1051,5 +1053,43 @@ func assertPrefixExtension(t *testing.T, prev, next []bs.Message) {
 			t.Fatalf("message %d was rewritten between turns, breaking the cacheable prefix:\n before: %s\n after:  %s",
 				i, before, after)
 		}
+	}
+}
+
+// The dialogue window anchors at the summary boundary ONLY on turns whose
+// prompt actually carries the summary text. Split, the pair reproduces the
+// silent-shrink failure: a boundary-cut window with nothing covering what
+// fell off — which is what every failed summary load used to do, and what
+// disabling the feature would have done to every session with an old row.
+func TestDialogWindowAnchorTravelsWithTheSummaryText(t *testing.T) {
+	run := func(compact string) *fakeMessageStore {
+		t.Helper()
+		store := &fakeMessageStore{}
+		provider := &scriptedProvider{responses: []*bs.CompletionResponse{{
+			Content:    []bs.ContentBlock{{Type: "text", Text: "ответ"}},
+			StopReason: "end_turn",
+		}}}
+		loop := NewLoop(provider, store, bs.NewToolRegistry(), nil, &bs.Config{}, slog.Default())
+		cfg := RunConfig{
+			SessionID:      "s1",
+			SystemPrompt:   "system",
+			Model:          "test-model",
+			MaxTokens:      64,
+			MaxTurns:       1,
+			MessageBudget:  5000,
+			SkipUserAppend: true,
+			CompactSummary: compact,
+		}
+		if _, err := loop.RunTracked(context.Background(), cfg, "вопрос"); err != nil {
+			t.Fatalf("RunTracked: %v", err)
+		}
+		return store
+	}
+
+	if store := run(""); store.lastAnchorToSummary {
+		t.Fatal("no summary in the prompt, yet the window anchored at the boundary — the model loses pre-boundary history with nothing in its place")
+	}
+	if store := run("сводка сессии"); !store.lastAnchorToSummary {
+		t.Fatal("summary is in the prompt but the window did not anchor — the boundary and the text must travel together")
 	}
 }

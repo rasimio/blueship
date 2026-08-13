@@ -82,7 +82,7 @@ func (s *recordingMessageStore) MessagesForAPI(context.Context, string, int) ([]
 	return nil, nil
 }
 
-func (s *recordingMessageStore) DialogMessagesForAPI(context.Context, string, int) ([]core.Message, error) {
+func (s *recordingMessageStore) DialogMessagesForAPI(context.Context, string, int, bool) ([]core.Message, error) {
 	return append([]core.Message(nil), s.appended...), nil
 }
 

@@ -43,7 +43,7 @@ func TestDialogWindowStartsAtTheSummaryBoundary(t *testing.T) {
 	}
 
 	// No summary yet: the window is the tail that fits, as before.
-	before, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 1000)
+	before, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 1000, true)
 	if err != nil {
 		t.Fatalf("DialogMessagesForAPI: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestDialogWindowStartsAtTheSummaryBoundary(t *testing.T) {
 		 VALUES ($1, $2, 8, 800, 'сводка первых восьми')`,
 		sessionID, ids[7])
 
-	after, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 1000)
+	after, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 1000, true)
 	if err != nil {
 		t.Fatalf("DialogMessagesForAPI after summary: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestDialogWindowPrefixSurvivesANewTurn(t *testing.T) {
 		 VALUES ($1, $2, 3, 300, 'сводка')`,
 		sessionID, ids[2])
 
-	first, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 1000)
+	first, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 1000, true)
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestDialogWindowPrefixSurvivesANewTurn(t *testing.T) {
 	// thing that moved the edge by thousands of tokens at once.
 	seedMessage(t, db, sessionID, 6, base.Add(6*time.Minute), 400)
 
-	second, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 1000)
+	second, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 1000, true)
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestDialogWindowFallsBackWhenTheSummaryIsOverdue(t *testing.T) {
 		 VALUES ($1, $2, 1, 100, 'сводка одного сообщения')`,
 		sessionID, ids[0])
 
-	out, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 400)
+	out, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 400, true)
 	if err != nil {
 		t.Fatalf("DialogMessagesForAPI: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestDialogWindowPrefixHoldsWithoutAnySummary(t *testing.T) {
 	}
 
 	const budget = 100000 // ample: this test is about the edge, not the budget
-	first, err := store.DialogMessagesForAPI(ctx, sessionID.String(), budget)
+	first, err := store.DialogMessagesForAPI(ctx, sessionID.String(), budget, true)
 	if err != nil {
 		t.Fatalf("first: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestDialogWindowPrefixHoldsWithoutAnySummary(t *testing.T) {
 	moves := 0
 	for turn := 0; turn < dialogWindowBlock; turn++ {
 		add()
-		next, err := store.DialogMessagesForAPI(ctx, sessionID.String(), budget)
+		next, err := store.DialogMessagesForAPI(ctx, sessionID.String(), budget, true)
 		if err != nil {
 			t.Fatalf("turn %d: %v", turn, err)
 		}
@@ -293,7 +293,7 @@ func TestDialogWindowStaysBoundedAsTheSessionGrows(t *testing.T) {
 		seedMessage(t, db, sessionID, i, base.Add(time.Duration(i)*time.Minute), 20)
 	}
 
-	out, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 100000)
+	out, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 100000, true)
 	if err != nil {
 		t.Fatalf("DialogMessagesForAPI: %v", err)
 	}
@@ -416,4 +416,48 @@ func windowTestDB(t *testing.T) *sqlx.DB {
 		t.Fatalf("create tables: %v", err)
 	}
 	return db
+}
+
+// The boundary and the summary text must travel together. anchorToSummary is
+// how the caller says "the text is in this prompt": when it is false — the
+// feature switched off, or the summary load failed — a window that still
+// started at the boundary would hand the model LESS history than a plain
+// tail, with nothing carrying what fell off. That silent shrink is exactly
+// what happened on every failed summary load before the flag existed.
+func TestDialogWindowIgnoresTheBoundaryWithoutTheSummaryText(t *testing.T) {
+	db := windowTestDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+
+	sessionID := uuid.New()
+	mustExec(t, db, `INSERT INTO chat_sessions (id) VALUES ($1)`, sessionID)
+
+	base := time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC)
+	var ids []uuid.UUID
+	for i := 0; i < 12; i++ {
+		ids = append(ids, seedMessage(t, db, sessionID, i, base.Add(time.Duration(i)*time.Minute), 100))
+	}
+	// A summary row exists — up to message 9, leaving one complete user+
+	// assistant pair after the boundary (a lone leading assistant turn would
+	// be dropped as partial).
+	mustExec(t, db,
+		`INSERT INTO chat_session_summaries (session_id, to_message_id, message_count, token_count, summary)
+		 VALUES ($1, $2, 10, 1000, 'сводка почти всего')`,
+		sessionID, ids[9])
+
+	anchored, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 1000, true)
+	if err != nil {
+		t.Fatalf("anchored: %v", err)
+	}
+	if len(anchored) != 2 {
+		t.Fatalf("with the summary in the prompt the window is %d messages, want the 2 post-boundary ones", len(anchored))
+	}
+
+	plain, err := store.DialogMessagesForAPI(ctx, sessionID.String(), 1000, false)
+	if err != nil {
+		t.Fatalf("plain: %v", err)
+	}
+	if len(plain) <= len(anchored) {
+		t.Fatalf("without the summary text the window stayed boundary-cut: %d messages vs %d anchored — the model loses history AND has no summary to cover it", len(plain), len(anchored))
+	}
 }
