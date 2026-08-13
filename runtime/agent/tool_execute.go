@@ -13,6 +13,13 @@ const (
 	defaultToolExecutionTimeout = 90 * time.Second
 	browserSearchTimeout        = 35 * time.Second
 	browserFetchTimeout         = 55 * time.Second
+	// Image generation lives where the default cap bites: production runs
+	// 54-85s on a normal day, so 90s cancels the healthy tail whenever the
+	// backend slows at all — three cancellations in one afternoon, each of a
+	// generation already paid for and likely seconds from done. The cancel is
+	// the expensive part: the request is torn down, so a result at 95s is
+	// discarded rather than late.
+	imageGenerationTimeout = 4 * time.Minute
 )
 
 type toolExecutionResult struct {
@@ -29,6 +36,8 @@ func resolveToolExecutionTimeout(override time.Duration, name string) time.Durat
 		return browserSearchTimeout
 	case "browser_fetch":
 		return browserFetchTimeout
+	case "image_generate":
+		return imageGenerationTimeout
 	default:
 		return defaultToolExecutionTimeout
 	}
