@@ -351,6 +351,12 @@ type pendingMsg struct {
 	// natively); 0 / empty for Telegram inbound. When both are set
 	// the direct id wins.
 	replyToMessageID string
+	// replyMediaBlocks is the parent message's file, read straight off
+	// the update. It is the only route that survives everything we
+	// might not have recorded — a parent older than the id index, an
+	// attachment never linked to its row, a picture the soul sent
+	// herself — so it stands in when the transcript yields no file.
+	replyMediaBlocks []bs.ContentBlock
 	// replyQuoteFallback is the quote as the transport delivered it,
 	// used only when neither id resolves to a row we can read — a
 	// parent older than the id index. The transcript is preferred

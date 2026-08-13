@@ -1326,12 +1326,18 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	// pre-dates the id index. Rich Messages arrive with no text at all, so
 	// this is empty for anything the soul sent.
 	var replyQuoteFallback string
+	var replyMediaBlocks []bs.ContentBlock
 	if msg.ReplyToMessage != nil {
 		replyQuoteFallback = msg.ReplyToMessage.Text
 		if replyQuoteFallback == "" {
 			replyQuoteFallback = msg.ReplyToMessage.Caption
 		}
-		if replyQuoteFallback == "" {
+		// The parent's file, read off the update. Only worth the download
+		// when the parent actually carries one; processMessages drops these
+		// again if the transcript turns out to hold the same file, which is
+		// the richer copy.
+		replyMediaBlocks = g.replyParentMedia(ctx, bi.client, msg.ReplyToMessage)
+		if replyQuoteFallback == "" && len(replyMediaBlocks) == 0 {
 			g.logger.Info("reply-to carries no wire quote — resolving from the transcript",
 				"reply_msg_id", msg.ReplyToMessage.MessageID,
 				"has_document", msg.ReplyToMessage.Document != nil,
@@ -1355,6 +1361,7 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		rawAttachments:     rawAttachments,
 		replyToTGMessageID: replyToTGID,
 		replyQuoteFallback: replyQuoteFallback,
+		replyMediaBlocks:   replyMediaBlocks,
 		activityVersion:    admissionVersion,
 	}}
 	pending[0].activityTracked = true

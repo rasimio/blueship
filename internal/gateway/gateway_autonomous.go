@@ -315,7 +315,7 @@ func (g *Gateway) sendAutonomousAttachments(ctx context.Context, commit bs.Auton
 				"attachment_id", id.String(), "user_id", commit.UserID.String(), "error", err)
 			continue
 		}
-		if err := g.SendToUserAttachment(ctx, commit.UserID, *rec, data); err != nil {
+		if _, err := g.SendToUserAttachment(ctx, commit.UserID, *rec, data); err != nil {
 			g.logger.Error("autonomous turn: attachment not sent",
 				"attachment_id", id.String(), "user_id", commit.UserID.String(), "error", err)
 			continue

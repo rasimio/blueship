@@ -490,10 +490,10 @@ func explicitTelegramRejection(err error) (*telegram.APIError, bool) {
 // SendToUserAttachment ships a CDN-resolved file out the user's paired bot —
 // the file sibling of SendToUser. Routes by kind: image → SendPhoto, else
 // SendDocument (PDF/text/csv land as a download).
-func (g *Gateway) SendToUserAttachment(ctx context.Context, userID uuid.UUID, rec bs.AttachmentRecord, data []byte) error {
+func (g *Gateway) SendToUserAttachment(ctx context.Context, userID uuid.UUID, rec bs.AttachmentRecord, data []byte) (int, error) {
 	bi, tgChatID, err := g.resolveUserBot(ctx, userID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	name := rec.Name
 	if name == "" {

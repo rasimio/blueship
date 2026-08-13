@@ -200,9 +200,9 @@ func (s *telegramSink) SendTyping(ctx context.Context) error {
 // PDFs and text-shaped docs go through SendDocument so the chat
 // shows a file icon with the filename. Unknown kinds fall back to
 // SendDocument — a download is always better than nothing.
-func (s *telegramSink) SendAttachment(ctx context.Context, rec bs.AttachmentRecord, data []byte) error {
+func (s *telegramSink) SendAttachment(ctx context.Context, rec bs.AttachmentRecord, data []byte) (int, error) {
 	if s.client == nil {
-		return fmt.Errorf("telegramSink.SendAttachment: no telegram client (chat %d)", s.chatID)
+		return 0, fmt.Errorf("telegramSink.SendAttachment: no telegram client (chat %d)", s.chatID)
 	}
 	chatID := fmt.Sprintf("%d", s.chatID)
 	name := rec.Name

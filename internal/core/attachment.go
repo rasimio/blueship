@@ -4,6 +4,7 @@ import (
 	"context"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -122,8 +123,30 @@ type AttachmentRecord struct {
 // SendAttachment per [attached: UUID] marker. Sinks that don't
 // implement it leave the markers in the text; downstream renderers
 // (cabinet buildParts) handle the chip swap themselves.
+// It reports the transport-side id of the message the file became, so the
+// gateway can index that message as one this turn produced — otherwise a
+// picture the soul sends is a message nothing can address, and replying to
+// it resolves to no parent at all. Transports with no such id return 0.
 type AttachmentSendSink interface {
-	SendAttachment(ctx context.Context, rec AttachmentRecord, data []byte) error
+	SendAttachment(ctx context.Context, rec AttachmentRecord, data []byte) (transportMessageID int, err error)
+}
+
+// AttachmentLinker is the optional sink capability for adopting the files a
+// turn produced into that turn's transcript row.
+//
+// A file the soul generates is written mid-turn, before the row that will
+// carry the answer exists, so it lands with no message of its own. The
+// consequence only shows up later: replying to a picture she sent found no
+// parent files, because nothing said which message the picture belonged to.
+//
+// `since` bounds the adoption to this turn. The gateway holds the
+// conversation's turn lock across the whole turn, so no other turn for the
+// same (user, soul) can have written into that window.
+//
+// Optional on purpose: a sink that does not implement it simply keeps the
+// previous behaviour.
+type AttachmentLinker interface {
+	LinkOrphansToMessage(ctx context.Context, userID, soulID, messageID uuid.UUID, since time.Time) (linked int, err error)
 }
 
 // AttachmentParams carries everything the sink needs to persist one

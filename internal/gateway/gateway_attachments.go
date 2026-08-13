@@ -150,18 +150,19 @@ var attachMarkerRE = regexp.MustCompile(`(?i)\[attached:\s*([0-9a-f-]{36})\s*\]`
 // Unknown / foreign UUIDs are stripped silently so a hallucinated
 // marker doesn't leak a sentinel into chat. Sink errors are warn-
 // logged but don't fail the turn — the text reply still goes out.
-func (g *Gateway) dispatchAttachmentMarkers(ctx context.Context, us *UserState, sink bs.ResponseSink, reply string) string {
+func (g *Gateway) dispatchAttachmentMarkers(ctx context.Context, us *UserState, sink bs.ResponseSink, reply string) (string, []int) {
+	var sentMessageIDs []int
 	if reply == "" || g.deps.AttachmentSink == nil {
-		return reply
+		return reply, nil
 	}
 	matches := attachMarkerRE.FindAllStringSubmatchIndex(reply, -1)
 	if len(matches) == 0 {
-		return reply
+		return reply, nil
 	}
 	sender, sendable := sink.(bs.AttachmentSendSink)
 	if !sendable {
 		// Cabinet path: keep markers, history endpoint will resolve.
-		return reply
+		return reply, nil
 	}
 
 	// Collect ids we need (de-duped) so a marker repeated twice
@@ -191,16 +192,21 @@ func (g *Gateway) dispatchAttachmentMarkers(ctx context.Context, us *UserState, 
 		if rec == nil {
 			continue
 		}
-		if err := sender.SendAttachment(ctx, *rec, data); err != nil {
+		tgMessageID, err := sender.SendAttachment(ctx, *rec, data)
+		if err != nil {
 			g.logger.Warn("attachment marker: send failed",
 				"chat_id", us.ChatID, "id", id, "err", err)
+			continue
+		}
+		if tgMessageID != 0 {
+			sentMessageIDs = append(sentMessageIDs, tgMessageID)
 		}
 	}
 
 	cleaned := attachMarkerRE.ReplaceAllString(reply, "")
 	// Collapse the blank lines a stripped sentinel leaves behind so
 	// the message text reads naturally on the user's side.
-	return collapseBlankLinesGateway(cleaned)
+	return collapseBlankLinesGateway(cleaned), sentMessageIDs
 }
 
 // collapseBlankLinesGateway is the gateway-local copy of the same

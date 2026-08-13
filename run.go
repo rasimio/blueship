@@ -371,7 +371,7 @@ func (s *Ship) Run(ctx context.Context) error {
 								notifyErrs = append(notifyErrs, fmt.Errorf("attachment %s resolve: not found", id))
 								continue
 							}
-							if serr := deps.SendToUserAttachment(ctx, userID, *rec, data); serr != nil {
+							if _, serr := deps.SendToUserAttachment(ctx, userID, *rec, data); serr != nil {
 								notifyErrs = append(notifyErrs, fmt.Errorf("attachment %s send: %w", id, serr))
 								continue
 							}

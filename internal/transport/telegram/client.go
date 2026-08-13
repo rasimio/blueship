@@ -580,7 +580,10 @@ func (c *Client) SendVoice(ctx context.Context, chatID string, audio []byte) err
 // API doesn't strictly require the form-field content type — it
 // sniffs from the bytes — but setting it correctly lets the
 // recipient client pick the right preview affordance.
-func (c *Client) SendDocument(ctx context.Context, chatID string, filename, mime string, data []byte) error {
+// SendDocument uploads a file and reports the id of the message it became,
+// so the caller can index that message as one this turn produced — a reply
+// pointing at it then resolves back to the turn's transcript row.
+func (c *Client) SendDocument(ctx context.Context, chatID string, filename, mime string, data []byte) (int, error) {
 	mime, data = prepareTextDocument(filename, mime, data)
 	return c.sendFile(ctx, chatID, "sendDocument", "document", filename, mime, data, nil)
 }
@@ -633,7 +636,8 @@ func telegramPreviewNeedsBOM(filename, mediaType string) bool {
 // 10 MB whereas documents go to 50 MB) so a 12 MB PNG from the
 // cabinet still reaches the user. `caption` is optional; pass empty
 // for a bare photo send.
-func (c *Client) SendPhoto(ctx context.Context, chatID string, filename, mime string, data []byte, caption string) error {
+// SendPhoto uploads an image and reports the id of the message it became.
+func (c *Client) SendPhoto(ctx context.Context, chatID string, filename, mime string, data []byte, caption string) (int, error) {
 	if len(data) > 10*1024*1024 {
 		return c.SendDocument(ctx, chatID, filename, mime, data)
 	}
@@ -649,9 +653,9 @@ func (c *Client) SendPhoto(ctx context.Context, chatID string, filename, mime st
 // "sendPhoto"), field is the form-field name TG expects for the
 // payload ("document" / "photo"), and extra carries any non-binary
 // fields (e.g. caption).
-func (c *Client) sendFile(ctx context.Context, chatID, method, field, filename, mime string, data []byte, extra map[string]string) error {
+func (c *Client) sendFile(ctx context.Context, chatID, method, field, filename, mime string, data []byte, extra map[string]string) (int, error) {
 	if !c.IsConfigured() {
-		return fmt.Errorf("telegram bot not configured")
+		return 0, fmt.Errorf("telegram bot not configured")
 	}
 	if mime == "" {
 		mime = "application/octet-stream"
@@ -668,31 +672,41 @@ func (c *Client) sendFile(ctx context.Context, chatID, method, field, filename, 
 	h.Set("Content-Type", mime)
 	part, err := w.CreatePart(h)
 	if err != nil {
-		return fmt.Errorf("create form file: %w", err)
+		return 0, fmt.Errorf("create form file: %w", err)
 	}
 	if _, err := part.Write(data); err != nil {
-		return fmt.Errorf("write %s: %w", field, err)
+		return 0, fmt.Errorf("write %s: %w", field, err)
 	}
 	w.Close()
 
 	apiURL := c.methodURL(method)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, &body)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	req.Header.Set("Content-Type", w.FormDataContentType())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 
+	respBody, readErr := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%s: status %d: %s", method, resp.StatusCode, string(errBody))
+		return 0, fmt.Errorf("%s: status %d: %s", method, resp.StatusCode, string(respBody))
 	}
-	return nil
+	// The upload succeeded; the id is a bonus. A body we cannot parse is not
+	// a delivery failure — the file is in the chat either way — so it costs
+	// the caller the id, not the send.
+	if readErr != nil {
+		return 0, nil
+	}
+	var result SendMessageResult
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return 0, nil
+	}
+	return result.Result.MessageID, nil
 }
 
 const maxTelegramMessageLength = 4096

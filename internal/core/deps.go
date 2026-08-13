@@ -178,7 +178,7 @@ type Deps struct {
 	// bot. Lets the agent-task notify path deliver `[attached: UUID]`
 	// markers as real files (a research task's PDF report), not raw text.
 	// Nil = host hasn't wired it; caller skips file delivery.
-	SendToUserAttachment func(ctx context.Context, userID uuid.UUID, rec AttachmentRecord, data []byte) error
+	SendToUserAttachment func(ctx context.Context, userID uuid.UUID, rec AttachmentRecord, data []byte) (transportMessageID int, err error)
 
 	// BotOnboarding drives Telegram-native account creation for fresh
 	// users. The gateway invokes it on /start from a chat that has no

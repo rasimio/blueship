@@ -583,6 +583,53 @@ func prependReplyQuoteBlock(
 	return append(out, blocks...)
 }
 
+// adoptTurnFiles hands every file this turn produced to the turn's transcript
+// row. Without it a picture the soul sends belongs to no message, so replying
+// to it turns up no parent files and she answers about a picture she cannot
+// see — which is exactly what a reader reports as "she does not see it".
+//
+// Best-effort, and deliberately after delivery: the file is already on screen,
+// and nothing about this turn depends on the link. A failure is logged, not
+// swallowed, because the symptom it causes appears a turn later and looks like
+// a memory problem rather than a bookkeeping one.
+func (g *Gateway) adoptTurnFiles(ctx context.Context, us *UserState, messageID string, since time.Time, ephemeral bool) {
+	linker, ok := g.deps.AttachmentSink.(bs.AttachmentLinker)
+	if !ok || ephemeral || messageID == "" || us == nil {
+		return
+	}
+	parsed, err := uuid.Parse(messageID)
+	if err != nil {
+		return
+	}
+	linked, err := linker.LinkOrphansToMessage(ctx, us.UserID, us.SoulID, parsed, since)
+	if err != nil {
+		g.logger.Warn("attachment adopt: could not link this turn's files",
+			"chat_id", us.ChatID, "message_id", messageID, "error", err)
+		return
+	}
+	if linked > 0 {
+		g.logger.Info("attachment adopt: files linked to the answer",
+			"chat_id", us.ChatID, "message_id", messageID, "count", linked)
+	}
+}
+
+// prependReplyMediaBlocks puts the parent's file — as the transport
+// delivered it — in front of the turn. Used only when the transcript could
+// not supply the same file, so a reply never carries two copies of one
+// picture.
+func prependReplyMediaBlocks(msgs []pendingMsg, blocks []bs.ContentBlock) []bs.ContentBlock {
+	var parent []bs.ContentBlock
+	for _, m := range msgs {
+		parent = append(parent, m.replyMediaBlocks...)
+	}
+	if len(parent) == 0 {
+		return blocks
+	}
+	out := make([]bs.ContentBlock, 0, len(parent)+len(blocks))
+	out = append(out, parent...)
+	return append(out, blocks...)
+}
+
 func (g *Gateway) prependReplyAttachmentBlocks(
 	ctx context.Context,
 	us *UserState,
@@ -701,7 +748,8 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	go g.keepTypingViaSink(typingCtx, sink)
 	defer stopTyping()
 
-	prepareStarted := time.Now()
+	turnStarted := time.Now()
+	prepareStarted := turnStarted
 	var blocks []bs.ContentBlock
 	for _, m := range msgs {
 		blocks = append(blocks, m.images...)
@@ -800,7 +848,16 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// Quote first, then the parent's files in front of it: the turn reads
 	// files, quote, message — the same order a person sees in the chat.
 	blocks = prependReplyQuoteBlock(ctx, g.store, g.logger, sess.ID, replyToMessageID, msgs, blocks)
-	blocks = g.prependReplyAttachmentBlocks(ctx, us, replyToMessageID, blocks)
+	withParentFiles := g.prependReplyAttachmentBlocks(ctx, us, replyToMessageID, blocks)
+	if len(withParentFiles) == len(blocks) {
+		// The transcript had no file for this parent — either the parent
+		// pre-dates the id index, or its attachment was never linked to a
+		// row (everything the soul generates starts life unlinked). The
+		// copy the transport handed us is then the only one there is, and
+		// a picture is exactly the thing no text quote can stand in for.
+		withParentFiles = prependReplyMediaBlocks(msgs, blocks)
+	}
+	blocks = withParentFiles
 	content = providerContentFromBlocks(blocks)
 	timings.RecordSince("gateway.reply_attachments", replyAttachmentsStarted,
 		fmt.Sprintf("parent=%t blocks=%d", replyToMessageID != "", len(blocks)))
@@ -1327,7 +1384,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			return
 		}
 		reply = sanitizeLeakedToolCalls(reply)
-		reply = g.dispatchAttachmentMarkers(ctx, us, sink, reply)
+		reply, _ = g.dispatchAttachmentMarkers(ctx, us, sink, reply)
 		// Emit a follow-up meta frame with the assistant message_id so the
 		// SSE relayer can link any persisted tool_calls back to that turn.
 		// Only when both sink + store support it; safe to skip otherwise.
@@ -1339,6 +1396,10 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			if ms, ok := sink.(bs.MetaSink); ok {
 				_ = ms.SendMeta(ctx, sess.ID, msgID)
 			}
+			// Same adoption as the Telegram branch: a file the turn
+			// generated belongs to the answer that announced it, on
+			// whichever transport the reader is on.
+			g.adoptTurnFiles(ctx, us, msgID, turnStarted, ephemeral)
 		}
 		// Auto-extract URLs from the assistant's final reply and persist them
 		// as kind='link' rows pinned to the assistant message_id, so the
@@ -1397,7 +1458,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	}
 
 	reply = sanitizeLeakedToolCalls(reply)
-	reply = g.dispatchAttachmentMarkers(ctx, us, sink, reply)
+	reply, sentFileMessageIDs := g.dispatchAttachmentMarkers(ctx, us, sink, reply)
 	if reply == "" {
 		return
 	}
@@ -1438,12 +1499,18 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 			"chat_id", us.ChatID, "preview_message_id", preview.messageIDForDelivery(),
 			"reply_runes", len([]rune(reply)), "error", deliveryErr)
 	} else {
-		// Index the answer under the message it was delivered as, so a reply
-		// to it resolves back to this row. The transport is the only place
-		// that knows the id, and it only knows it now — which is why the row
-		// went unindexed and every reply to one of the soul's own answers
-		// reached the next turn with no parent and no quote.
-		g.rememberDeliveredMessageID(deliveryCtx, sess.ID, assistantRowID, preview.messageIDForDelivery(), ephemeral)
+		// Index every message this turn put on screen under its transcript
+		// row, so a reply to any of them resolves back here. The transport is
+		// the only place that knows these ids, and it only knows them now —
+		// which is why the row went unindexed and every reply to one of the
+		// soul's own answers reached the next turn with no parent and no
+		// quote. A file goes out as its OWN Telegram message, so the answer's
+		// id alone still left every picture she sends unaddressable.
+		delivered := append([]int{preview.messageIDForDelivery()}, sentFileMessageIDs...)
+		for _, tgID := range delivered {
+			g.rememberDeliveredMessageID(deliveryCtx, sess.ID, assistantRowID, tgID, ephemeral)
+		}
+		g.adoptTurnFiles(deliveryCtx, us, assistantRowID, turnStarted, ephemeral)
 	}
 	cancelDelivery()
 

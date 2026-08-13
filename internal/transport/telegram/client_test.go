@@ -186,7 +186,7 @@ func TestSendDocumentMarksUTF8TextForTelegramPreview(t *testing.T) {
 				return jsonResponse(http.StatusOK, `{"ok":true}`), nil
 			})
 
-			if err := c.SendDocument(context.Background(), "42", tt.filename, tt.mime, tt.data); err != nil {
+			if _, err := c.SendDocument(context.Background(), "42", tt.filename, tt.mime, tt.data); err != nil {
 				t.Fatalf("SendDocument: %v", err)
 			}
 		})
