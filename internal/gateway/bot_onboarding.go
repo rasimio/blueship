@@ -285,9 +285,16 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 	// deployment that has since decided not to ask those questions at
 	// all, would strand them somewhere nobody else can reach.
 	//
-	// Only reachable for users who are NOT onboarded: an edit run belongs
-	// to someone who is, and is handled above.
-	if step != "" && g.flow().Mode == bs.OnboardingModeInstant {
+	// Not reachable for someone who already has an assistant — their
+	// only reason to be holding a row is an edit in flight, which fell
+	// through to here on purpose and must survive.
+	//
+	// The comment used to say this was unreachable for them and the
+	// condition did not enforce it, so /persona asked for a name, threw
+	// the run away when the name arrived, and answered "you already have
+	// an assistant" — the one sentence guaranteed to be useless to
+	// somebody who is trying to rename theirs.
+	if !onboarded && step != "" && g.flow().Mode == bs.OnboardingModeInstant {
 		g.logger.Info("gateway: discarding wizard state left over from a previous flow",
 			"tg_user", tgUserID, "step", step)
 		if err := g.deps.BotOnboarding.ClearState(ctx, tgUserID, bi.id); err != nil {
