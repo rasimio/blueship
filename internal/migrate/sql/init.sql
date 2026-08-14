@@ -87,13 +87,17 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     title          TEXT NOT NULL,
     description    TEXT,
     handler        TEXT NOT NULL,
-    config         JSONB DEFAULT '{}',
+    config         JSONB NOT NULL DEFAULT '{}',
     tools          TEXT[],
     schedule       TEXT,
     deadline       TIMESTAMPTZ,
     status         TEXT NOT NULL DEFAULT 'pending'
                    CHECK (status IN ('pending','running','paused','done','failed')),
-    progress       JSONB DEFAULT '{}',
+    -- NOT NULL, not decoration: these are scanned into json.RawMessage,
+    -- which has no sql.Scanner, so a NULL fails the whole row scan and
+    -- takes every `SELECT * FROM agent_tasks` reader down with it.
+    -- See migration 022.
+    progress       JSONB NOT NULL DEFAULT '{}',
     result         TEXT,
     error_message  TEXT,
     iteration      INT NOT NULL DEFAULT 0,

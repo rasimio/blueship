@@ -126,3 +126,23 @@ func TestToolDescriptionsMigrationMatchesInitSchema(t *testing.T) {
 		}
 	}
 }
+
+// TestInitSchemaDeclaresAgentTaskStateNotNull covers the path migration 022
+// cannot: a database created from init.sql alone applies no ALTER, so a fresh
+// install would keep the nullable columns that killed the scheduler loop —
+// json.RawMessage has no sql.Scanner, and a single NULL progress fails every
+// `SELECT * FROM agent_tasks` scan, not just its own row.
+func TestInitSchemaDeclaresAgentTaskStateNotNull(t *testing.T) {
+	initSchema, err := migrations.ReadFile("sql/init.sql")
+	if err != nil {
+		t.Fatalf("read init schema: %v", err)
+	}
+	for _, required := range []string{
+		"progress       JSONB NOT NULL DEFAULT '{}'",
+		"config         JSONB NOT NULL DEFAULT '{}'",
+	} {
+		if !strings.Contains(string(initSchema), required) {
+			t.Fatalf("init.sql agent_tasks lacks %q — a fresh install would drift from migration 022", required)
+		}
+	}
+}

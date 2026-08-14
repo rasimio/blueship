@@ -861,6 +861,21 @@ func (s *AgentTaskStore) TrySetRunning(ctx context.Context, id uuid.UUID) (bool,
 	return false, err
 }
 
+// jsonbObject normalises a jsonb state payload written from a
+// json.RawMessage field. A nil slice reaches the driver as SQL NULL and an
+// empty one as an empty string (22P02), and neither is a state a reader can
+// scan: json.RawMessage has no Scanner, so a single NULL in progress kills
+// every `SELECT *` over agent_tasks — the whole scheduler loop, not just the
+// task that wrote it. A handler with nothing to checkpoint (any iteration
+// that returns IterationResult without Progress) is ordinary, so the empty
+// object belongs here rather than in every caller.
+func jsonbObject(raw json.RawMessage) json.RawMessage {
+	if strings.TrimSpace(string(raw)) == "" {
+		return json.RawMessage(`{}`)
+	}
+	return raw
+}
+
 // UpdateProgress saves intermediate state, increments iteration, and sets
 // the task back to pending. Always clears required_recheck_urls so a
 // stale recheck list doesn't bleed into the next iteration's Gate B'
@@ -871,7 +886,7 @@ func (s *AgentTaskStore) UpdateProgress(ctx context.Context, id uuid.UUID, progr
 		UPDATE agent_tasks
 		SET progress = $2, status = 'pending', iteration = iteration + 1,
 		    required_recheck_urls = '{}'
-		WHERE id = $1`, id, progress)
+		WHERE id = $1`, id, jsonbObject(progress))
 	return err
 }
 
@@ -891,7 +906,7 @@ func (s *AgentTaskStore) UpdateProgressWithRecheck(ctx context.Context, id uuid.
 		UPDATE agent_tasks
 		SET progress = $2, status = 'pending', iteration = iteration + 1,
 		    required_recheck_urls = $3
-		WHERE id = $1`, id, progress, pq.Array(recheckURLs))
+		WHERE id = $1`, id, jsonbObject(progress), pq.Array(recheckURLs))
 	return err
 }
 
@@ -1057,15 +1072,9 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 	if task.ID == uuid.Nil {
 		task.ID = uuid.New()
 	}
-	if task.Config == nil {
-		task.Config = json.RawMessage(`{}`)
-	}
-	if task.Progress == nil {
-		task.Progress = json.RawMessage(`{}`)
-	}
-	if task.Plan == nil {
-		task.Plan = json.RawMessage(`{}`)
-	}
+	task.Config = jsonbObject(task.Config)
+	task.Progress = jsonbObject(task.Progress)
+	task.Plan = jsonbObject(task.Plan)
 	if task.Status == "" {
 		task.Status = "pending"
 	}
@@ -1085,15 +1094,6 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 	}
 	if task.UseAgents == nil {
 		task.UseAgents = pq.StringArray{}
-	}
-	if len(task.Config) == 0 {
-		task.Config = json.RawMessage(`{}`)
-	}
-	if len(task.Plan) == 0 {
-		task.Plan = json.RawMessage(`{}`)
-	}
-	if len(task.Progress) == 0 {
-		task.Progress = json.RawMessage(`{}`)
 	}
 
 	_, err := s.db.ExecContext(ctx, `
@@ -1213,10 +1213,7 @@ func (s *AgentTaskStore) RecordIteration(ctx context.Context, rec IterationRecor
 	}
 	// Same for progress — empty bytes cast to jsonb raise 22P02
 	// (invalid_text_representation). Default to an empty object.
-	pg := strings.TrimSpace(string(rec.Progress))
-	if pg == "" {
-		rec.Progress = json.RawMessage("{}")
-	}
+	rec.Progress = jsonbObject(rec.Progress)
 	var accMet any
 	if rec.AcceptanceMet != nil {
 		accMet = *rec.AcceptanceMet
@@ -1325,7 +1322,7 @@ func (s *AgentTaskStore) PauseTask(ctx context.Context, id uuid.UUID, progress j
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks
 		SET progress = $2, status = 'paused', iteration = iteration + 1
-		WHERE id = $1`, id, progress)
+		WHERE id = $1`, id, jsonbObject(progress))
 	return err
 }
 

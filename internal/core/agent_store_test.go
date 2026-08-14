@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -63,5 +64,27 @@ func TestTaskNotificationOccurrenceKeyIsCanonicalAndUnambiguous(t *testing.T) {
 	}
 	if got := taskNotificationOccurrenceKey(first); !strings.HasPrefix(got, "refs:v1:") || len(got) > TaskDeliveryItemKeyMaxBytes {
 		t.Fatalf("occurrence key = %q, want bounded versioned key", got)
+	}
+}
+
+// TestJSONBObjectNeverYieldsNull guards the driver-level trap behind the
+// scheduler outage of 2026-08-14: a nil json.RawMessage reaches lib/pq as SQL
+// NULL and an empty one as an invalid jsonb literal, and the first of those
+// poisons the column for every later `SELECT *` reader.
+func TestJSONBObjectNeverYieldsNull(t *testing.T) {
+	for _, empty := range []json.RawMessage{nil, {}, json.RawMessage("   ")} {
+		if got := jsonbObject(empty); string(got) != "{}" {
+			t.Fatalf("jsonbObject(%q) = %q, want {}", empty, got)
+		}
+	}
+	// A real checkpoint passes through untouched — including the JSON null
+	// literal, which is a value the column can hold and read back.
+	for _, kept := range []json.RawMessage{
+		json.RawMessage(`{"phase":"iteration_2"}`),
+		json.RawMessage(`null`),
+	} {
+		if got := jsonbObject(kept); string(got) != string(kept) {
+			t.Fatalf("jsonbObject(%q) = %q, want it unchanged", kept, got)
+		}
 	}
 }
