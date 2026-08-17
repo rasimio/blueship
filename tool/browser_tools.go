@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -95,6 +97,10 @@ func RegisterBrowserTools(r *bs.ToolRegistry, deps *bs.Deps) error {
 			if err := json.Unmarshal(input, &p); err != nil {
 				return nil, err
 			}
+			if res := replayTaskFetch(ctx, deps, p.URL); res != nil {
+				persistBrowserFetchOutput(ctx, deps, input, res)
+				return res, nil
+			}
 			res, err := browser.Fetch(ctx, browser.FetchOptions{
 				URL:    p.URL,
 				WaitMS: p.WaitMS,
@@ -108,6 +114,78 @@ func RegisterBrowserTools(r *bs.ToolRegistry, deps *bs.Deps) error {
 	)
 
 	return nil
+}
+
+// taskFetchCacheTTL bounds how old a stored body may be and still answer a
+// repeat request. Long enough to cover a full research run (the one that
+// motivated this ran over an hour and had not finished), short enough that
+// a task spanning days re-reads its sources instead of citing yesterday's
+// copy of a page that has since changed.
+const taskFetchCacheTTL = 6 * time.Hour
+
+// replayTaskFetch returns the body this task already downloaded for url, or
+// nil to let the real fetch run. Cache lookups are best-effort: any failure
+// falls through to the network, because a slow fetch beats a wrong answer
+// and beats an error.
+//
+// Chat-mode calls have no task in context and are never cached — the cache
+// is scoped to one task's own reading, where "I read this page ten minutes
+// ago in service of this exact goal" is a safe thing to assume.
+func replayTaskFetch(ctx context.Context, deps *bs.Deps, url string) *browser.FetchResult {
+	if deps == nil || strings.TrimSpace(url) == "" {
+		return nil
+	}
+	taskID, ok := bs.TaskIDFromContext(ctx)
+	if !ok || taskID == uuid.Nil {
+		return nil
+	}
+	db, err := deps.DB("ship")
+	if err != nil {
+		return nil
+	}
+	store := bs.NewAgentTaskStore(db)
+
+	// Gate C asked for these to be read again; a replay would answer a
+	// question nobody asked.
+	if forced, err := store.TaskRequiresRefetch(ctx, taskID, url); err != nil || forced {
+		return nil
+	}
+	cached, err := store.LookupTaskFetch(ctx, taskID, url, taskFetchCacheTTL)
+	if err != nil || cached == nil || cached.Output == "" {
+		return nil
+	}
+	metaStr := func(key string) string {
+		s, _ := cached.Metadata[key].(string)
+		return s
+	}
+	pageCount := 0
+	if n, okNum := cached.Metadata["page_count"].(float64); okNum {
+		pageCount = int(n)
+	}
+	requested := metaStr("requested_url")
+	if requested == "" {
+		requested = url
+	}
+	finalURL := metaStr("final_url")
+	if finalURL == "" {
+		finalURL = url
+	}
+	if deps.Logger != nil {
+		deps.Logger.Info("browser_fetch served from task cache",
+			"task_id", taskID, "url", url,
+			"fetched_at_iteration", cached.Iteration,
+			"age_sec", int(time.Since(cached.FetchedAt).Seconds()),
+			"chars", len(cached.Output))
+	}
+	return &browser.FetchResult{
+		RequestedURL: requested,
+		URL:          finalURL,
+		Title:        metaStr("title"),
+		Text:         cached.Output,
+		PageCount:    pageCount,
+		SourceKind:   cached.OutputFormat,
+		FromCache:    true,
+	}
 }
 
 // persistBrowserFetchOutput adapts a browser.FetchResult into the
@@ -128,6 +206,9 @@ func persistBrowserFetchOutput(ctx context.Context, deps *bs.Deps, rawInput json
 		"final_url":     res.URL,
 		"title":         res.Title,
 		"page_count":    res.PageCount,
+		// Marks a row the cache produced. Kept out of the cache's own
+		// source query so a replay can never renew a document's age.
+		"from_cache": res.FromCache,
 	})
 	if err != nil {
 		meta = json.RawMessage(`{}`)

@@ -100,6 +100,11 @@ type FetchResult struct {
 	// or "pdf" (pdf decoder). Surfaces in tool output so cortex knows
 	// whether to expect a layout-preserved text dump or rendered prose.
 	SourceKind string `json:"source_kind,omitempty"`
+	// FromCache marks a body replayed from what this task already fetched
+	// rather than pulled over the network. Visible to the model on purpose:
+	// text it read an iteration ago, unchanged, is the signal that reading
+	// the same source again will not tell it anything new.
+	FromCache bool `json:"from_cache,omitempty"`
 }
 
 // SearchOptions controls a single Search call.

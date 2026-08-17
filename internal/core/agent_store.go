@@ -1163,6 +1163,108 @@ func (s *AgentTaskStore) RecordToolOutput(ctx context.Context, rec ToolOutputRec
 	return err
 }
 
+// CachedFetch is a document this task already downloaded, replayed instead
+// of being pulled over the network a second time.
+type CachedFetch struct {
+	Output       string
+	OutputFormat string
+	Metadata     map[string]any
+	Iteration    int // the iteration that really fetched it
+	FetchedAt    time.Time
+}
+
+// LookupTaskFetch returns the newest genuine fetch of url made by this task,
+// or nil when the task has not read that document (recently enough).
+//
+// The waste it exists to stop: an agent's context carries a progress summary
+// between iterations, never the bodies of the pages it read, so a task that
+// verifies its own claims re-downloads the same sources every single tick.
+// One production research task spent 70 minutes on 196 fetches of which 102
+// were repeats — one GitHub page pulled 13 times, a 36-page PDF 13 times —
+// and headless-Chrome renders at ~12s each made fetching 60-98% of an
+// iteration's wall clock.
+//
+// Rows written FROM the cache are never used as a source: replaying a replay
+// would launder the timestamp and keep a document alive past any age limit.
+// The row itself is still written by the caller, so the audit trail — and
+// Gate A's "was this URL ever opened" check — sees every call.
+func (s *AgentTaskStore) LookupTaskFetch(ctx context.Context, taskID uuid.UUID, url string, maxAge time.Duration) (*CachedFetch, error) {
+	if taskID == uuid.Nil || NormalizeDocURL(url) == "" || maxAge <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT output, output_format, COALESCE(metadata::text, '{}'), iteration, created_at,
+		       COALESCE(metadata->>'requested_url', ''),
+		       COALESCE(metadata->>'final_url', ''),
+		       COALESCE(tool_input->>'url', '')
+		FROM agent_task_tool_outputs
+		WHERE task_id = $1
+		  AND tool_name = 'browser_fetch'
+		  AND created_at > NOW() - make_interval(secs => $2)
+		  AND NOT COALESCE((metadata->>'from_cache')::boolean, false)
+		ORDER BY created_at DESC`, taskID, maxAge.Seconds())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			out, format, metaJSON      string
+			requested, final, inputURL string
+			iteration                  int
+			createdAt                  time.Time
+		)
+		if err := rows.Scan(&out, &format, &metaJSON, &iteration, &createdAt,
+			&requested, &final, &inputURL); err != nil {
+			return nil, err
+		}
+		// A row answers for every URL it was reached by: the citation form
+		// the model asked for, and the form the fetch resolved to.
+		if !SameDocURL(url, requested) && !SameDocURL(url, final) && !SameDocURL(url, inputURL) {
+			continue
+		}
+		meta := map[string]any{}
+		_ = json.Unmarshal([]byte(metaJSON), &meta)
+		return &CachedFetch{
+			Output:       out,
+			OutputFormat: format,
+			Metadata:     meta,
+			Iteration:    iteration,
+			FetchedAt:    createdAt,
+		}, nil
+	}
+	return nil, rows.Err()
+}
+
+// TaskRequiresRefetch reports whether url sits in the task's
+// required_recheck_urls — the list Gate C writes when it rejects a report
+// for ungrounded claims tied to a document.
+//
+// The fetch cache MUST honour this: Gate B' passes a resubmission only when
+// every recheck URL was fetched again inside the same iteration, so serving
+// one of them from cache would turn that gate into a formality that proves
+// nothing about whether the model reread the page.
+func (s *AgentTaskStore) TaskRequiresRefetch(ctx context.Context, taskID uuid.UUID, url string) (bool, error) {
+	if taskID == uuid.Nil {
+		return false, nil
+	}
+	var urls pq.StringArray
+	err := s.db.GetContext(ctx, &urls, `
+		SELECT COALESCE(required_recheck_urls, '{}') FROM agent_tasks WHERE id = $1`, taskID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, u := range urls {
+		if SameDocURL(u, url) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // IterationRecord is the payload the scheduler hands AgentTaskStore.RecordIteration
 // after every executeTask call. One row per iteration; never updated.
 //

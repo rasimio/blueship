@@ -312,18 +312,12 @@ func reportCitedURLs(report string) map[string]bool {
 	return cited
 }
 
-// normalizeDocURL strips what markdown and prose add around a link so a
-// citation matches the row it came from.
-func normalizeDocURL(raw string) string {
-	u := strings.TrimSpace(raw)
-	u = strings.TrimRight(u, ".,;:!?)»\"'`")
-	u = strings.TrimPrefix(strings.TrimPrefix(u, "https://"), "http://")
-	u = strings.TrimPrefix(u, "www.")
-	if i := strings.IndexByte(u, '#'); i >= 0 {
-		u = u[:i]
-	}
-	return strings.ToLower(strings.TrimSuffix(u, "/"))
-}
+// normalizeDocURL is core's normalizer, named locally for readability. The
+// fetch cache matches a repeat request against stored rows with the same
+// function on purpose: a document must not have one identity when the
+// auditor budgets context for it and another when the tool decides whether
+// it has already been read.
+func normalizeDocURL(raw string) string { return core.NormalizeDocURL(raw) }
 
 // buildGroundingUserMessage assembles the user prompt: report header, then
 // each selected document with a "=== Doc N ===" separator. Omitted
