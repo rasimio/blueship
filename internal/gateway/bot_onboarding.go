@@ -305,6 +305,31 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 		step, data = "", nil
 	}
 
+	// A command arriving mid-wizard is a command, not an answer.
+	//
+	// The persistent keyboard sits under the input field the whole time
+	// a wizard is running, so its keys are one tap away from every step
+	// that reads free text — and a step that reads free text will take
+	// anything. Tapping «Начать заново» while the wizard asked for a
+	// name produced an assistant called "/reset". The keys have to work
+	// wherever they are visible, or they are a trap rather than a menu.
+	//
+	// /skip and /start belong to the wizard itself and are handled
+	// above; anything else is somebody leaving.
+	if step != "" && !strings.HasPrefix(step, onbStepAwaitPrefix) {
+		if cmd, forUs := g.parseCommand(bi, text); forUs && cmd != "" && !isSkip && !isStart && !isPersona {
+			g.logger.Info("gateway: command interrupted the wizard",
+				"tg_user", tgUserID, "step", step, "command", cmd)
+			if err := g.deps.BotOnboarding.ClearState(ctx, tgUserID, bi.id); err != nil {
+				g.logger.Warn("gateway: clearing interrupted wizard state failed",
+					"tg_user", tgUserID, "error", err)
+			}
+			// Not consumed: the command still has to run, by whichever
+			// dispatcher owns it.
+			return false
+		}
+	}
+
 	// No state row yet.
 	if step == "" {
 		if g.flow().Mode == bs.OnboardingModeInstant {
@@ -800,6 +825,18 @@ func (g *Gateway) onboardingStart(ctx context.Context, bi *botInstance, tgChatID
 
 func (g *Gateway) onboardingHandleName(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, raw string, data map[string]any) bool {
 	name := strings.TrimSpace(raw)
+	// Nothing that starts with a slash is a name.
+	//
+	// A command arriving mid-wizard is normally intercepted before it
+	// gets here, but that check only recognises commands addressed to
+	// this bot — "/reset@SomeOtherBot" is not, and would otherwise be
+	// accepted as what to call the assistant. Refused with the same
+	// hint as any other unusable name rather than a rule of its own:
+	// the person is being asked for a name either way.
+	if strings.HasPrefix(name, "/") {
+		g.sendOnboardingText(ctx, bi, tgChatID, g.onb().NameTooShort)
+		return true
+	}
 	// Web parity: 2-30 rune validation. Cap above the limit silently
 	// so a too-long paste is rejected with the same hint as too-short.
 	minRunes, maxRunes := g.flow().NameBounds()
