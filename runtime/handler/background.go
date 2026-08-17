@@ -601,6 +601,15 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		msg += "\n\n" + preloadedBlock
 	}
 
+	// What earlier iterations already settled, and the protocol that keeps
+	// filling it. Scoped to the multi-iteration research flow: a one-shot
+	// heartbeat tick has no next iteration to hand anything to, and paying
+	// two prompt blocks for that would be pure overhead.
+	if instructionKey == "background-task" && inputMode == "prompt_key" && !hasTaskProgram {
+		msg += formatEvidenceLedger(progress.Evidence)
+		msg += evidenceProtocol
+	}
+
 	// Budget warning.
 	remaining := task.MaxIterations - (task.Iteration + 1)
 	if remaining <= 3 && remaining > 0 {
@@ -841,6 +850,18 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// 10. Save progress with session ID.
 	progress.Phase = fmt.Sprintf("iteration_%d", task.Iteration+1)
 	progress.Summary = truncate(reply, 500)
+	// The ledger is the one part of this iteration's findings that survives
+	// into the next turn intact; Summary is 500 chars of prose.
+	if proposed := parseEvidenceJSON(reply); len(proposed) > 0 {
+		before := len(progress.Evidence)
+		progress.Evidence = mergeEvidence(progress.Evidence, proposed, task.Iteration+1)
+		if deps.Logger != nil {
+			deps.Logger.InfoContext(ctx, "background: evidence ledger",
+				"task_id", task.ID, "iteration", task.Iteration+1,
+				"proposed", len(proposed), "added", len(progress.Evidence)-before,
+				"total", len(progress.Evidence))
+		}
+	}
 	if peerTaskID != "" {
 		progress.PeerTaskID = peerTaskID
 	}
@@ -862,6 +883,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		// Strip any plan machinery (PLAN_JSON / PLAN_PATCH_JSON) that slipped
 		// into a user-facing reply.
 		clean = stripPlanMarkers(clean)
+		clean = stripEvidenceMarkers(clean)
 		clean = stripBackgroundStatusTails(clean)
 		if len(programDeliveryRefs) > 0 {
 			clean, pendingDeliveries, deliveryAckValid = consumeTaskProgramDeliveryAck(clean, programDeliveryRefs)
@@ -975,7 +997,8 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		var notify string
 		if strings.Contains(reply, "[MILESTONE]") {
 			notify = fmt.Sprintf("%s (iteration %d/%d)\n\n%s",
-				task.Title, task.Iteration+1, task.MaxIterations, truncate(reply, 400))
+				task.Title, task.Iteration+1, task.MaxIterations,
+				truncate(stripEvidenceMarkers(reply), 400))
 		}
 		if len(programDeliveryRefs) > 0 {
 			notify = ""
@@ -1057,6 +1080,10 @@ type bgProgress struct {
 	// scheduler's terminal-status callback can route
 	// back to the originating agent.
 	Plan *RolePlan `json:"plan,omitempty"` // S2 role-assigned step plan (nil until the planner builds it)
+	// Evidence is what the task has already established, with sources —
+	// the working set an iteration would otherwise have to re-derive by
+	// re-reading everything. See evidence.go.
+	Evidence []EvidenceEntry `json:"evidence,omitempty"`
 }
 
 // acceptanceFeedbackFromProgress extracts the reject reason the acceptance
