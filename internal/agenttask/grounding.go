@@ -20,8 +20,15 @@ import (
 // document is a page header, and a header cannot support a claim — it can
 // only fail one. Documents that would land under the floor are dropped
 // from the audit set and declared, instead of being shown as stubs.
+//
+// groundingCitedDocCap is the ceiling a document may be lengthened to once
+// every cited document has had its first share and budget is still left. A
+// paper the report rests on is worth reading past its third: research PDFs
+// run 30-60K, and the training-details section a numerical claim cites lives
+// at the end of one.
 const (
 	groundingPerDocCap     = 25_000
+	groundingCitedDocCap   = 60_000
 	groundingTotalBudget   = 250_000
 	groundingMinWindow     = 4_000
 	groundingMaxOutputToks = 8192
@@ -113,7 +120,9 @@ func evaluateGrounding(ctx context.Context, deps core.AgentDeps, task core.Agent
 		"cited", docStats.Cited,
 		"included", docStats.Included,
 		"omitted", docStats.Omitted,
+		"truncated", docStats.Truncated,
 		"min_window", docStats.MinWindow,
+		"min_shown_pct", docStats.MinShownFraction,
 	)
 
 	resp, err := deps.LLM.Complete(ctx, core.CompletionRequest{
@@ -196,7 +205,13 @@ type groundingDocStats struct {
 	Cited     int // distinct documents the report links
 	Included  int // documents that made it into the prompt
 	Omitted   int // dropped because the budget ran out
+	Truncated int // included, but the auditor saw less than the whole text
 	MinWindow int // smallest window any included doc got
+	// MinShownFraction is the worst coverage of any included document, in
+	// percent. MinWindow alone cannot tell a 666-char page shown whole from
+	// a 60K paper cut to 666 — and only the second one produces a false
+	// "ungrounded".
+	MinShownFraction int
 }
 
 // selectGroundingDocs turns every browser_fetch row a task ever recorded
@@ -263,19 +278,58 @@ func selectGroundingDocs(report string, docs []ToolOutput) ([]groundingDoc, grou
 
 	budget := groundingTotalBudget
 	var out []groundingDoc
-	for _, g := range append(head, tail...) {
+	admit := func(g groundingDoc) bool {
 		if budget < groundingMinWindow {
 			stats.Omitted++
-			continue
+			return false
 		}
 		g.Window = min(min(len(g.Doc.Output), groundingPerDocCap), budget)
 		budget -= g.Window
+		out = append(out, g)
+		return true
+	}
+	for _, g := range head {
+		admit(g)
+	}
+	// Cited documents get a second helping before any uncited one is let in.
+	//
+	// The first verdict under this selection passed but still called one
+	// claim ungrounded: NaVILA's training hardware, quoted correctly from
+	// the paper — where the line sits at character 59228 of a 59331-char
+	// PDF, 34K past the 25K per-doc cap. The researcher had read the whole
+	// paper; the auditor was handed its first third. So when budget is left
+	// over, spend it lengthening the documents the report actually rests on,
+	// rather than admitting pages nothing cites.
+	for i := range out {
+		if !out[i].Cited || budget <= 0 {
+			continue
+		}
+		full := min(len(out[i].Doc.Output), groundingCitedDocCap)
+		if extra := min(full-out[i].Window, budget); extra > 0 {
+			out[i].Window += extra
+			budget -= extra
+		}
+	}
+	for _, g := range tail {
+		admit(g)
+	}
+
+	stats.Included = len(out)
+	for _, g := range out {
+		if g.Window < len(g.Doc.Output) {
+			stats.Truncated++
+		}
 		if stats.MinWindow == 0 || g.Window < stats.MinWindow {
 			stats.MinWindow = g.Window
 		}
-		out = append(out, g)
+		shown := 100
+		if n := len(g.Doc.Output); n > 0 {
+			shown = g.Window * 100 / n
+		}
+		if stats.MinShownFraction == 0 || shown < stats.MinShownFraction {
+			stats.MinShownFraction = shown
+		}
 	}
-	stats.Included = len(out)
 	return out, stats
 }
 

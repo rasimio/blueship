@@ -152,3 +152,53 @@ func TestNormalizeDocURLMatchesCitationsToRows(t *testing.T) {
 		t.Error("citation matching is too loose: unrelated URLs match")
 	}
 }
+
+// The first verdict under the new selection passed, and still called one
+// claim ungrounded: NaVILA's training hardware, quoted correctly from a
+// 59331-char paper where the line sits at character 59228 — 34K past the
+// per-doc cap. The researcher read the whole PDF; the auditor got its first
+// third. Leftover budget belongs to the documents the report rests on.
+func TestGroundingLengthensCitedDocsWithLeftoverBudget(t *testing.T) {
+	const tail = "trained on 16 nodes of 8 A100 GPUs each"
+	paper := fetchRow("https://arxiv.org/abs/2412.04453", "NaVILA", tail, 59_228, 59_331)
+	small := fetchRow("https://example.test/readme", "readme", "a short page", 10, 2_000)
+
+	msg, stats := buildGroundingUserMessage(
+		"See https://arxiv.org/abs/2412.04453 and https://example.test/readme.",
+		[]ToolOutput{paper, small})
+
+	if !strings.Contains(msg, tail) {
+		t.Errorf("a claim's source span at the end of a cited paper is still outside the audit window")
+	}
+	if stats.Truncated != 0 {
+		t.Errorf("stats.Truncated = %d, want 0 — both cited docs fit the budget whole", stats.Truncated)
+	}
+	if stats.MinShownFraction != 100 {
+		t.Errorf("smallest coverage = %d%%, want 100%%", stats.MinShownFraction)
+	}
+}
+
+// Coverage, not window size, is what predicts a false "ungrounded": a
+// 666-char page shown whole is fine, the same 666 chars of a 60K paper is
+// the failure. The stats have to tell those apart.
+func TestGroundingStatsDistinguishShortDocsFromStarvedOnes(t *testing.T) {
+	var docs []ToolOutput
+	for i := range 12 {
+		docs = append(docs, fetchRow(
+			fmt.Sprintf("https://example.test/big/%d", i), "big", "filler", 10, groundingCitedDocCap))
+	}
+	// Fetched last, so it is read first: uncited documents are admitted
+	// newest-first.
+	docs = append(docs, fetchRow("https://example.test/tiny", "tiny", "all of it", 10, 666))
+	_, stats := buildGroundingUserMessage("no citations", docs)
+
+	if stats.MinWindow != 666 {
+		t.Fatalf("MinWindow = %d, want the tiny document's full 666", stats.MinWindow)
+	}
+	if stats.MinShownFraction == 100 {
+		t.Error("every document reported as fully shown, though the budget cannot hold 12 x 60K")
+	}
+	if stats.Truncated == 0 {
+		t.Error("no document counted as truncated, though the budget forces it")
+	}
+}
