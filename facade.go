@@ -135,6 +135,8 @@ type (
 	BotMenu              = core.BotMenu
 	BotMenuNode          = core.BotMenuNode
 	BotMenuItem          = core.BotMenuItem
+	BotKeyboard          = core.BotKeyboard
+	BotKeyboardButton    = core.BotKeyboardButton
 
 	// In-chat payments: the host decides what a purchase means, the
 	// transport carries it.

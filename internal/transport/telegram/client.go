@@ -207,6 +207,54 @@ func (c *Client) SendMessageWithKeyboard(ctx context.Context, chatID int64, text
 	return c.postJSON(ctx, "sendMessage", payload)
 }
 
+// ReplyKeyboard is the keyboard shown under the input field, in
+// Telegram's own shape.
+type ReplyKeyboard struct {
+	Keyboard         [][]ReplyKeyboardButton `json:"keyboard"`
+	ResizeKeyboard   bool                    `json:"resize_keyboard"`
+	IsPersistent     bool                    `json:"is_persistent"`
+	InputPlaceholder string                  `json:"input_field_placeholder,omitempty"`
+}
+
+// ReplyKeyboardButton is one key. Tapping it sends Text as an ordinary
+// message — there is no callback on this kind of keyboard.
+type ReplyKeyboardButton struct {
+	Text string `json:"text"`
+}
+
+// SendMessageWithReplyKeyboard posts a message and installs the
+// keyboard under the input field.
+//
+// The keyboard belongs to the chat, not to this message: it stays until
+// another one replaces it or RemoveReplyKeyboard takes it away. So it
+// only needs sending when it changes — riding along on a message the
+// person was going to get anyway, rather than as an announcement of its
+// own.
+func (c *Client) SendMessageWithReplyKeyboard(ctx context.Context, chatID int64, text string, kb ReplyKeyboard) (*SendMessageResult, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("telegram bot not configured")
+	}
+	return c.postJSON(ctx, "sendMessage", map[string]any{
+		"chat_id":      chatID,
+		"text":         markdownToHTML(text),
+		"parse_mode":   "HTML",
+		"reply_markup": kb,
+	})
+}
+
+// RemoveReplyKeyboard posts a message and takes the keyboard away.
+func (c *Client) RemoveReplyKeyboard(ctx context.Context, chatID int64, text string) (*SendMessageResult, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("telegram bot not configured")
+	}
+	return c.postJSON(ctx, "sendMessage", map[string]any{
+		"chat_id":      chatID,
+		"text":         markdownToHTML(text),
+		"parse_mode":   "HTML",
+		"reply_markup": map[string]any{"remove_keyboard": true},
+	})
+}
+
 // EditMessageText edits an existing message's text and keyboard.
 //
 // Streaming reply paths (Codex / Gemini SSE) update one message in

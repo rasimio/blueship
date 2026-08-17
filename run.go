@@ -52,6 +52,13 @@ func (s *Ship) Run(ctx context.Context) error {
 	if err := s.cfg.Gateway.Menu.Valid(s.cfg.Gateway.Commands); err != nil {
 		return fmt.Errorf("gateway: %w", err)
 	}
+	// Same check for the keyboard under the input field, and it matters
+	// more there: a key that maps to nothing does not merely fail, it
+	// drops its own label into the conversation as though the person had
+	// said it.
+	if err := s.cfg.Gateway.Keyboard.Valid(s.cfg.Gateway.Commands); err != nil {
+		return fmt.Errorf("gateway: %w", err)
+	}
 
 	// 1. Initialize deps
 	deps, err := InitDeps(&s.cfg, s.logger)

@@ -874,7 +874,16 @@ func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, tgCh
 
 	// A menu command is answered by the transport: what it does is the
 	// menu, and there is no handler for the host to write.
+	//
+	// A persistent keyboard wins over the inline menu when both are
+	// configured. It is the one the host meant: it lives under the input
+	// field, so a person who asks for the menu is usually asking for it
+	// back after hiding it, not for a second one in the transcript.
 	if g.isMenuCommand(name) {
+		if g.keyboard().Configured() {
+			g.showKeyboard(ctx, bi, tgChatID, g.deps.Config.UI.KeyboardShown)
+			return true
+		}
 		return g.openMenu(ctx, bi, tgChatID)
 	}
 
@@ -1124,6 +1133,14 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	}
 	if strings.TrimSpace(text) == "" && msg.Document == nil && msg.Voice == nil && msg.Video == nil && msg.VideoNote == nil && len(msg.Photo) == 0 {
 		return
+	}
+	// A tap on the persistent keyboard arrives as its own label, because
+	// that kind of keyboard has no callbacks. Turned back into the
+	// command it stands for here, first, so every dispatcher below sees
+	// what the person meant rather than a stray word — and so the
+	// rewrite is one place rather than a check in each of them.
+	if cmd, tapped := g.rewriteKeyboardTap(text); tapped {
+		text = cmd
 	}
 	// Expand prompt shortcuts before anything looks at the text, so a
 	// shortcut is indistinguishable from the user having typed the

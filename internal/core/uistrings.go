@@ -34,6 +34,11 @@ type UIStrings struct {
 	ResetDone   string
 	ResetFailed string
 
+	// KeyboardShown carries the persistent keyboard back after /menu.
+	// Telegram cannot install a keyboard without a message, so this is
+	// the smallest honest thing to say while doing it.
+	KeyboardShown string
+
 	// StopButton labels the control a chat transport attaches to an answer
 	// while it is still being written.
 	StopButton string
@@ -66,6 +71,9 @@ func (u *UIStrings) applyDefaults() {
 	}
 	if u.ResetFailed == "" {
 		u.ResetFailed = "Reset failed."
+	}
+	if u.KeyboardShown == "" {
+		u.KeyboardShown = "Menu."
 	}
 	if u.StopButton == "" {
 		u.StopButton = "Stop"
@@ -298,6 +306,13 @@ type OnboardingFlow struct {
 
 	// SeedButtons are attached to Welcome. Empty is allowed — the chat
 	// then opens with prose alone and waits for the user to write.
+	// SeedPrompt introduces the seed buttons, and it is a separate
+	// message from Welcome on purpose: Telegram allows one reply_markup
+	// per message, so a welcome that installs the persistent keyboard
+	// cannot also carry inline buttons. The split falls on a natural
+	// seam — what this is, then what to do about it.
+	SeedPrompt string
+
 	SeedButtons []OnboardingSeedButton
 }
 

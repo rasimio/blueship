@@ -166,6 +166,12 @@ type GatewayConfig struct {
 	// the deployment has no menu, which is a legitimate state.
 	Menu BotMenu `yaml:"-" json:"-"`
 
+	// Keyboard is the persistent keyboard under the input field. Unlike
+	// Menu it does not scroll away with the conversation, and it is
+	// where a host puts the handful of things that must always be one
+	// tap away.
+	Keyboard BotKeyboard `yaml:"-" json:"-"`
+
 	// ApprovePayment answers the provider's confirmation step for an
 	// in-chat purchase. Nil means the transport declines every payment:
 	// a bot that cannot answer must not take money, and silently

@@ -565,8 +565,13 @@ func (g *Gateway) sendOnboardingWelcome(ctx context.Context, bi *botInstance, tg
 		return
 	}
 	flow := g.flow()
+
+	// The welcome installs the persistent keyboard, so it is under the
+	// input field from the first second rather than after the first
+	// command somebody has to know to send.
+	g.showKeyboard(ctx, bi, tgChatID, flow.Welcome)
+
 	if len(flow.SeedButtons) == 0 {
-		g.sendOnboardingText(ctx, bi, tgChatID, flow.Welcome)
 		return
 	}
 	rows := make([][]telegram.InlineKeyboardButton, 0, len(flow.SeedButtons))
@@ -576,7 +581,13 @@ func (g *Gateway) sendOnboardingWelcome(ctx context.Context, bi *botInstance, tg
 			CallbackData: fmt.Sprintf("%s%d", onbCallbackSeed, i),
 		}})
 	}
-	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, flow.Welcome, rows); err != nil {
+	prompt := flow.SeedPrompt
+	if prompt == "" {
+		// A keyboard with nothing above it reads as a glitch. Falling
+		// back to the buttons' own message rather than dropping them.
+		prompt = flow.Welcome
+	}
+	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, prompt, rows); err != nil {
 		g.logger.Warn("gateway: onboarding welcome send failed",
 			"tg_chat", tgChatID, "error", err)
 	}

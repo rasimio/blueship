@@ -160,3 +160,55 @@ func menuCommandUpdate(cq *telegram.CallbackQuery, name string) telegram.Update 
 		Text:      "/" + strings.TrimPrefix(name, "/"),
 	}}
 }
+
+// keyboard returns the host's persistent keyboard.
+func (g *Gateway) keyboard() bs.BotKeyboard { return g.deps.Config.Gateway.Keyboard }
+
+// showKeyboard posts text with the persistent keyboard installed under
+// the input field. Falls back to a plain message when the host
+// configured no keyboard, so callers need no branch of their own.
+func (g *Gateway) showKeyboard(ctx context.Context, bi *botInstance, tgChatID int64, text string) {
+	if bi == nil || bi.client == nil {
+		return
+	}
+	kb := g.keyboard()
+	if !kb.Configured() {
+		g.sendOnboardingText(ctx, bi, tgChatID, text)
+		return
+	}
+	rows := make([][]telegram.ReplyKeyboardButton, 0, len(kb.Rows))
+	for _, row := range kb.Rows {
+		keys := make([]telegram.ReplyKeyboardButton, 0, len(row))
+		for _, b := range row {
+			keys = append(keys, telegram.ReplyKeyboardButton{Text: b.Label})
+		}
+		rows = append(rows, keys)
+	}
+	if _, err := bi.client.SendMessageWithReplyKeyboard(ctx, tgChatID, text, telegram.ReplyKeyboard{
+		Keyboard:         rows,
+		ResizeKeyboard:   true,
+		IsPersistent:     true,
+		InputPlaceholder: kb.Placeholder,
+	}); err != nil {
+		g.logger.Warn("keyboard: could not show", "chat_id", tgChatID, "error", err)
+		g.sendOnboardingText(ctx, bi, tgChatID, text)
+	}
+}
+
+// rewriteKeyboardTap turns a tapped key back into the command it stands
+// for.
+//
+// A reply keyboard has no callbacks: Telegram sends the label as though
+// the person typed it. Without this the tap reaches the model as
+// conversation — "Подписка" answered with a sentence about subscriptions
+// instead of the checkout.
+//
+// Exact match only, and only against labels the host configured, so
+// somebody who genuinely types those words mid-sentence is unaffected.
+func (g *Gateway) rewriteKeyboardTap(text string) (string, bool) {
+	cmd, ok := g.keyboard().CommandFor(text)
+	if !ok {
+		return text, false
+	}
+	return "/" + cmd, true
+}
