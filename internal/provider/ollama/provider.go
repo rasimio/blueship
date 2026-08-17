@@ -36,11 +36,24 @@ const defaultBaseURL = "http://localhost:11434"
 type CompletionProvider struct {
 	baseURL    string
 	httpClient *http.Client
+	keepAlive  any
 }
 
 // NewCompletionProvider creates a provider targeting the given Ollama base URL.
 // Pass empty baseURL to use http://localhost:11434.
-func NewCompletionProvider(baseURL string, timeout time.Duration) *CompletionProvider {
+//
+// keepAlive declares how long the server should hold the model resident after a
+// request — a duration string ("30m"), seconds as a number, or -1 for
+// indefinitely. nil leaves Ollama's default of five minutes.
+//
+// It belongs on the caller because the caller is what knows its own traffic
+// shape, and a conversational agent is the pathological case for that default:
+// five quiet minutes between messages is ordinary, and the penalty is not a
+// slower request but a reload of the entire model — tens of gigabytes off disk
+// — charged to whoever speaks next, on top of the prompt. Setting it in the
+// server's environment instead would impose this process's answer on every
+// other client of that Ollama instance, which is not its call to make.
+func NewCompletionProvider(baseURL string, timeout time.Duration, keepAlive any) *CompletionProvider {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
@@ -48,6 +61,7 @@ func NewCompletionProvider(baseURL string, timeout time.Duration) *CompletionPro
 	return &CompletionProvider{
 		baseURL:    baseURL,
 		httpClient: &http.Client{Timeout: timeout},
+		keepAlive:  keepAlive,
 	}
 }
 
@@ -85,6 +99,9 @@ type chatRequest struct {
 	Stream   bool            `json:"stream"`
 	Think    bool            `json:"think"`
 	Options  map[string]any  `json:"options,omitempty"`
+	// KeepAlive holds the model resident after this request. Omitted when
+	// unset, which leaves Ollama's five-minute default in force.
+	KeepAlive any `json:"keep_alive,omitempty"`
 }
 
 type chatResponse struct {
@@ -301,12 +318,13 @@ func (p *CompletionProvider) buildRequest(req bs.CompletionRequest, stream bool)
 	think := req.ThinkingBudget != 0
 
 	return chatRequest{
-		Model:    req.Model,
-		Messages: buildMessages(req.System, req.Messages),
-		Tools:    buildTools(req.Tools),
-		Stream:   stream,
-		Think:    think,
-		Options:  options,
+		Model:     req.Model,
+		Messages:  buildMessages(req.System, req.Messages),
+		Tools:     buildTools(req.Tools),
+		Stream:    stream,
+		Think:     think,
+		Options:   options,
+		KeepAlive: p.keepAlive,
 	}
 }
 

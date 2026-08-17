@@ -58,8 +58,13 @@ func OpenAICompatible(baseURL, apiKey string, timeout time.Duration, extraParams
 // Ollama creates a CompletionProvider that speaks Ollama's native /api/chat
 // protocol (NDJSON streaming, options-nested generation params, think=false).
 // Pass empty baseURL for http://localhost:11434.
-func Ollama(baseURL string, timeout time.Duration) CompletionProvider {
-	return ollama.NewCompletionProvider(baseURL, timeout)
+//
+// keepAlive is how long the server should hold the model resident between
+// requests ("30m", seconds as a number, or -1 for indefinitely); nil keeps
+// Ollama's five-minute default. See NewCompletionProvider for why an
+// interactive caller should almost always set it.
+func Ollama(baseURL string, timeout time.Duration, keepAlive any) CompletionProvider {
+	return ollama.NewCompletionProvider(baseURL, timeout, keepAlive)
 }
 
 // Gemini creates a CompletionProvider using Gemini generateContent.
