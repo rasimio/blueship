@@ -2,6 +2,8 @@ package agent
 
 import (
 	"encoding/json"
+	"sort"
+	"strconv"
 	"unicode/utf8"
 
 	bs "github.com/rasimio/blueship/internal/core"
@@ -90,7 +92,88 @@ func truncateForPrompt(s string, maxChars int) string {
 	if maxChars <= 0 || utf8.RuneCountInString(s) <= maxChars {
 		return s
 	}
+	if compacted, ok := compactJSONObjectForPrompt(s, maxChars); ok {
+		return compacted
+	}
 	return truncateMiddle(s, maxChars)
+}
+
+// compactJSONObjectForPrompt keeps every scalar field of a JSON object and
+// spends what is left of the budget on the long ones, rather than cutting the
+// object by position.
+//
+// Position is the wrong axis for a JSON object. Go marshals maps with sorted
+// keys, so which fields survive a middle cut is decided by their names: for a
+// task status, `acceptance_criteria` and `description` are long and sort first,
+// so they fill the head, `status` and `title` sort last and hold the tail, and
+// `iteration` and `max_iterations` — the two integers the question was about —
+// sit in the middle and vanish. The reader is then handed a record that looks
+// complete and is missing exactly the field it was asked for, with nothing to
+// say so. A model in that position does not report a gap it cannot see; it
+// answers with a plausible number, which is indistinguishable from lying.
+//
+// Scalars are cheap — the ones that disappeared here cost 27 runes together —
+// so the budget is better spent guaranteeing all of them than on more prose.
+func compactJSONObjectForPrompt(s string, maxChars int) (string, bool) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(s), &obj); err != nil || len(obj) == 0 {
+		return "", false
+	}
+
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	const longFieldThreshold = 200
+	kept := make(map[string]json.RawMessage, len(obj))
+	var long []string
+	used := 0
+	for _, k := range keys {
+		v := obj[k]
+		n := utf8.RuneCountInString(string(v))
+		if n <= longFieldThreshold {
+			kept[k] = v
+			used += len(k) + n + 4 // "key":value,
+			continue
+		}
+		long = append(long, k)
+	}
+	// If the scalars alone do not fit there is nothing clever left to do, and a
+	// positional cut is at least honest about being one.
+	if used >= maxChars {
+		return "", false
+	}
+
+	budget := maxChars - used
+	share := budget
+	if len(long) > 0 {
+		share = budget / len(long)
+	}
+	for _, k := range long {
+		raw := string(obj[k])
+		if share <= 0 {
+			kept[k] = json.RawMessage(`"[опущено, ` + strconv.Itoa(utf8.RuneCountInString(raw)) + ` симв.]"`)
+			continue
+		}
+		clipped := truncateMiddle(raw, share)
+		enc, err := json.Marshal(clipped + " [обрезано]")
+		if err != nil {
+			return "", false
+		}
+		kept[k] = json.RawMessage(enc)
+	}
+
+	out, err := json.Marshal(kept)
+	if err != nil {
+		return "", false
+	}
+	// A projection that came out bigger than the positional cut helps nobody.
+	if utf8.RuneCountInString(string(out)) > maxChars*2 {
+		return "", false
+	}
+	return string(out), true
 }
 
 func truncateMiddle(s string, maxChars int) string {
