@@ -372,10 +372,29 @@ func buildMessages(system string, messages []bs.Message) []ollamaMessage {
 					text.WriteString("[image attached]")
 				}
 			}
+			// Tool results FIRST, then any text. Ollama's Gemma renderer only
+			// collects tool results while they immediately follow the assistant
+			// message that carried the tool calls — it stops at the first
+			// message of another role, and a role="tool" message it never
+			// reached is silently dropped rather than rendered on its own.
+			//
+			// We arrive here from a single blueship user message that carries
+			// both the tool_result blocks and the turn's text, so emitting the
+			// text first wedged it between the call and its result and deleted
+			// the result from the prompt. Measured against gemma4:26b-a4b with
+			// the real system prompt: with the result adjacent the model read it
+			// 6/6; with one text message wedged in, 0/6 — and rather than say it
+			// did not know, it answered with a confident invented number every
+			// time. A silently truncated prompt is indistinguishable from a
+			// lying model, which is what makes this worth a comment this long.
+			//
+			// Putting results first is also the truer order: they belong to the
+			// assistant turn that asked for them, and the person's new text is
+			// the next thing that happened.
+			out = append(out, toolMsgs...)
 			if text.Len() > 0 {
 				out = append(out, ollamaMessage{Role: "user", Content: text.String()})
 			}
-			out = append(out, toolMsgs...)
 		case "assistant":
 			msg := ollamaMessage{Role: "assistant"}
 			var text strings.Builder

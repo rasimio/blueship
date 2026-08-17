@@ -26,6 +26,43 @@ func TestBuildRequestSetsContextWindow(t *testing.T) {
 	}
 }
 
+// A tool result must reach the model adjacent to the call it answers.
+//
+// Ollama's Gemma renderer gathers tool results only while they immediately
+// follow the assistant message holding the tool calls; the first message of any
+// other role ends the run, and a tool message it never reached is dropped
+// instead of rendered. Emitting this turn's text before the results therefore
+// removed the results from the prompt entirely — and the model, handed no data,
+// answered with a confident invented number rather than admitting ignorance.
+func TestBuildMessagesKeepsToolResultsAdjacentToTheCall(t *testing.T) {
+	msgs := buildMessages("SYSTEM", []bs.Message{
+		{Role: "assistant", Content: []bs.ContentBlock{
+			{Type: "tool_use", Name: "agent_task_status", Input: json.RawMessage(`{"task_id":"d0bf9fce"}`)},
+		}},
+		{Role: "user", Content: []bs.ContentBlock{
+			{Type: "tool_result", Content: `{"iteration":7}`},
+			{Type: "text", Text: "[turn_context] … [/turn_context]"},
+		}},
+	})
+
+	var roles []string
+	for _, m := range msgs {
+		roles = append(roles, m.Role)
+	}
+	want := []string{"system", "assistant", "tool", "user"}
+	if len(roles) != len(want) {
+		t.Fatalf("roles = %v, want %v", roles, want)
+	}
+	for i := range want {
+		if roles[i] != want[i] {
+			t.Fatalf("roles = %v, want %v — a message between the call and its result hides the result", roles, want)
+		}
+	}
+	if !strings.Contains(msgs[2].Content, `"iteration":7`) {
+		t.Fatalf("tool message lost its payload: %q", msgs[2].Content)
+	}
+}
+
 // Ollama reports nanoseconds; the shared Usage carries milliseconds. Dropping
 // these was why a 40-second turn could only be explained by reading the
 // inference server's log on the host.
