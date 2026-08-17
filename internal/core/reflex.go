@@ -77,8 +77,14 @@ type RuleContext struct {
 	UserID        string   // user identifier
 	Intent        string   // from reflex (optional, for intent-scoped rules)
 	Strategy      string   // from AME: warm, neutral, empathetic, etc.
-	Energy        float64  // user energy level (0-1)
-	Stress        float64  // user stress level (0-1)
+	// Energy and Stress are the person's measured state, 0-1. Nil means NOT
+	// MEASURED, which is a different thing from zero and has to stay
+	// distinguishable: as plain float64 they defaulted to 0.0, so every
+	// "energy below 0.4" rule matched every turn of every conversation, and a
+	// directive to speak softer and shorter rode into questions about servers
+	// and deploys. Nothing populates these today, so nil is the honest value.
+	Energy        *float64
+	Stress        *float64
 	Hour          int      // current hour (0-23)
 	Message       string   // user message text
 	AllowedScopes []string // nil/empty means all rule scopes are eligible

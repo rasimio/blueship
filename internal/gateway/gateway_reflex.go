@@ -173,6 +173,53 @@ func (g *Gateway) hostReflexPreActions(ctx context.Context, us *UserState, msgTe
 	})
 }
 
+// runRulePreActions executes the tools a matched rule prescribes and puts their
+// output in front of the model as data.
+//
+// A rule carrying `pre_actions: browser_fetch <url>` is an operator saying "for
+// this kind of question the answer comes from here" — a decision already taken,
+// not a suggestion. Without this the URL still reaches the model, but only
+// inside the rule's DO: text, so whether the fetch happens depends on the model
+// choosing to make the call. On a frontier model that is nearly always; on the
+// local one it measured 21 turns in 30, and the failure is silent — the reply
+// reads the same, it is simply answered from nothing. Executing here turns that
+// probability into a fact.
+func (g *Gateway) runRulePreActions(ctx context.Context, us *UserState, timings *turnTimer, rule bs.ActiveRule, preTraces *[]agent.ToolTrace, researchBlock *strings.Builder) {
+	if len(rule.PreActions) == 0 || us == nil || us.Registry == nil {
+		return
+	}
+	actions := rule.PreActions
+	if len(actions) > maxPreActions {
+		actions = actions[:maxPreActions]
+	}
+	for _, pa := range actions {
+		paCtx, cancel := context.WithTimeout(ctx, preActionTimeout)
+		actionStarted := time.Now()
+		result, isError := us.Registry.Execute(paCtx, pa.Tool, pa.Input)
+		cancel()
+		timings.RecordSince("rule.pre_action", actionStarted, fmt.Sprintf("tool=%s error=%t", pa.Tool, isError))
+		inputStr := string(pa.Input)
+		if len(inputStr) > 200 {
+			inputStr = inputStr[:200] + "..."
+		}
+		outputStr := result
+		if len(outputStr) > 500 {
+			outputStr = outputStr[:500] + "..."
+		}
+		// The " [rule]" suffix separates an operator-prescribed call from one
+		// the model chose, so a /debug dump says which of the two happened.
+		*preTraces = append(*preTraces, agent.ToolTrace{Name: pa.Tool + " [rule]", Input: inputStr, Output: outputStr, Error: isError})
+		if isError {
+			g.logger.Warn("rule pre-action failed", "rule_id", rule.ID, "tool", pa.Tool, "error", result)
+			continue
+		}
+		if researchBlock.Len() == 0 {
+			researchBlock.WriteString("[research]\n")
+		}
+		fmt.Fprintf(researchBlock, "[%s result]\n%s\n\n", pa.Tool, truncateStr(result, 2000))
+	}
+}
+
 func (g *Gateway) runReflexPreActions(ctx context.Context, us *UserState, timings *turnTimer, actions []bs.ToolAction, preTraces *[]agent.ToolTrace, researchBlock, actionsBlock *strings.Builder) {
 	if len(actions) == 0 || us == nil || us.Registry == nil {
 		return
@@ -446,6 +493,7 @@ func (g *Gateway) runReflexPipeline(
 				order := len(matchedRules) + 1
 				appendActiveRuleGuidance(&guidance, order, r)
 				matchedRules = append(matchedRules, matchedRuleFromActive(r, "engine", order))
+				g.runRulePreActions(ctx, us, timings, r, &preTraces, &researchBlock)
 			}
 			engineRuleCount = len(activeRules)
 			if engineRuleCount > 0 {
@@ -465,10 +513,17 @@ func (g *Gateway) runReflexPipeline(
 			if len(disambiguationOptions) == 0 && !turnPolicy.SuppressToolDirectives {
 				actions := g.hostReflexPreActions(ctx, us, msgText, priorContext, "", rc)
 				g.runReflexPreActions(ctx, us, timings, actions, &preTraces, &researchBlock, &actionsBlock)
-				appendResearchGuidance(&guidance, &researchBlock)
-				appendActionsGuidance(&guidance, &actionsBlock)
 			}
 		}
+
+		// Outside the rc branch on purpose. Rule pre-actions run in the rules
+		// loop above, which is reached whether or not the host returned a
+		// context — so attaching their output only when rc != nil would run an
+		// operator's prescribed tool and then discard what it returned, which
+		// is worse than not running it: the cost is paid and the answer is
+		// still composed from nothing. Both appends no-op on an empty block.
+		appendResearchGuidance(&guidance, &researchBlock)
+		appendActionsGuidance(&guidance, &actionsBlock)
 
 		// The epistemic floor sits OUTSIDE the rc != nil branch on purpose.
 		// It used to live inside it, so the guidance was attached only when
@@ -752,29 +807,7 @@ func (g *Gateway) runReflexPipeline(
 			appendActiveRuleGuidance(&guidance, order, r)
 			matchedRulesInfo = append(matchedRulesInfo, matchedRuleFromActive(r, "engine", order))
 
-			// Execute rule-prescribed pre_actions.
-			for _, pa := range r.PreActions {
-				paCtx, cancel := context.WithTimeout(ctx, preActionTimeout)
-				actionStarted := time.Now()
-				result, isError := us.Registry.Execute(paCtx, pa.Tool, pa.Input)
-				cancel()
-				timings.RecordSince("rule.pre_action", actionStarted, fmt.Sprintf("tool=%s error=%t", pa.Tool, isError))
-				inputStr := string(pa.Input)
-				if len(inputStr) > 200 {
-					inputStr = inputStr[:200] + "..."
-				}
-				ruleOutputStr := result
-				if len(ruleOutputStr) > 500 {
-					ruleOutputStr = ruleOutputStr[:500] + "..."
-				}
-				preTraces = append(preTraces, agent.ToolTrace{Name: pa.Tool + " [rule]", Input: inputStr, Output: ruleOutputStr, Error: isError})
-				if !isError {
-					if researchBlock.Len() == 0 {
-						researchBlock.WriteString("[research]\n")
-					}
-					fmt.Fprintf(&researchBlock, "[%s result]\n%s\n\n", pa.Tool, truncateStr(result, 2000))
-				}
-			}
+			g.runRulePreActions(ctx, us, timings, r, &preTraces, &researchBlock)
 		}
 		engineRuleCount = len(activeEngineRules)
 		if engineRuleCount > 0 {
