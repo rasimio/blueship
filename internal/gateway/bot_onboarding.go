@@ -594,7 +594,7 @@ func (g *Gateway) sendOnboardingWelcome(ctx context.Context, bi *botInstance, tg
 	// The welcome installs the persistent keyboard, so it is under the
 	// input field from the first second rather than after the first
 	// command somebody has to know to send.
-	g.showKeyboard(ctx, bi, tgChatID, flow.Welcome)
+	g.showKeyboard(ctx, bi, tgChatID, "", flow.Welcome)
 
 	if len(flow.SeedButtons) == 0 {
 		return

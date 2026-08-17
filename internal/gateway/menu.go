@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 
+	"github.com/google/uuid"
+
 	bs "github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/transport/telegram"
 )
@@ -164,10 +166,33 @@ func menuCommandUpdate(cq *telegram.CallbackQuery, name string) telegram.Update 
 // keyboard returns the host's persistent keyboard.
 func (g *Gateway) keyboard() bs.BotKeyboard { return g.deps.Config.Gateway.Keyboard }
 
-// showKeyboard posts text with the persistent keyboard installed under
-// the input field. Falls back to a plain message when the host
-// configured no keyboard, so callers need no branch of their own.
-func (g *Gateway) showKeyboard(ctx context.Context, bi *botInstance, tgChatID int64, text string) {
+// keyboardScreen remembers which screen a chat is looking at, so «назад»
+// knows where back is.
+//
+// In memory only, and deliberately: the keyboard itself lives in
+// Telegram and survives a restart, so after one the daemon can meet a
+// tap from a screen it has no record of. That resolves to the root,
+// which is where somebody pressing back on an unknown screen wants to
+// end up anyway.
+func (g *Gateway) keyboardScreen(botID uuid.UUID, chatID string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.kbScreen[telegramUserCacheKey(botID, chatID)]
+}
+
+func (g *Gateway) setKeyboardScreen(botID uuid.UUID, chatID, node string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.kbScreen == nil {
+		g.kbScreen = map[string]string{}
+	}
+	g.kbScreen[telegramUserCacheKey(botID, chatID)] = node
+}
+
+// showKeyboard opens a screen: one message carrying that screen's keys.
+// An empty node means the root. Falls back to a plain message when the
+// host configured no keyboard, so callers need no branch of their own.
+func (g *Gateway) showKeyboard(ctx context.Context, bi *botInstance, tgChatID int64, node, text string) {
 	if bi == nil || bi.client == nil {
 		return
 	}
@@ -176,39 +201,83 @@ func (g *Gateway) showKeyboard(ctx context.Context, bi *botInstance, tgChatID in
 		g.sendOnboardingText(ctx, bi, tgChatID, text)
 		return
 	}
-	rows := make([][]telegram.ReplyKeyboardButton, 0, len(kb.Rows))
-	for _, row := range kb.Rows {
+	if node == "" {
+		node = kb.Root
+	}
+	screen, ok := kb.Nodes[node]
+	if !ok {
+		g.logger.Error("keyboard: no such screen", "node", node)
+		return
+	}
+	if text == "" {
+		text = screen.Text
+	}
+
+	rows := make([][]telegram.ReplyKeyboardButton, 0, len(screen.Rows)+1)
+	for _, row := range screen.Rows {
 		keys := make([]telegram.ReplyKeyboardButton, 0, len(row))
-		for _, b := range row {
-			keys = append(keys, telegram.ReplyKeyboardButton{Text: b.Label})
+		for _, k := range row {
+			keys = append(keys, telegram.ReplyKeyboardButton{Text: k.Label})
 		}
 		rows = append(rows, keys)
 	}
+	// Back where there is somewhere to go back to, close at the top.
+	// Both on the last row: they are navigation, not choices.
+	switch {
+	case screen.Parent != "":
+		rows = append(rows, []telegram.ReplyKeyboardButton{{Text: kb.BackLabel}})
+	default:
+		rows = append(rows, []telegram.ReplyKeyboardButton{{Text: kb.CloseLabel}})
+	}
+
 	if _, err := bi.client.SendMessageWithReplyKeyboard(ctx, tgChatID, text, telegram.ReplyKeyboard{
 		Keyboard:         rows,
 		ResizeKeyboard:   true,
 		IsPersistent:     true,
 		InputPlaceholder: kb.Placeholder,
 	}); err != nil {
-		g.logger.Warn("keyboard: could not show", "chat_id", tgChatID, "error", err)
+		g.logger.Warn("keyboard: could not show", "chat_id", tgChatID, "node", node, "error", err)
 		g.sendOnboardingText(ctx, bi, tgChatID, text)
+		return
 	}
+	g.setKeyboardScreen(bi.id, tgCanonical(tgChatID), node)
 }
 
-// rewriteKeyboardTap turns a tapped key back into the command it stands
-// for.
+// handleKeyboardTap resolves a tapped key.
 //
-// A reply keyboard has no callbacks: Telegram sends the label as though
-// the person typed it. Without this the tap reaches the model as
-// conversation — "Подписка" answered with a sentence about subscriptions
-// instead of the checkout.
-//
-// Exact match only, and only against labels the host configured, so
-// somebody who genuinely types those words mid-sentence is unaffected.
-func (g *Gateway) rewriteKeyboardTap(text string) (string, bool) {
-	cmd, ok := g.keyboard().CommandFor(text)
+// Returns the text the rest of the pipeline should see and whether the
+// tap was fully handled here. Navigation and closing are handled here —
+// they say nothing to the model. A key that runs a command or stands
+// for a sentence returns that text instead, so it reaches the same code
+// a typed message would.
+func (g *Gateway) handleKeyboardTap(ctx context.Context, bi *botInstance, tgChatID int64, text string) (string, bool) {
+	kb := g.keyboard()
+	action, ok := kb.Action(text)
 	if !ok {
 		return text, false
 	}
-	return "/" + cmd, true
+	chatID := tgCanonical(tgChatID)
+
+	if action.Close {
+		if _, err := bi.client.RemoveReplyKeyboard(ctx, tgChatID, kb.Closed); err != nil {
+			g.logger.Warn("keyboard: could not close", "chat_id", tgChatID, "error", err)
+		}
+		g.setKeyboardScreen(bi.id, chatID, "")
+		return "", true
+	}
+	if action.Text != "" {
+		return action.Text, false
+	}
+
+	// Navigation. An empty node is «назад», resolved against the screen
+	// this chat is on — its parent, or the root when we have no record.
+	node := action.Node
+	if node == "" {
+		node = kb.Root
+		if cur, seen := kb.Nodes[g.keyboardScreen(bi.id, chatID)]; seen && cur.Parent != "" {
+			node = cur.Parent
+		}
+	}
+	g.showKeyboard(ctx, bi, tgChatID, node, "")
+	return "", true
 }

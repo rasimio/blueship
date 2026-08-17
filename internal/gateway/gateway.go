@@ -85,6 +85,9 @@ type Gateway struct {
 	// private-chat ids are global user ids and repeat across every bot the
 	// same person talks to. Platform keys also include soul id.
 	users map[string]*UserState
+	// kbScreen: which keyboard screen a chat is on, so «назад» knows
+	// where back is. Guarded by mu, like users.
+	kbScreen map[string]string
 
 	// turnLocks serializes every chat turn for one (user, soul), regardless
 	// of transport. A web message, a Telegram message, and an autonomous
@@ -899,7 +902,7 @@ func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, tgCh
 	// back after hiding it, not for a second one in the transcript.
 	if g.isMenuCommand(name) {
 		if g.keyboard().Configured() {
-			g.showKeyboard(ctx, bi, tgChatID, g.deps.Config.UI.KeyboardShown)
+			g.showKeyboard(ctx, bi, tgChatID, "", g.deps.Config.UI.KeyboardShown)
 			return true
 		}
 		return g.openMenu(ctx, bi, tgChatID)
@@ -1157,8 +1160,10 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	// command it stands for here, first, so every dispatcher below sees
 	// what the person meant rather than a stray word — and so the
 	// rewrite is one place rather than a check in each of them.
-	if cmd, tapped := g.rewriteKeyboardTap(text); tapped {
-		text = cmd
+	if rewritten, handled := g.handleKeyboardTap(ctx, bi, msg.Chat.ID, text); handled {
+		return
+	} else {
+		text = rewritten
 	}
 	// Expand prompt shortcuts before anything looks at the text, so a
 	// shortcut is indistinguishable from the user having typed the

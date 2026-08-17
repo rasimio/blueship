@@ -21,9 +21,14 @@ func TestKeyboardTapReachesTheCommandItStandsFor(t *testing.T) {
 	f := newFakeBotAPI(t)
 	cfg := &bs.Config{}
 	cfg.Gateway.Commands = []bs.BotCommand{{Name: "plus", Description: "Подписка", Host: true}}
-	cfg.Gateway.Keyboard = bs.BotKeyboard{Rows: [][]bs.BotKeyboardButton{
-		{{Label: "Подписка", Command: "plus"}},
-	}}
+	cfg.Gateway.Keyboard = bs.BotKeyboard{
+		Root: "main", CloseLabel: "Закрыть", Closed: "Закрыла.",
+		Nodes: map[string]bs.BotKeyboardNode{
+			"main": {Text: "Меню", Rows: [][]bs.BotKeyboardKey{
+				{{Label: "Подписка", Command: "plus"}},
+			}},
+		},
+	}
 
 	var got bs.BotCommandRequest
 	g := &Gateway{
