@@ -26,6 +26,35 @@ func TestBuildRequestSetsContextWindow(t *testing.T) {
 	}
 }
 
+// Ollama reports nanoseconds; the shared Usage carries milliseconds. Dropping
+// these was why a 40-second turn could only be explained by reading the
+// inference server's log on the host.
+func TestUsageFromCarriesTheWallClockSplit(t *testing.T) {
+	got := usageFrom(chatResponse{
+		PromptEvalCount:    14423,
+		EvalCount:          142,
+		PromptEvalDuration: 11384360000, // 11384.36 ms
+		EvalDuration:       162220000,   //   162.22 ms
+		LoadDuration:       3050000000,  //  3050.00 ms
+	})
+	if got.InputTokens != 14423 || got.OutputTokens != 142 {
+		t.Fatalf("token counts lost: %+v", got)
+	}
+	if got.PrefillMillis != 11384 || got.DecodeMillis != 162 || got.LoadMillis != 3050 {
+		t.Fatalf("timings = prefill %d decode %d load %d, want 11384/162/3050",
+			got.PrefillMillis, got.DecodeMillis, got.LoadMillis)
+	}
+}
+
+// A provider that reports no timings must leave them zero rather than invent
+// them, so the log attribute is simply absent instead of claiming 0 ms.
+func TestUsageFromLeavesTimingsZeroWhenAbsent(t *testing.T) {
+	got := usageFrom(chatResponse{PromptEvalCount: 10, EvalCount: 2})
+	if got.PrefillMillis != 0 || got.DecodeMillis != 0 || got.LoadMillis != 0 {
+		t.Fatalf("timings invented from nothing: %+v", got)
+	}
+}
+
 // Unset must stay off the wire entirely rather than serialise as a zero, which
 // Ollama would read as "unload immediately" — the exact opposite of the
 // default it is supposed to preserve.

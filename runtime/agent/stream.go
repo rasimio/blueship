@@ -197,6 +197,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			"turn", turn + 1,
 		}
 		responseAttrs = append(responseAttrs, anatomy.responseAttrs(resp.Usage.InputTokens)...)
+		responseAttrs = append(responseAttrs, usageTimingAttrs(resp.Usage)...)
 		a.logger.Info("LLM response", responseAttrs...)
 		usedEmptyVisibleFallback := false
 		if !hasVisibleOutput(resp.Content) && (resp.StopReason == "end_turn" || resp.StopReason == "max_tokens") {

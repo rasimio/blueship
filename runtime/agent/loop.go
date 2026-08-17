@@ -663,6 +663,30 @@ func cloneMessages(messages []bs.Message) []bs.Message {
 	return cloned
 }
 
+// usageTimingAttrs turns a provider's wall-clock split into log attributes,
+// emitting nothing when the provider does not report one.
+//
+// Without it "the reply took 40 seconds" is where an investigation stops. The
+// split between evaluating the prompt and generating the answer is what decides
+// whether to look at the prefix cache or at the model, and reading it off the
+// inference server's own log needs shell access to the host — not how a running
+// deployment gets debugged. load_ms shows up only when the request found the
+// model unloaded, which is worth seeing precisely because it makes one turn
+// look pathological for a reason that has nothing to do with that turn.
+func usageTimingAttrs(u bs.Usage) []any {
+	var attrs []any
+	if u.PrefillMillis > 0 {
+		attrs = append(attrs, "prefill_ms", u.PrefillMillis)
+	}
+	if u.DecodeMillis > 0 {
+		attrs = append(attrs, "decode_ms", u.DecodeMillis)
+	}
+	if u.LoadMillis > 0 {
+		attrs = append(attrs, "load_ms", u.LoadMillis)
+	}
+	return attrs
+}
+
 func estimateTextTokens(s string) int {
 	return bs.EstimateTextTokens(s)
 }

@@ -113,7 +113,28 @@ type chatResponse struct {
 	PromptEvalCount int `json:"prompt_eval_count,omitempty"`
 	EvalCount       int `json:"eval_count,omitempty"`
 
+	// Nanoseconds, reported by Ollama on the final chunk. Kept because the
+	// token counts alone cannot distinguish a slow prompt from a slow model:
+	// prompt_eval_duration is what a prefix-cache hit collapses to near zero,
+	// and without it a regression there is invisible from our own logs.
+	PromptEvalDuration int64 `json:"prompt_eval_duration,omitempty"`
+	EvalDuration       int64 `json:"eval_duration,omitempty"`
+	LoadDuration       int64 `json:"load_duration,omitempty"`
+
 	Error string `json:"error,omitempty"`
+}
+
+// usageFrom maps Ollama's counters and nanosecond durations onto the shared
+// Usage. Durations are truncated to milliseconds: nanosecond precision from a
+// network round trip is noise, and milliseconds are what a log is read in.
+func usageFrom(r chatResponse) bs.Usage {
+	return bs.Usage{
+		InputTokens:   r.PromptEvalCount,
+		OutputTokens:  r.EvalCount,
+		PrefillMillis: r.PromptEvalDuration / 1e6,
+		DecodeMillis:  r.EvalDuration / 1e6,
+		LoadMillis:    r.LoadDuration / 1e6,
+	}
 }
 
 // Complete performs a non-streaming chat completion.
@@ -158,10 +179,7 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 	return &bs.CompletionResponse{
 		Content:    toContentBlocks(result.Message),
 		StopReason: mapStopReason(result.DoneReason, len(result.Message.ToolCalls) > 0),
-		Usage: bs.Usage{
-			InputTokens:  result.PromptEvalCount,
-			OutputTokens: result.EvalCount,
-		},
+		Usage:      usageFrom(result),
 	}, nil
 }
 
@@ -253,10 +271,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		}
 		if chunk.Done {
 			doneReason = chunk.DoneReason
-			usage = bs.Usage{
-				InputTokens:  chunk.PromptEvalCount,
-				OutputTokens: chunk.EvalCount,
-			}
+			usage = usageFrom(chunk)
 			break
 		}
 	}

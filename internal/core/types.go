@@ -84,6 +84,20 @@ type Usage struct {
 	OutputTokens        int `json:"output_tokens"`
 	CacheCreationTokens int `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadTokens     int `json:"cache_read_input_tokens,omitempty"`
+
+	// Split of the wall clock, when the provider reports it. Zero means it
+	// does not — most hosted APIs bill tokens and say nothing about time.
+	//
+	// Worth carrying because "the reply took 40 seconds" is not actionable
+	// while "38 s of it was prompt evaluation" is: the first invites guessing
+	// at the prompt, the second names the prefix cache. Without these, that
+	// question can only be answered by reading the inference server's own log
+	// on the host, which a running deployment has no access to.
+	PrefillMillis int64 `json:"prefill_ms,omitempty"`
+	DecodeMillis  int64 `json:"decode_ms,omitempty"`
+	// LoadMillis is time spent bringing the model into memory before any
+	// evaluation — nonzero only when the request found it unloaded.
+	LoadMillis int64 `json:"load_ms,omitempty"`
 }
 
 // ToolHandler processes a tool call and returns a result or error.
