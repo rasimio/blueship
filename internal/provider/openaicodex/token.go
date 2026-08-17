@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -14,8 +15,12 @@ import (
 	"time"
 )
 
+// tokenURL is a var, not a const, so the refresh path can be exercised
+// against a stub. It is the only untested branch that can destroy a
+// credential outright, which is a poor thing to leave unreachable.
+var tokenURL = "https://auth.openai.com/oauth/token"
+
 const (
-	tokenURL = "https://auth.openai.com/oauth/token"
 	clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 	jwtAuthClaim = "https://api.openai.com/auth"
@@ -74,8 +79,15 @@ func (s *TokenStore) Load() error {
 // Save writes tokens to disk atomically.
 func (s *TokenStore) Save() error {
 	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.saveLocked()
+}
+
+// saveLocked is Save for a caller that already holds the lock — the
+// refresh path does, and must persist the rotated token before it
+// returns rather than racing a restart to it.
+func (s *TokenStore) saveLocked() error {
 	data := s.data
-	s.mu.RUnlock()
 
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
@@ -203,12 +215,7 @@ func (s *TokenStore) refreshLocked() error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		var errBody struct {
-			Error       string `json:"error"`
-			Description string `json:"error_description"`
-		}
-		json.NewDecoder(resp.Body).Decode(&errBody)
-		return fmt.Errorf("refresh failed (%d): %s — %s", resp.StatusCode, errBody.Error, errBody.Description)
+		return fmt.Errorf("refresh failed (%d): %s", resp.StatusCode, decodeOAuthError(resp.Body))
 	}
 
 	var tokenResp struct {
@@ -234,18 +241,78 @@ func (s *TokenStore) refreshLocked() error {
 		AccountID: accountID,
 	}
 
-	// Persist in background — don't block the caller on disk I/O.
-	go func() {
-		if err := s.Save(); err != nil {
-			s.logger.Error("openai-codex: save refreshed tokens", "error", err)
-		}
-	}()
+	// Persisted before returning, not in the background.
+	//
+	// The refresh token rotates: this response consumed the old one and
+	// the endpoint will answer refresh_token_reused to anyone who tries
+	// it again. So the new one existing only in this process's memory is
+	// a credential one kill away from being lost — and losing it is not
+	// a retry, it is the end of the chain. Nothing recovers it but a
+	// human signing in again.
+	//
+	// This daemon is restarted by every deploy, with kickstart -k, at
+	// arbitrary moments. A background write lost that race at least
+	// once: both the seed token in the environment and the rotated one
+	// on disk came back refresh_token_reused, ten days apart from any
+	// successful refresh.
+	//
+	// The write is one small atomic rename. Blocking the caller on it is
+	// the cheaper half of the trade by a wide margin.
+	if err := s.saveLocked(); err != nil {
+		s.logger.Error("openai-codex: save refreshed tokens", "error", err)
+	}
 
 	s.logger.Info("openai-codex: token refreshed", "expires_in", tokenResp.ExpiresIn, "account_id", accountID)
 	return nil
 }
 
 // extractAccountID decodes the JWT access token and extracts chatgpt_account_id.
+// decodeOAuthError renders whatever the token endpoint said about a
+// failure, in either shape it uses.
+//
+// RFC 6749 says the body carries error and error_description as strings.
+// OpenAI's endpoint answers with an object: {"error":{"message":...,
+// "code":"refresh_token_reused"}}. Decoding it into a string field left
+// both empty, so every failure logged as "refresh failed (401):  — " —
+// and a burned refresh token, a revoked one and a dead endpoint all
+// looked exactly alike. The endpoint had been naming the cause the whole
+// time; we were throwing it away.
+func decodeOAuthError(body io.Reader) string {
+	var raw struct {
+		Error       json.RawMessage `json:"error"`
+		Description string          `json:"error_description"`
+	}
+	if err := json.NewDecoder(body).Decode(&raw); err != nil {
+		return "unreadable error body: " + err.Error()
+	}
+
+	// The object shape.
+	var obj struct {
+		Message string `json:"message"`
+		Code    string `json:"code"`
+		Type    string `json:"type"`
+	}
+	if err := json.Unmarshal(raw.Error, &obj); err == nil && (obj.Code != "" || obj.Message != "") {
+		if obj.Code == "" {
+			return obj.Message
+		}
+		return obj.Code + ": " + obj.Message
+	}
+
+	// The RFC shape.
+	var str string
+	if err := json.Unmarshal(raw.Error, &str); err == nil && str != "" {
+		if raw.Description == "" {
+			return str
+		}
+		return str + ": " + raw.Description
+	}
+	if raw.Description != "" {
+		return raw.Description
+	}
+	return "no cause given"
+}
+
 func extractAccountID(accessToken string) string {
 	parts := strings.Split(accessToken, ".")
 	if len(parts) != 3 {
