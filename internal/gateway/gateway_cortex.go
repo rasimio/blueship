@@ -283,18 +283,22 @@ func (g *Gateway) prepareCortexTurnWithRegistry(
 	}
 	loop := agent.NewLoop(g.provider, g.store, turnRegistry, g.deps.RoleTools, g.deps.Config, g.logger)
 	now := time.Now().In(g.deps.Config.Gateway.TimezoneFor(bs.WithSoulID(ctx, us.SoulID), g.tz))
+	// Resolved before the prompt, not after: the model row now also names the
+	// prompt profile the model is written against, so the two have to be read
+	// from the same refresh of model_config or a turn could compose one
+	// model's manual for another model.
+	var cortexRef bs.ModelRef
+	if g.deps.ModelStore != nil {
+		cortexRef = g.deps.ModelStore.Get("cortex")
+	}
+
 	promptStarted := time.Now()
-	soulPrompt, err := g.systemPromptForSoul(ctx, us.SoulID)
+	soulPrompt, err := g.systemPromptForSoul(ctx, us.SoulID, cortexRef.PromptProfile)
 	if timings != nil {
 		timings.RecordSince("gateway.system_prompt", promptStarted, "")
 	}
 	if err != nil {
 		return preparedCortexTurn{}, err
-	}
-
-	var cortexRef bs.ModelRef
-	if g.deps.ModelStore != nil {
-		cortexRef = g.deps.ModelStore.Get("cortex")
 	}
 	cortexMaxTokens := g.deps.Config.Limits.MaxOutputTokens
 	if cortexRef.MaxTokens > 0 {
@@ -366,6 +370,7 @@ func (g *Gateway) prepareCortexTurnWithRegistry(
 			InjectedContext:     injectedCtx,
 			ReflexGuidance:      reflexGuidance,
 			Role:                "cortex",
+			PromptProfile:       cortexRef.PromptProfile,
 			Temperature:         cortexRef.Temperature,
 			MessageBudget:       turnMessageBudget.Budget,
 			MessageBudgetSource: turnMessageBudget.Source,

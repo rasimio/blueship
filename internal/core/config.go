@@ -177,6 +177,16 @@ type ModelRef struct {
 	// Empty preserves legacy ThinkingBudget behaviour. See CompletionRequest.
 	ThinkingMode string
 	Effort       string
+	// PromptProfile names the prompt-stack bundle this role's model is
+	// written against — which prompt overlay it reads, and (host-side) how
+	// much toolbox and retrieved memory it is shown. Empty means the base
+	// stack, i.e. the behaviour that existed before profiles. It is a
+	// capability-class name ("lite"), never a model name: the point is that
+	// swapping the underlying model does not rename anything. The framework
+	// only carries and hands it to the host's ResolvePlatformPrompts hook —
+	// it never branches on the value, and no code anywhere should compare it
+	// against a model string.
+	PromptProfile string
 }
 
 // ForRouter returns "provider:name" for use with LLMRouter.

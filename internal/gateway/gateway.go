@@ -59,14 +59,19 @@ type Gateway struct {
 	platformGreetMu sync.Mutex
 	platformGreet   string
 
-	// Platform prompt layers for hosts with a multi-tenant persona model.
-	// Resolved once through the host's ResolvePlatformPrompts hook and
-	// cached by platformPrompts. Where those layers live — files, a table,
+	// Platform prompt layers for hosts with a multi-tenant persona model,
+	// keyed by prompt profile ("" is the base stack). Resolved through the
+	// host's ResolvePlatformPrompts hook and cached by platformPrompts for
+	// the process lifetime. Where those layers live — files, a table,
 	// anything else — is the host's business, not the framework's.
-	ppMu       sync.Mutex
-	ppLoaded   bool
-	ppPreamble string
-	ppAgents   string
+	//
+	// Keyed rather than latched because the profile comes from model_config,
+	// which is refreshed every turn: a single latch would serve whichever
+	// profile happened to be live at the first turn for the rest of the
+	// process, which is the silent-wrong-prompt failure this whole mechanism
+	// exists to prevent.
+	ppMu sync.Mutex
+	pp   map[string]platformLayers
 
 	// Reflex pipeline prompts. Loaded from <Config.Prompts>/<key>.md when
 	// the agent ships those files; missing files leave the default empty.
@@ -580,7 +585,10 @@ func (g *Gateway) loadSystemPrompts(dir string) error {
 // misconfiguration and surfaces as an error — there is no silent fallback
 // to file-loaded prompts. Framework consumers that do not use the vaelum
 // soul model (soulID is nil) get the file-loaded process prompt.
-func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID) (string, error) {
+// profile selects the prompt overlay the serving model is written against
+// (ModelRef.PromptProfile, "" for the base stack). It changes only the two
+// platform layers — the persona is per-soul, never per-model.
+func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID, profile string) (string, error) {
 	if soulID == uuid.Nil {
 		return g.systemPrompt, nil
 	}
@@ -613,7 +621,7 @@ func (g *Gateway) systemPromptForSoul(ctx context.Context, soulID uuid.UUID) (st
 	if strings.TrimSpace(persona) == "" {
 		return "", fmt.Errorf("system prompt for soul %s: persona is empty", soulID)
 	}
-	preamble, agents, err := g.platformPrompts(ctx)
+	preamble, agents, err := g.platformPrompts(ctx, profile)
 	if err != nil {
 		return "", err
 	}
@@ -661,32 +669,42 @@ type personaCacheEntry struct {
 	at     time.Time
 }
 
-// platformPrompts returns the platform preamble and agents layers,
-// resolved once through the host hook and cached for the process lifetime.
-// A failed load is not cached, so a transient error is retried next call.
+// platformLayers is one profile's resolved preamble+agents pair.
+type platformLayers struct {
+	preamble string
+	agents   string
+}
+
+// platformPrompts returns the platform preamble and agents layers for a
+// prompt profile ("" = base), resolved through the host hook and cached per
+// profile for the process lifetime. A failed load is not cached, so a
+// transient error is retried next call.
 //
 // Cached deliberately: the layers are composed into every turn, and a host
 // backing them with files would otherwise read from disk on each one. The
 // price is that an edit needs a restart to take effect.
-func (g *Gateway) platformPrompts(ctx context.Context) (preamble, agents string, err error) {
+func (g *Gateway) platformPrompts(ctx context.Context, profile string) (preamble, agents string, err error) {
 	g.ppMu.Lock()
 	defer g.ppMu.Unlock()
-	if g.ppLoaded {
-		return g.ppPreamble, g.ppAgents, nil
+	if l, ok := g.pp[profile]; ok {
+		return l.preamble, l.agents, nil
 	}
 	resolve := g.deps.Config.Gateway.ResolvePlatformPrompts
 	if resolve == nil {
 		return "", "", fmt.Errorf("platform prompts: no ResolvePlatformPrompts hook configured")
 	}
-	preamble, agents, err = resolve(ctx)
+	preamble, agents, err = resolve(ctx, profile)
 	if err != nil {
-		return "", "", fmt.Errorf("platform prompts: %w", err)
+		return "", "", fmt.Errorf("platform prompts (profile %q): %w", profile, err)
 	}
 	if strings.TrimSpace(preamble) == "" || strings.TrimSpace(agents) == "" {
-		return "", "", fmt.Errorf("platform prompts: preamble or agents layer is empty")
+		return "", "", fmt.Errorf("platform prompts (profile %q): preamble or agents layer is empty", profile)
 	}
-	g.ppPreamble, g.ppAgents, g.ppLoaded = preamble, agents, true
-	return g.ppPreamble, g.ppAgents, nil
+	if g.pp == nil {
+		g.pp = make(map[string]platformLayers)
+	}
+	g.pp[profile] = platformLayers{preamble: preamble, agents: agents}
+	return preamble, agents, nil
 }
 
 // reflexSystemPromptForSoul composes the interaction-tier system prompt:
@@ -694,7 +712,7 @@ func (g *Gateway) platformPrompts(ctx context.Context) (preamble, agents string,
 // full operational manual with all its tools) is deliberately excluded —
 // with it, the fast tier behaves like cortex and tries to call cortex's
 // tools (memory_search, browser_fetch, …) directly instead of escalating.
-func (g *Gateway) reflexSystemPromptForSoul(ctx context.Context, soulID uuid.UUID) (string, error) {
+func (g *Gateway) reflexSystemPromptForSoul(ctx context.Context, soulID uuid.UUID, profile string) (string, error) {
 	if soulID == uuid.Nil {
 		return g.systemPrompt, nil
 	}
@@ -706,7 +724,7 @@ func (g *Gateway) reflexSystemPromptForSoul(ctx context.Context, soulID uuid.UUI
 	if err != nil {
 		return "", fmt.Errorf("reflex system prompt: no persona for soul %s: %w", soulID, err)
 	}
-	preamble, _, err := g.platformPrompts(ctx)
+	preamble, _, err := g.platformPrompts(ctx, profile)
 	if err != nil {
 		return "", err
 	}

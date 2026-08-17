@@ -304,7 +304,7 @@ func TestPrepareCortexTurnAllowsNoTimingCollector(t *testing.T) {
 	cfg.Gateway.ResolveSoulPersona = func(context.Context, uuid.UUID) (string, error) {
 		return "soul prompt", nil
 	}
-	cfg.Gateway.ResolvePlatformPrompts = func(context.Context) (string, string, error) {
+	cfg.Gateway.ResolvePlatformPrompts = func(context.Context, string) (string, string, error) {
 		return "platform preamble", "agents layer", nil
 	}
 	g := &Gateway{

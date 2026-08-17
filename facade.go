@@ -188,6 +188,7 @@ var (
 	RecordAttachmentIntent           = core.RecordAttachmentIntent
 	EnsureAttachmentMarkers          = core.EnsureAttachmentMarkers
 	NewToolRegistry                  = core.NewToolRegistry
+	RoleToolKey                      = core.RoleToolKey
 	NewModelConfigStore              = core.NewModelConfigStore
 	NewFilePromptStore               = core.NewFilePromptStore
 	NewUserStore                     = core.NewUserStore

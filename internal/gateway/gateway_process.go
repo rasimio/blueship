@@ -1093,7 +1093,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		reflexLoop   *agent.Loop
 	)
 	if g.deps.Config.Gateway.InteractionTier && g.reflexInteractionPrompt != "" {
-		rp, rerr := g.reflexSystemPromptForSoul(ctx, us.SoulID)
+		var reflexProfile string
+		if g.deps.ModelStore != nil {
+			reflexProfile = g.deps.ModelStore.Get("reflex").PromptProfile
+		}
+		rp, rerr := g.reflexSystemPromptForSoul(ctx, us.SoulID, reflexProfile)
 		if rerr != nil {
 			if turnCanceled(ctx, rerr) {
 				g.logger.Info("reflex: turn canceled before the model was called",

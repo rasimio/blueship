@@ -34,3 +34,18 @@ func (s *RoleToolStore) Get(role string) []string {
 	}
 	return s.roles[role]
 }
+
+// RoleToolKey is the map key for a role under a prompt profile. A profiled
+// entry is optional: an empty profile, or a profile with no entry of its own,
+// resolves to the plain role key, so introducing profiles cannot change an
+// existing deployment.
+//
+// The separator is "@" rather than "/" or ":" because these keys are only ever
+// map lookups — never filesystem paths, never provider:model strings — and a
+// character that cannot be mistaken for either makes a misuse obvious on sight.
+func RoleToolKey(role, profile string) string {
+	if profile == "" {
+		return role
+	}
+	return role + "@" + profile
+}

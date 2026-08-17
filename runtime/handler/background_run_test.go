@@ -198,7 +198,7 @@ func TestBackgroundRunIncludePersonaLeadsPromptKeys(t *testing.T) {
 	deps.Config.Gateway.ResolveSoulPersona = func(context.Context, uuid.UUID) (string, error) {
 		return "SOUL-PERSONA-TEXT", nil
 	}
-	deps.Config.Gateway.ResolvePlatformPrompts = func(context.Context) (string, string, error) {
+	deps.Config.Gateway.ResolvePlatformPrompts = func(context.Context, string) (string, string, error) {
 		return "PLATFORM-PREAMBLE", "PLATFORM-AGENTS", nil
 	}
 

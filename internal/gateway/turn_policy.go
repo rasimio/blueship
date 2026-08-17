@@ -34,7 +34,11 @@ func (g *Gateway) resolveTurnPolicy(
 	// MCP tools are attached per soul at turn time rather than to the durable
 	// user registry. Resolve policy against that same concrete surface so a
 	// mixed self-history + connector request is not silently dropped.
-	base := g.baseToolNamesForRole(registry, "cortex")
+	var cortexProfile string
+	if g.deps.ModelStore != nil {
+		cortexProfile = g.deps.ModelStore.Get("cortex").PromptProfile
+	}
+	base := g.baseToolNamesForRole(registry, "cortex", cortexProfile)
 	available := availableToolNames(registry, base, allowed)
 	if g.deps.Config.TurnPolicyResolver == nil {
 		policy := bs.TurnPolicy{EffectiveMode: bs.TurnPolicyOff}

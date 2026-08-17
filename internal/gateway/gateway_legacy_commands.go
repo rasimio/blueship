@@ -41,8 +41,14 @@ func (g *Gateway) sendDebugDump(ctx context.Context, us *UserState, injectedCtx,
 	b.WriteString(fmt.Sprintf("Time: %s\n", time.Now().In(g.tz).Format("2006-01-02 15:04:05")))
 	b.WriteString(fmt.Sprintf("User: %s\n\n", us.ChatID))
 
-	b.WriteString("=== SYSTEM PROMPT (full plain text) ===\n")
-	if sp, err := g.systemPromptForSoul(ctx, us.SoulID); err != nil {
+	// The dump must resolve the prompt through the SAME profile the live cortex
+	// turn uses, or this debug view reports a prompt that was never sent.
+	var dumpProfile string
+	if g.deps.ModelStore != nil {
+		dumpProfile = g.deps.ModelStore.Get("cortex").PromptProfile
+	}
+	b.WriteString(fmt.Sprintf("=== SYSTEM PROMPT (full plain text, profile=%q) ===\n", dumpProfile))
+	if sp, err := g.systemPromptForSoul(ctx, us.SoulID, dumpProfile); err != nil {
 		b.WriteString("(error resolving system prompt: " + err.Error() + ")")
 	} else if sp != "" {
 		b.WriteString(sp)

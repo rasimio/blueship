@@ -19,7 +19,7 @@ func (g *Gateway) applyToolSelector(
 	if cfg == nil || registry == nil || g.deps == nil || g.deps.Config == nil || g.deps.Config.ToolSelector == nil {
 		return
 	}
-	baseTools := g.baseToolNamesForRole(registry, cfg.Role)
+	baseTools := g.baseToolNamesForRole(registry, cfg.Role, cfg.PromptProfile)
 	selection := g.deps.Config.ToolSelector(ctx, bs.ToolSelectionRequest{
 		Role:            cfg.Role,
 		UserText:        userText,
@@ -47,9 +47,17 @@ func (g *Gateway) applyToolSelector(
 	)
 }
 
-func (g *Gateway) baseToolNamesForRole(registry *bs.ToolRegistry, role string) []string {
+// baseToolNamesForRole resolves the role's allowlist under a prompt profile,
+// falling back to the unqualified role. It must agree with Loop.selectTools:
+// if policy computed availability from the full toolbox while the loop sent a
+// narrowed one, a turn could be authorised against tools the model never saw.
+func (g *Gateway) baseToolNamesForRole(registry *bs.ToolRegistry, role, profile string) []string {
 	if role != "" && g.deps != nil && g.deps.RoleTools != nil {
-		if names := g.deps.RoleTools.Get(role); names != nil {
+		names := g.deps.RoleTools.Get(bs.RoleToolKey(role, profile))
+		if names == nil {
+			names = g.deps.RoleTools.Get(role)
+		}
+		if names != nil {
 			return cloneStrings(names)
 		}
 	}

@@ -52,6 +52,16 @@ type RunConfig struct {
 	// Role selects which tools to send (via RoleToolStore).
 	// Empty or unknown role = all tools (backwards-compatible for cloud models).
 	Role string
+	// PromptProfile optionally narrows the role's tool allowlist: the store is
+	// asked for "<role>@<profile>" first and falls back to "<role>".
+	//
+	// This exists because the tool schema block is the largest per-turn cost a
+	// small model pays — tens of thousands of tokens of JSON it must read
+	// before the first output token — so "which model is serving this role" and
+	// "how big a toolbox it is shown" cannot be independent settings. The
+	// framework does not interpret the value; a host that registers no
+	// qualified key keeps exactly the previous behaviour.
+	PromptProfile string
 	// ReflexGuidance is a high-priority directive from the reflex phase.
 	// Contains expanded matched rules formatted as instructions.
 	// Prepended to InjectedContext inside the turn context so it gets maximum
@@ -285,7 +295,11 @@ func (a *Loop) selectTools(cfg RunConfig) []bs.ToolDefinition {
 	if cfg.ToolOverride != nil {
 		tools = a.registry.DefinitionsForNames(cfg.ToolOverride)
 	} else if cfg.Role != "" && a.roleTools != nil {
-		if names := a.roleTools.Get(cfg.Role); names != nil {
+		names := a.roleTools.Get(bs.RoleToolKey(cfg.Role, cfg.PromptProfile))
+		if names == nil {
+			names = a.roleTools.Get(cfg.Role)
+		}
+		if names != nil {
 			tools = a.registry.DefinitionsForNames(names)
 		} else {
 			tools = a.registry.Definitions()

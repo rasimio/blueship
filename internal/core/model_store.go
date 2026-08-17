@@ -40,7 +40,8 @@ func (s *ModelConfigStore) Load(ctx context.Context) error {
 	rows, err := s.db.QueryxContext(ctx, `
 		SELECT role, provider, model_name, max_tokens, thinking_budget,
 		       COALESCE(context_window, 0), COALESCE(message_budget, 0),
-		       COALESCE(temperature, 0), COALESCE(thinking_mode, ''), COALESCE(effort, '')
+		       COALESCE(temperature, 0), COALESCE(thinking_mode, ''), COALESCE(effort, ''),
+		       COALESCE(prompt_profile, '')
 		FROM model_config`)
 	if err != nil {
 		return err
@@ -49,10 +50,10 @@ func (s *ModelConfigStore) Load(ctx context.Context) error {
 
 	m := make(map[string]ModelRef)
 	for rows.Next() {
-		var role, provider, modelName, thinkingMode, effort string
+		var role, provider, modelName, thinkingMode, effort, promptProfile string
 		var maxTokens, thinkingBudget, contextWindow, messageBudget int
 		var temperature float64
-		if err := rows.Scan(&role, &provider, &modelName, &maxTokens, &thinkingBudget, &contextWindow, &messageBudget, &temperature, &thinkingMode, &effort); err != nil {
+		if err := rows.Scan(&role, &provider, &modelName, &maxTokens, &thinkingBudget, &contextWindow, &messageBudget, &temperature, &thinkingMode, &effort, &promptProfile); err != nil {
 			return err
 		}
 		m[role] = ModelRef{
@@ -65,6 +66,7 @@ func (s *ModelConfigStore) Load(ctx context.Context) error {
 			Temperature:    temperature,
 			ThinkingMode:   thinkingMode,
 			Effort:         effort,
+			PromptProfile:  promptProfile,
 		}
 	}
 

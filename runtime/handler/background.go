@@ -296,7 +296,15 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// instead. Framework consumers without the soul model keep the file path.
 	if defaultPersonaStack && task.SoulID != uuid.Nil &&
 		gw.ResolveSoulPersona != nil && gw.ResolvePlatformPrompts != nil {
-		preamble, agents, err := gw.ResolvePlatformPrompts(ctx)
+		// Same role resolution the model selection below uses, so the manual a
+		// task reads is the one its own model row names. Resolved here rather
+		// than passing "" so a profiled background model cannot silently run
+		// against the base prompts.
+		var profile string
+		if deps.ModelStore != nil {
+			profile = deps.ModelStore.Get(modelRoleForTask(task)).PromptProfile
+		}
+		preamble, agents, err := gw.ResolvePlatformPrompts(ctx, profile)
 		if err != nil {
 			return core.IterationResult{}, fmt.Errorf("background: platform prompts: %w", err)
 		}
@@ -445,18 +453,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// recurring monitor can run on gemma even if the deploy upgrades the
 	// recurring default, and a giant research task can pin a specific
 	// frontier model without the operator editing config tables.
-	modelRole := "background"
-	if task.Strategy == core.StrategyRecurring {
-		modelRole = "recurring"
-	}
-	if task.Config != nil {
-		var roleCfg struct {
-			ModelRole string `json:"model_role"`
-		}
-		if json.Unmarshal(task.Config, &roleCfg) == nil && roleCfg.ModelRole != "" {
-			modelRole = roleCfg.ModelRole
-		}
-	}
+	modelRole := modelRoleForTask(task)
 
 	routerModel := deps.Config.Models.Primary.ForRouter()
 	displayModel := deps.Config.Models.Primary.Name
@@ -1148,6 +1145,34 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "..."
+}
+
+// modelRoleForTask picks the model_config role a task runs under. Recurring
+// work (heartbeat ticks, monitors) gets the cheap-and-fast pole; everything
+// else gets the deeper one. agent_task is a universal primitive so the split
+// is strategy-driven, not handler-specific. A task's `model_role` config
+// overrides either default, so a tiny recurring monitor can stay on a small
+// model even if the recurring default is upgraded, and a research task can
+// pin a frontier model without an operator editing config tables.
+//
+// Extracted so the prompt stack and the model selection resolve the SAME role
+// from the same task: the role's row now carries the prompt profile too, and
+// composing one role's manual while calling another role's model is exactly
+// the mismatch profiles exist to prevent.
+func modelRoleForTask(task core.AgentTask) string {
+	role := "background"
+	if task.Strategy == core.StrategyRecurring {
+		role = "recurring"
+	}
+	if task.Config != nil {
+		var roleCfg struct {
+			ModelRole string `json:"model_role"`
+		}
+		if json.Unmarshal(task.Config, &roleCfg) == nil && roleCfg.ModelRole != "" {
+			role = roleCfg.ModelRole
+		}
+	}
+	return role
 }
 
 // resolvePromptOrBody resolves a task's instruction. When keyOrBody names a

@@ -159,8 +159,19 @@ type GatewayConfig struct {
 
 	// ResolvePlatformPrompts returns the platform-wide preamble + agents prompt
 	// layers composed around each soul's persona. Host-supplied; the gateway
-	// caches the result for the process lifetime. Required when souls are used.
-	ResolvePlatformPrompts func(ctx context.Context) (preamble, agents string, err error) `yaml:"-" json:"-"`
+	// caches the result per profile for the process lifetime. Required when
+	// souls are used.
+	//
+	// profile is ModelRef.PromptProfile for the role being served, or "" for
+	// the base stack. It names a capability class, not a model. The framework
+	// passes it through without interpreting it: resolving "" and resolving an
+	// unknown name are both the host's decision, and the host is expected to
+	// treat an unknown name as "" rather than fail the turn — losing a prompt
+	// overlay should degrade toward more instruction, not toward none.
+	//
+	// The value reaches filepath.Join in a file-backed host and originates in a
+	// database column, so a host MUST validate it before using it as a path.
+	ResolvePlatformPrompts func(ctx context.Context, profile string) (preamble, agents string, err error) `yaml:"-" json:"-"`
 
 	// Menu is the inline menu a menu-marked command opens. Empty means
 	// the deployment has no menu, which is a legitimate state.
