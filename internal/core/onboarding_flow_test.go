@@ -118,9 +118,13 @@ func TestOnboardingFlowInstantRejectsUnusableConfig(t *testing.T) {
 		"trait off palette": {func(f *OnboardingFlow) { f.DefaultTags = []string{"t1", "t9"} }, "not in the palette"},
 		"no welcome":        {func(f *OnboardingFlow) { f.Welcome = "" }, "welcome message"},
 		"blank welcome":     {func(f *OnboardingFlow) { f.Welcome = " \n " }, "welcome message"},
-		"seed no label":     {func(f *OnboardingFlow) { f.SeedButtons[0].Label = "" }, "label and a text"},
-		"seed no text":      {func(f *OnboardingFlow) { f.SeedButtons[0].Text = "" }, "label and a text"},
-		"seed blank text":   {func(f *OnboardingFlow) { f.SeedButtons[0].Text = "  " }, "label and a text"},
+		"seed no label":     {func(f *OnboardingFlow) { f.SeedButtons[0].Label = "" }, "no label"},
+		"seed no text":      {func(f *OnboardingFlow) { f.SeedButtons[0].Text = "" }, "does nothing"},
+		"seed blank text":   {func(f *OnboardingFlow) { f.SeedButtons[0].Text = "  " }, "does nothing"},
+		// A button either speaks as the person or answers them. Both at
+		// once is two buttons' worth of intent on one, and only one of
+		// them can happen.
+		"seed speaks and answers": {func(f *OnboardingFlow) { f.SeedButtons[0].Reply = "смотри" }, "speaks as the person and answers"},
 	} {
 		flow := validInstantFlow()
 		test.mutate(&flow)

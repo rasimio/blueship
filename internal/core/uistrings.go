@@ -221,7 +221,22 @@ const (
 // memory and tools rather than a canned script.
 type OnboardingSeedButton struct {
 	Label string
-	Text  string
+	// Text is dispatched as though the person had typed it: the reply is
+	// a real turn, and the text lands in the history as their own first
+	// message. Write it in their voice, not as an instruction.
+	Text string
+	// Reply, when set, makes the button show this text instead of saying
+	// anything on the person's behalf. Nothing is dispatched, no turn
+	// runs, and nothing reaches memory.
+	//
+	// It exists for the one thing a seeded turn cannot do: demonstrate.
+	// A button that shows what the product produces — a record, a
+	// receipt, a card — has to be able to show it without first making
+	// it true of the person looking, or the demonstration is a write
+	// they did not ask for.
+	//
+	// Set Reply or Text, not both.
+	Reply string
 }
 
 // OnboardingFlow parameterises chat-native signup.
@@ -433,8 +448,14 @@ func (f OnboardingFlow) Validate() error {
 		return errors.New("onboarding flow: instant mode needs a welcome message")
 	}
 	for i, b := range f.SeedButtons {
-		if strings.TrimSpace(b.Label) == "" || strings.TrimSpace(b.Text) == "" {
-			return fmt.Errorf("onboarding flow: seed button %d needs both a label and a text", i)
+		if strings.TrimSpace(b.Label) == "" {
+			return fmt.Errorf("onboarding flow: seed button %d has no label", i)
+		}
+		switch {
+		case strings.TrimSpace(b.Text) == "" && strings.TrimSpace(b.Reply) == "":
+			return fmt.Errorf("onboarding flow: seed button %d does nothing — set Text to say something as the person, or Reply to show them something", i)
+		case strings.TrimSpace(b.Text) != "" && strings.TrimSpace(b.Reply) != "":
+			return fmt.Errorf("onboarding flow: seed button %d both speaks as the person and answers them", i)
 		}
 	}
 	return nil

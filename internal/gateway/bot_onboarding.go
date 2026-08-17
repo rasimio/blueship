@@ -615,12 +615,25 @@ func (g *Gateway) onboardingHandleSeed(ctx context.Context, bi *botInstance, cq 
 
 	g.stripKeyboard(ctx, bi, cq)
 
-	g.handleUpdate(ctx, bi, telegram.Update{Message: &telegram.Message{
-		MessageID: cq.Message.MessageID,
-		From:      cq.From,
-		Chat:      telegram.Chat{ID: cq.Message.Chat.ID, Type: "private"},
-		Text:      flow.SeedButtons[idx].Text,
-	}})
+	// A switch rather than an early return, because the two halves must
+	// be exclusive by construction: a demonstration button that also
+	// dispatched would write an invented commitment into the memory of
+	// somebody who has said nothing yet, and that is not a mistake a
+	// test can see — the turn it starts dies far downstream, quietly.
+	switch reply := strings.TrimSpace(flow.SeedButtons[idx].Reply); {
+	case reply != "":
+		// Show the thing, say nothing on their behalf. The point of the
+		// button is that a person can see what the product produces
+		// before any of it is true of them.
+		g.sendOnboardingText(ctx, bi, cq.Message.Chat.ID, reply)
+	default:
+		g.handleUpdate(ctx, bi, telegram.Update{Message: &telegram.Message{
+			MessageID: cq.Message.MessageID,
+			From:      cq.From,
+			Chat:      telegram.Chat{ID: cq.Message.Chat.ID, Type: "private"},
+			Text:      flow.SeedButtons[idx].Text,
+		}})
+	}
 	return true
 }
 
