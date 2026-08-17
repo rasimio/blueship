@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/rasimio/blueship/internal/core"
@@ -14,9 +15,15 @@ import (
 // auditor would flag as ungrounded even though the source does support
 // the claim. groundingTotalBudget caps total context to fit safely in
 // Sonnet 200K with the 8K output budget and prompt overhead.
+//
+// groundingMinWindow is the floor under one document's slice. Below it a
+// document is a page header, and a header cannot support a claim — it can
+// only fail one. Documents that would land under the floor are dropped
+// from the audit set and declared, instead of being shown as stubs.
 const (
 	groundingPerDocCap     = 25_000
 	groundingTotalBudget   = 250_000
+	groundingMinWindow     = 4_000
 	groundingMaxOutputToks = 8192
 )
 
@@ -78,9 +85,9 @@ Aim for 8-20 claim entries on a typical research report. Each entry should be on
 // can calibrate the threshold from real data before flipping to
 // enforcement.
 //
-// The auditor sees up to groundingPerDocCap chars per doc and
-// groundingTotalBudget chars total; older docs get trimmed first
-// when the cap binds.
+// The auditor sees deduplicated documents, cited ones first, up to
+// groundingPerDocCap chars each and groundingTotalBudget total; see
+// selectGroundingDocs for why that ordering is load-bearing.
 func evaluateGrounding(ctx context.Context, deps core.AgentDeps, task core.AgentTask, report string, docs []ToolOutput) GroundingVerdict {
 	if len(docs) == 0 {
 		return GroundingVerdict{
@@ -98,7 +105,16 @@ func evaluateGrounding(ctx context.Context, deps core.AgentDeps, task core.Agent
 		return GroundingVerdict{Met: true, Reason: "no model configured for grounding eval"}
 	}
 
-	user := buildGroundingUserMessage(report, docs)
+	user, docStats := buildGroundingUserMessage(report, docs)
+	deps.Logger.Info("grounding evaluator: audit set",
+		"task_id", task.ID,
+		"rows", docStats.Rows,
+		"unique", docStats.Unique,
+		"cited", docStats.Cited,
+		"included", docStats.Included,
+		"omitted", docStats.Omitted,
+		"min_window", docStats.MinWindow,
+	)
 
 	resp, err := deps.LLM.Complete(ctx, core.CompletionRequest{
 		Model:        model,
@@ -160,41 +176,181 @@ func pickGroundingModel(deps core.AgentDeps) core.ModelRef {
 	return core.ModelRef{}
 }
 
-// buildGroundingUserMessage assembles the user prompt: report header,
-// then every fetched doc with a "=== Doc N ===" separator. Docs are
-// truncated to groundingPerDocCap chars; if their combined size exceeds
-// groundingTotalBudget we trim from the END of the list (oldest fetches
-// first) — recency is a decent priority signal when we can't fit
-// everything. A future Phase C TODO swaps this for per-claim retrieval.
-func buildGroundingUserMessage(report string, docs []ToolOutput) string {
-	// Per-doc cap. Adaptive: if the natural total at 25K/doc would
-	// exceed budget, shrink the per-doc cap so all docs fit.
-	perDoc := groundingPerDocCap
-	if got := perDoc * len(docs); got > groundingTotalBudget && len(docs) > 0 {
-		perDoc = groundingTotalBudget / len(docs)
+// groundingDoc is one document as the auditor will see it: the row, the
+// URL it is addressed by, whether the report cites it, and how much of its
+// text fits in the budget.
+type groundingDoc struct {
+	Doc    ToolOutput
+	URL    string
+	Title  string
+	Cited  bool
+	Window int // chars of Doc.Output the auditor gets
+}
+
+// groundingDocStats is what the selection did, for the log. A gate that
+// silently shows the auditor less than it thinks reads as "the researcher
+// made it up" on every claim it cannot see.
+type groundingDocStats struct {
+	Rows      int // tool-output rows loaded for the task
+	Unique    int // distinct documents after dedup
+	Cited     int // distinct documents the report links
+	Included  int // documents that made it into the prompt
+	Omitted   int // dropped because the budget ran out
+	MinWindow int // smallest window any included doc got
+}
+
+// selectGroundingDocs turns every browser_fetch row a task ever recorded
+// into the document set the auditor actually reads.
+//
+// Two rules, both learned from one production failure. A research task
+// re-fetches the same handful of URLs every iteration, so by iteration 18
+// the store held 205 rows for 96 distinct URLs — and the old code divided
+// the budget across ROWS, handing the auditor 250000/205 = 1219 chars of
+// each: the GitHub page header, twenty times over. It then reported six
+// "hard ungrounded" claims whose supporting sentences sat at offsets 1398
+// through 9579 of documents it had been given, failed the task on that
+// basis, and burned the whole iteration budget doing it — each rejected
+// iteration re-fetched the same pages, added rows, and shrank the window
+// further.
+//
+// So: dedup by URL keeping the newest fetch, and spend the budget on the
+// documents the report actually cites before anything else. A document
+// that cannot get at least groundingMinWindow chars is dropped rather than
+// included as a stub — a header-sized excerpt cannot support a claim, it
+// can only fail one.
+func selectGroundingDocs(report string, docs []ToolOutput) ([]groundingDoc, groundingDocStats) {
+	stats := groundingDocStats{Rows: len(docs)}
+
+	// Dedup by URL, newest wins: a later fetch of the same page is the
+	// content the researcher worked from.
+	latest := map[string]ToolOutput{}
+	var order []string
+	for _, d := range docs {
+		url := groundingDocURL(d)
+		if _, seen := latest[url]; !seen {
+			order = append(order, url)
+		}
+		latest[url] = d
 	}
+	stats.Unique = len(order)
+
+	cited := reportCitedURLs(report)
+	var head, tail []groundingDoc // cited first, then the rest
+	for _, url := range order {
+		d := latest[url]
+		g := groundingDoc{
+			Doc:   d,
+			URL:   url,
+			Title: metaString(d.Metadata, "title"),
+			// Match on both URLs the row carries: arxiv rewrites
+			// /abs/ to /pdf/ at fetch time, and reports cite the
+			// page they asked for.
+			Cited: cited[normalizeDocURL(url)] ||
+				cited[normalizeDocURL(metaString(d.Metadata, "requested_url"))],
+		}
+		if g.Cited {
+			stats.Cited++
+			head = append(head, g)
+		} else {
+			tail = append(tail, g)
+		}
+	}
+	// Uncited documents are read newest-first: the last thing fetched is
+	// the likeliest source of the newest paragraph.
+	for i, j := 0, len(tail)-1; i < j; i, j = i+1, j-1 {
+		tail[i], tail[j] = tail[j], tail[i]
+	}
+
+	budget := groundingTotalBudget
+	var out []groundingDoc
+	for _, g := range append(head, tail...) {
+		if budget < groundingMinWindow {
+			stats.Omitted++
+			continue
+		}
+		g.Window = min(min(len(g.Doc.Output), groundingPerDocCap), budget)
+		budget -= g.Window
+		if stats.MinWindow == 0 || g.Window < stats.MinWindow {
+			stats.MinWindow = g.Window
+		}
+		out = append(out, g)
+	}
+	stats.Included = len(out)
+	return out, stats
+}
+
+// groundingDocURL addresses a fetched row. final_url is the document that
+// was actually read (post-redirect, post abstract→PDF rewrite); the
+// requested URL and the raw tool input are fallbacks for rows written
+// before the metadata existed.
+func groundingDocURL(d ToolOutput) string {
+	if u := metaString(d.Metadata, "final_url"); u != "" {
+		return u
+	}
+	if u := metaString(d.Metadata, "requested_url"); u != "" {
+		return u
+	}
+	var in struct {
+		URL string `json:"url"`
+	}
+	if json.Unmarshal(d.ToolInput, &in) == nil && in.URL != "" {
+		return in.URL
+	}
+	return ""
+}
+
+var reportURLRE = regexp.MustCompile(`https?://[^\s)\]}<>"'` + "`" + `]+`)
+
+// reportCitedURLs is the set of documents the report points at, normalized.
+func reportCitedURLs(report string) map[string]bool {
+	cited := map[string]bool{}
+	for _, raw := range reportURLRE.FindAllString(report, -1) {
+		if u := normalizeDocURL(raw); u != "" {
+			cited[u] = true
+		}
+	}
+	return cited
+}
+
+// normalizeDocURL strips what markdown and prose add around a link so a
+// citation matches the row it came from.
+func normalizeDocURL(raw string) string {
+	u := strings.TrimSpace(raw)
+	u = strings.TrimRight(u, ".,;:!?)»\"'`")
+	u = strings.TrimPrefix(strings.TrimPrefix(u, "https://"), "http://")
+	u = strings.TrimPrefix(u, "www.")
+	if i := strings.IndexByte(u, '#'); i >= 0 {
+		u = u[:i]
+	}
+	return strings.ToLower(strings.TrimSuffix(u, "/"))
+}
+
+// buildGroundingUserMessage assembles the user prompt: report header, then
+// each selected document with a "=== Doc N ===" separator. Omitted
+// documents are declared rather than silently dropped — an auditor that
+// believes it has everything reports absence as fabrication.
+func buildGroundingUserMessage(report string, docs []ToolOutput) (string, groundingDocStats) {
+	selected, stats := selectGroundingDocs(report, docs)
 
 	var b strings.Builder
 	b.WriteString("[report]\n")
 	b.WriteString(report)
 	b.WriteString("\n\n[fetched_documents]\n")
-	for i, d := range docs {
-		title := metaString(d.Metadata, "title")
-		// Prefer final_url (post-rewrite, real PDF) but fall back to
-		// requested_url if the tool didn't record both.
-		docURL := metaString(d.Metadata, "final_url")
-		if docURL == "" {
-			docURL = metaString(d.Metadata, "requested_url")
-		}
-		fmt.Fprintf(&b, "=== Doc %d: %s (%s)\n", i+1, title, docURL)
-		text := d.Output
-		if len(text) > perDoc {
-			text = text[:perDoc] + "\n[...truncated...]"
+	for i, g := range selected {
+		fmt.Fprintf(&b, "=== Doc %d: %s (%s)\n", i+1, g.Title, g.URL)
+		text := g.Doc.Output
+		if len(text) > g.Window {
+			text = text[:g.Window] + "\n[...truncated...]"
 		}
 		b.WriteString(text)
 		b.WriteString("\n\n")
 	}
-	return b.String()
+	if stats.Omitted > 0 {
+		fmt.Fprintf(&b, "[note] %d further fetched documents did not fit the audit budget and are not shown. "+
+			"Judge only against what is above; do not treat a missing document as evidence of fabrication.\n",
+			stats.Omitted)
+	}
+	return b.String(), stats
 }
 
 // parseGroundingResponse strips any leading/trailing prose, finds the
