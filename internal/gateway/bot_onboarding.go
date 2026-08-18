@@ -239,7 +239,13 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 			if name == "" {
 				name = g.onb().FallbackName
 			}
-			g.sendOnboardingText(ctx, bi, tgChatID, fmt.Sprintf(g.onb().BackFmt, name))
+			// With the keyboard, not without it. The keyboard ships
+			// with the welcome, so everyone who signed up before it
+			// existed — and anyone who has since hidden it — had no way
+			// to get it back except /menu, which is the one thing a
+			// person cannot know about if the menu is where commands
+			// are advertised.
+			g.showKeyboard(ctx, bi, tgChatID, "", fmt.Sprintf(g.onb().BackFmt, name))
 			return true
 		}
 		if isPersona {

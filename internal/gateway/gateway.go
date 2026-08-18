@@ -919,7 +919,11 @@ func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, tgCh
 
 // isMenuCommand reports whether this command opens the inline menu.
 func (g *Gateway) isMenuCommand(name string) bool {
-	if len(g.menu().Nodes) == 0 {
+	// Either kind counts. Gating on the inline menu alone meant that a
+	// host with only a persistent keyboard had a /menu command Telegram
+	// advertised and nothing answered — it fell through to the model,
+	// which said, reasonably enough, that no such command existed.
+	if len(g.menu().Nodes) == 0 && !g.keyboard().Configured() {
 		return false
 	}
 	for _, c := range g.deps.Config.Gateway.Commands {
