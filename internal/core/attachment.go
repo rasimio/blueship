@@ -154,6 +154,11 @@ type AttachmentLinker interface {
 // vocabulary the rest of the system uses. Data is the raw bytes;
 // callers shouldn't expect the slice to be retained beyond the call.
 type AttachmentParams struct {
+	// ID, when set, is the durable id the row must be created with. The
+	// gateway pre-mints it so the same id can be written into the user
+	// message's envelope as an `[attached: UUID]` marker before the
+	// attachment row exists. Zero lets the sink mint its own.
+	ID        uuid.UUID
 	UserID    uuid.UUID
 	SoulID    uuid.UUID
 	SessionID uuid.UUID

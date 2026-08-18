@@ -402,6 +402,11 @@ func joinedVisibleText(msgs []pendingMsg) *string {
 // with. Kind is the same lane vocabulary as elsewhere ("image" /
 // "pdf" / "text").
 type rawAttachment struct {
+	// id is minted by the gateway right before the user row is appended,
+	// so the durable envelope can carry an `[attached: UUID]` marker for
+	// the exact row the sink will create. Zero until then, and zero
+	// forever when no sink persists inbound files.
+	id   uuid.UUID
 	name string
 	mime string
 	kind string

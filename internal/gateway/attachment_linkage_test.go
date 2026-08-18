@@ -82,8 +82,16 @@ func TestInboundAttachmentLinksToExactCanonicalUserMessage(t *testing.T) {
 		strings.Contains(string(storedJSON), "expanded parent") {
 		t.Fatalf("provider-only attachment payload leaked into durable content: %s", storedJSON)
 	}
-	if string(storedJSON) != `"`+visible+`"` {
-		t.Fatalf("durable user content = %s, want canonical visible text", storedJSON)
+	enriched := *runCfg.VisibleUserText
+	if !strings.HasPrefix(enriched, visible) || !strings.Contains(enriched, "[attached: ") {
+		t.Fatalf("canonical envelope = %q, want visible text plus attachment marker", enriched)
+	}
+	wantJSON, err := json.Marshal(enriched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(storedJSON) != string(wantJSON) {
+		t.Fatalf("durable user content = %s, want canonical envelope %s", storedJSON, wantJSON)
 	}
 
 	requestJSON, err := json.Marshal(provider.requests[0].Messages)
@@ -106,6 +114,9 @@ func TestInboundAttachmentLinksToExactCanonicalUserMessage(t *testing.T) {
 	}
 	if string(saved.Data) != rawBytes {
 		t.Fatalf("attachment bytes = %q", saved.Data)
+	}
+	if saved.ID == uuid.Nil || !strings.Contains(enriched, saved.ID.String()) {
+		t.Fatalf("attachment id = %s, want the pre-minted id the envelope marker references (%q)", saved.ID, enriched)
 	}
 	if len(sink.links) != 1 || sink.links[0].MessageID != messageID {
 		t.Fatalf("saved links = %#v, want exact message id %s", sink.links, messageID)
@@ -131,6 +142,101 @@ func TestInboundAttachmentLinksToExactCanonicalUserMessage(t *testing.T) {
 	}
 	if len(foreign) != 0 {
 		t.Fatalf("unrelated message lookup leaked attachments: %v", foreign)
+	}
+}
+
+// TestCaptionlessPhotoPersistsAttachmentMarker pins the fix for the
+// empty-envelope regression: a photo sent with no caption used to persist as
+// one empty text block (`[{"type": "text"}]`), so the transcript window, the
+// recall indexes and every later turn lost the fact that a file was ever
+// sent — while the bytes sat orphaned-but-linked in the attachment store.
+func TestCaptionlessPhotoPersistsAttachmentMarker(t *testing.T) {
+	const rawBytes = "CAPTIONLESS_PHOTO_BYTES"
+
+	userID := uuid.New()
+	soulID := uuid.New()
+	sessionID := uuid.New()
+	messageID := uuid.New()
+	store := &attachmentReceiptStore{nextID: messageID.String()}
+	sink := newAttachmentLookupSink()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := &bs.Config{
+		Gateway: bs.GatewayConfig{MaxTurns: 1},
+		Limits:  bs.LimitsConfig{MaxOutputTokens: 64},
+	}
+	provider := &attachmentReplyProvider{}
+	loop := agent.NewLoop(provider, store, bs.NewToolRegistry(), nil, cfg, logger)
+	g := &Gateway{
+		deps:   &bs.Deps{Config: cfg, AttachmentSink: sink},
+		logger: logger,
+	}
+	us := &UserState{UserID: userID, SoulID: soulID, ChatID: "test"}
+
+	// Telegram sets transport text for a bare photo to the empty string.
+	visible := ""
+	pending := []pendingMsg{{
+		visibleText: &visible,
+		rawAttachments: []rawAttachment{{
+			name: "tg-photo.jpg",
+			mime: "image/jpeg",
+			kind: "image",
+			data: []byte(rawBytes),
+		}},
+	}}
+	runCfg := agent.RunConfig{
+		SessionID:       sessionID.String(),
+		SystemPrompt:    "system",
+		Model:           "test",
+		MaxTurns:        1,
+		MessageBudget:   6000,
+		VisibleUserText: &visible,
+	}
+	g.bindInboundEnvelopeArtifacts(&runCfg, us, sessionID, pending, visible)
+
+	expanded := []bs.ContentBlock{{Type: "image", Source: &bs.ImageSource{
+		Type:      "base64",
+		MediaType: "image/jpeg",
+		Data:      base64.StdEncoding.EncodeToString([]byte(rawBytes)),
+	}}}
+	if _, _, _, err := g.runInteraction(
+		context.Background(), loop, nil, runCfg, "", expanded, nil, nil, nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(sink.saved) != 1 || sink.saved[0].ID == uuid.Nil {
+		t.Fatalf("saved attachments = %#v, want one save under a pre-minted id", sink.saved)
+	}
+	marker := "[attached: " + sink.saved[0].ID.String() + "]"
+
+	if len(store.messages) == 0 || store.messages[0].Role != "user" {
+		t.Fatalf("persisted messages = %#v", store.messages)
+	}
+	storedJSON, err := json.Marshal(store.messages[0].Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(storedJSON) != `"`+marker+`"` {
+		t.Fatalf("durable content = %s, want exactly the marker %q", storedJSON, marker)
+	}
+	if store.messages[0].VisibleText == nil || !strings.Contains(*store.messages[0].VisibleText, marker) {
+		t.Fatalf("visible text = %#v, want the attachment marker", store.messages[0].VisibleText)
+	}
+
+	// The stored envelope must project as searchable dialogue, not blank.
+	projection := bs.ProjectMessageForWrite(store.messages[0], bs.NormalizeContent(store.messages[0].Content))
+	if projection.Status != bs.ProjectionProjected ||
+		projection.VisibleText == nil || strings.TrimSpace(*projection.VisibleText) == "" {
+		t.Fatalf("projection = %#v, want projected non-blank visible text", projection)
+	}
+
+	// The provider prompt still carries the pixels for this one turn.
+	requestJSON, err := json.Marshal(provider.requests[0].Messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(requestJSON), base64.StdEncoding.EncodeToString([]byte(rawBytes))) {
+		t.Fatalf("provider request lost the image payload: %s", requestJSON)
 	}
 }
 
@@ -347,7 +453,10 @@ func attachmentScopeKey(userID, soulID, messageID uuid.UUID) string {
 }
 
 func (s *attachmentLookupSink) Save(_ context.Context, p bs.AttachmentParams) (uuid.UUID, error) {
-	id := uuid.New()
+	id := p.ID
+	if id == uuid.Nil {
+		id = uuid.New()
+	}
 	s.saved = append(s.saved, p)
 	s.savedIDs = append(s.savedIDs, id)
 	key := attachmentScopeKey(p.UserID, p.SoulID, p.MessageID)

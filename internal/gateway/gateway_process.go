@@ -378,6 +378,7 @@ func (g *Gateway) saveInboundAttachments(
 				continue
 			}
 			if _, err := g.deps.AttachmentSink.Save(ctx, bs.AttachmentParams{
+				ID:        a.id,
 				UserID:    us.UserID,
 				SoulID:    us.SoulID,
 				SessionID: sessionID,
@@ -405,6 +406,7 @@ func (g *Gateway) bindInboundEnvelopeArtifacts(
 	if cfg == nil || g.deps == nil || g.deps.AttachmentSink == nil || sessionID == uuid.Nil {
 		return
 	}
+	stampInboundAttachmentMarkers(cfg, msgs)
 	cfg.OnUserMessagePersisted = func(appendCtx context.Context, receipt bs.PersistedMessage) {
 		messageID, err := uuid.Parse(receipt.ID)
 		if err != nil {
@@ -415,6 +417,43 @@ func (g *Gateway) bindInboundEnvelopeArtifacts(
 		g.saveInboundAttachments(appendCtx, us, sessionID, messageID, msgs)
 		g.scanAndSaveLinks(appendCtx, us, sessionID, messageID, "user", linkText)
 	}
+}
+
+// stampInboundAttachmentMarkers mints a durable id for every inbound file the
+// sink is about to save and writes a matching `[attached: UUID]` marker into
+// the turn's canonical user envelope. The bytes themselves never enter
+// chat_messages — before this stamp a caption-less photo persisted as one
+// empty text block, so the transcript window, the recall indexes and every
+// later turn lost the fact that a file was ever sent.
+//
+// The ids are written back into msgs so saveInboundAttachments creates the
+// rows under the exact ids the envelope already references.
+func stampInboundAttachmentMarkers(cfg *agent.RunConfig, msgs []pendingMsg) {
+	if cfg.VisibleUserText == nil {
+		// No canonical envelope: the append path durably stores the full
+		// content as-is, so there is no transport text to stamp.
+		return
+	}
+	markers := make([]string, 0, 1)
+	for i := range msgs {
+		for j := range msgs[i].rawAttachments {
+			if len(msgs[i].rawAttachments[j].data) == 0 {
+				continue
+			}
+			id := uuid.New()
+			msgs[i].rawAttachments[j].id = id
+			markers = append(markers, "[attached: "+id.String()+"]")
+		}
+	}
+	if len(markers) == 0 {
+		return
+	}
+	parts := make([]string, 0, len(markers)+1)
+	if strings.TrimSpace(*cfg.VisibleUserText) != "" {
+		parts = append(parts, *cfg.VisibleUserText)
+	}
+	enriched := strings.Join(append(parts, markers...), "\n\n")
+	cfg.VisibleUserText = &enriched
 }
 
 // announceUserMessageID adds the durable-id announcement to whatever the turn
