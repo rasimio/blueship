@@ -45,6 +45,17 @@ type GatewayConfig struct {
 	// Default false; opt-in, paired with the client-side AEC work.
 	BargeIn bool
 
+	// HydrateHistoryImages caps how many of the dialogue window's most
+	// recent images are re-inlined from their `[attached: UUID]` markers
+	// before a cortex turn. The durable row keeps only the marker, so
+	// without hydration a later turn knows a photo existed but can never
+	// look at it again. Each image costs ~1600 prompt tokens on top of
+	// the dialogue budget, and a photo falling off this cap changes that
+	// history message, invalidating the provider prompt cache from that
+	// point back. 0 (default) disables hydration — the right setting for
+	// a cortex that cannot read images natively.
+	HydrateHistoryImages int
+
 	// TurnCompletedHook fires after the gateway successfully sends an
 	// assistant reply to the user (across Telegram batch, Telegram
 	// streaming, voice streaming, and WebSocket batch transports). The

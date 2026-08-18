@@ -106,6 +106,12 @@ type RunConfig struct {
 	// the human row commits. It is used for dependent evidence rows such as
 	// inbound attachments; nil keeps legacy/custom stores unchanged.
 	OnUserMessagePersisted func(context.Context, bs.PersistedMessage)
+	// ExpandHistoryMedia, when non-nil, rewrites the loaded dialogue window
+	// before the current-turn overlay — the host's chance to resolve durable
+	// media references (e.g. `[attached: UUID]` markers) back into provider
+	// content blocks. It runs on windowed history only; the current turn
+	// already carries its transport payload. Nil keeps history as stored.
+	ExpandHistoryMedia func(ctx context.Context, messages []bs.Message) []bs.Message
 	// Temperature for LLM generation (0 = provider default).
 	Temperature float64
 	// Ephemeral, when true, runs the loop without persisting the assistant

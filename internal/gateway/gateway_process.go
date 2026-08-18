@@ -1156,6 +1156,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	runCfg.ReplyToMessageID = replyToMessageID
 	runCfg.TGMessageIDs = tgMessageIDs
 	runCfg.VisibleUserText = visibleUserText
+	if !ephemeral {
+		// The notebook ask reuses the chat session read-only and pays for
+		// brevity; it does not need yesterday's photos re-inlined.
+		runCfg.ExpandHistoryMedia = g.historyMediaExpander(us)
+	}
 	if !ephemeral && g.deps.AttachmentSink != nil && sessionUUID != uuid.Nil {
 		g.bindInboundEnvelopeArtifacts(&runCfg, us, sessionUUID, msgs, policyText)
 	}

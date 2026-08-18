@@ -112,6 +112,9 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 	if loadErr != nil {
 		return nil, fmt.Errorf("load dialog messages: %w", loadErr)
 	}
+	if cfg.ExpandHistoryMedia != nil {
+		dialogMessages = cfg.ExpandHistoryMedia(ctx, dialogMessages)
+	}
 	dialogMessages = overlayCurrentUserContent(dialogMessages, cfg, userMessage)
 	feltTime := feltTimeContext(dialogMessages, cfg.TurnNow, !cfg.PromptOnlyInput)
 	dialogMessages = annotateDialogDays(dialogMessages, cfg.TurnNow)
