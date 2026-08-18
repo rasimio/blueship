@@ -78,7 +78,8 @@ func TestMenuCommandIsAnsweredByAKeyboardAlone(t *testing.T) {
 			}},
 		},
 	}
-	// No inline menu configured at all — the shape arlene ships.
+	// No inline menu configured at all — the shape a host ships when it wants
+	// only the persistent keyboard.
 	g := &Gateway{
 		deps:   &bs.Deps{Config: cfg, BotOnboarding: noopOnboarding{}},
 		logger: slog.New(slog.DiscardHandler),

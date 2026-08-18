@@ -243,7 +243,9 @@ func TestCancelDuringAnIterationIsNotUndoneByItsProgressWrite(t *testing.T) {
 
 	// And the same for the retry path: an iteration that FAILS after a cancel
 	// must not requeue it either.
-	task2 := insertPendingTask(t, ctx, db, "direct", nil)
+	// Not nil: this fixture is the pre-022 schema where progress is still
+	// nullable, and a NULL cannot be scanned back into json.RawMessage.
+	task2 := insertPendingTask(t, ctx, db, "direct", json.RawMessage(`{}`))
 	setTaskStatus(t, ctx, db, task2, "running")
 	if err := store.Cancel(ctx, task2); err != nil {
 		t.Fatalf("cancel second task: %v", err)
