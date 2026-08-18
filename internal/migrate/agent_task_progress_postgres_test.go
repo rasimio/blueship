@@ -92,8 +92,12 @@ func TestAgentTaskProgressSurvivesEmptyCheckpoint(t *testing.T) {
 		t.Fatalf("progress after migration = %q, want {} — the stuck row was not repaired", repaired)
 	}
 
-	// The write path: an iteration that checkpoints nothing.
+	// The write path: an iteration that checkpoints nothing. The row has to be
+	// RUNNING first — UpdateProgress only advances a task that is still running,
+	// so against a pending row it would update nothing and this would pass
+	// while testing none of the statement it exists to cover.
 	task := insertPendingTask(t, ctx, db, "self-perception", json.RawMessage(`{"phase":"iteration_1"}`))
+	setTaskStatus(t, ctx, db, task, "running")
 	if err := store.UpdateProgress(ctx, task, nil); err != nil {
 		t.Fatalf("UpdateProgress with no checkpoint: %v", err)
 	}
@@ -121,6 +125,7 @@ func TestAgentTaskProgressSurvivesEmptyCheckpoint(t *testing.T) {
 	if err := store.PauseTask(ctx, task, nil); err != nil {
 		t.Fatalf("PauseTask with no checkpoint: %v", err)
 	}
+	setTaskStatus(t, ctx, db, task, "running") // PauseTask above left it paused
 	if err := store.UpdateProgressWithRecheck(ctx, task, nil, []string{"https://example.test/doc"}); err != nil {
 		t.Fatalf("UpdateProgressWithRecheck with no checkpoint: %v", err)
 	}
@@ -187,4 +192,99 @@ func insertPendingTask(t *testing.T, ctx context.Context, db *sqlx.DB, handler s
 		t.Fatalf("insert task: %v", err)
 	}
 	return id
+}
+
+func setTaskStatus(t *testing.T, ctx context.Context, db *sqlx.DB, id uuid.UUID, status string) {
+	t.Helper()
+	if _, err := db.ExecContext(ctx,
+		`UPDATE agent_tasks SET status = $2 WHERE id = $1`, id, status); err != nil {
+		t.Fatalf("set task status %s: %v", status, err)
+	}
+}
+
+// A task cancelled while an iteration is in flight must stay cancelled.
+//
+// The live sequence: the person said "отмени задачу", Cancel wrote 'done', and
+// forty seconds later the iteration that was already running finished, saved
+// its progress, and put the row back to 'pending' — where the scheduler picked
+// it up and started the next iteration. The cancellation was real and lasted
+// less than a minute.
+func TestCancelDuringAnIterationIsNotUndoneByItsProgressWrite(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("BLUESHIP_TEST_POSTGRES_DSN"))
+	if dsn == "" {
+		t.Skip("set BLUESHIP_TEST_POSTGRES_DSN to run PostgreSQL agent-task tests")
+	}
+	db := newAgentTaskSchema(t, dsn)
+	store := core.NewAgentTaskStore(db)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	task := insertPendingTask(t, ctx, db, "direct", json.RawMessage(`{"phase":"iteration_1"}`))
+	setTaskStatus(t, ctx, db, task, "running")
+
+	if err := store.Cancel(ctx, task); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	// The iteration that was already running now finishes and checkpoints.
+	if err := store.UpdateProgress(ctx, task, json.RawMessage(`{"phase":"iteration_2"}`)); err != nil {
+		t.Fatalf("progress write after cancel returned an error; it should be a silent no-op: %v", err)
+	}
+
+	after, err := store.Get(ctx, task)
+	if err != nil {
+		t.Fatalf("refetch: %v", err)
+	}
+	if after.Status == "pending" {
+		t.Fatalf("cancelled task was returned to the queue by its own iteration finishing (status=%s)", after.Status)
+	}
+	if after.Status != "done" {
+		t.Fatalf("status = %q, want the cancellation to stand as done", after.Status)
+	}
+
+	// And the same for the retry path: an iteration that FAILS after a cancel
+	// must not requeue it either.
+	task2 := insertPendingTask(t, ctx, db, "direct", nil)
+	setTaskStatus(t, ctx, db, task2, "running")
+	if err := store.Cancel(ctx, task2); err != nil {
+		t.Fatalf("cancel second task: %v", err)
+	}
+	if err := store.SetPending(ctx, task2); err != nil {
+		t.Fatalf("SetPending after cancel: %v", err)
+	}
+	after2, err := store.Get(ctx, task2)
+	if err != nil {
+		t.Fatalf("refetch second: %v", err)
+	}
+	if after2.Status == "pending" {
+		t.Fatal("a cancelled task was requeued by the iteration-failed retry path")
+	}
+}
+
+// The guard must not break the ordinary case: a running iteration that
+// finishes normally still advances.
+func TestRunningTaskStillAdvancesOnProgress(t *testing.T) {
+	dsn := strings.TrimSpace(os.Getenv("BLUESHIP_TEST_POSTGRES_DSN"))
+	if dsn == "" {
+		t.Skip("set BLUESHIP_TEST_POSTGRES_DSN to run PostgreSQL agent-task tests")
+	}
+	db := newAgentTaskSchema(t, dsn)
+	store := core.NewAgentTaskStore(db)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	task := insertPendingTask(t, ctx, db, "direct", json.RawMessage(`{"phase":"iteration_1"}`))
+	setTaskStatus(t, ctx, db, task, "running")
+	if err := store.UpdateProgress(ctx, task, json.RawMessage(`{"phase":"iteration_2"}`)); err != nil {
+		t.Fatalf("UpdateProgress: %v", err)
+	}
+	after, err := store.Get(ctx, task)
+	if err != nil {
+		t.Fatalf("refetch: %v", err)
+	}
+	if after.Status != "pending" {
+		t.Fatalf("status = %q, want pending so the scheduler runs the next iteration", after.Status)
+	}
+	if after.Iteration != 1 {
+		t.Fatalf("iteration = %d, want 1", after.Iteration)
+	}
 }

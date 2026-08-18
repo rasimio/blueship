@@ -74,9 +74,9 @@ type CandidateRule struct {
 
 // RuleContext carries the current situation for rule engine evaluation.
 type RuleContext struct {
-	UserID        string   // user identifier
-	Intent        string   // from reflex (optional, for intent-scoped rules)
-	Strategy      string   // from AME: warm, neutral, empathetic, etc.
+	UserID   string // user identifier
+	Intent   string // from reflex (optional, for intent-scoped rules)
+	Strategy string // from AME: warm, neutral, empathetic, etc.
 	// Energy and Stress are the person's measured state, 0-1. Nil means NOT
 	// MEASURED, which is a different thing from zero and has to stay
 	// distinguishable: as plain float64 they defaulted to 0.0, so every

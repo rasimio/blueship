@@ -392,6 +392,12 @@ func (s *Scheduler) runTask(ctx context.Context, task core.AgentTask, handler co
 			return
 		}
 		if next.Status != "pending" {
+			// Reached while the iteration was running — a cancel, a pause, or a
+			// terminal write from elsewhere. Logged because the alternative is
+			// a task that visibly stops with nothing saying why, and because
+			// this is the path a mid-flight cancellation now takes.
+			s.logger.InfoContext(ctx, "agent-tasks: stopping, task left the running state mid-iteration",
+				"task_id", task.ID, "status", next.Status)
 			return
 		}
 		if next.MaxIterations > 0 && next.Iteration >= next.MaxIterations {

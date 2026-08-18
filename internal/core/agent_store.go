@@ -877,7 +877,17 @@ func jsonbObject(raw json.RawMessage) json.RawMessage {
 }
 
 // UpdateProgress saves intermediate state, increments iteration, and sets
-// the task back to pending. Always clears required_recheck_urls so a
+// the task back to pending — but only while the task is still running.
+//
+// The status guard is the whole point. An iteration takes tens of seconds, and
+// a person can cancel inside that window: Cancel writes 'done', the iteration
+// then finishes and saved its progress unconditionally, which put the row back
+// to 'pending' and handed it straight to the next iteration. Observed live —
+// "Отменила." followed forty seconds later by the same task starting again.
+// Whoever reached a terminal state while this iteration was in flight decided
+// the task's fate; finishing work does not get to overrule that. Zero rows
+// updated is the correct outcome, not an error, and the back-to-back loop
+// already stops because the refetched status is no longer pending. Always clears required_recheck_urls so a
 // stale recheck list doesn't bleed into the next iteration's Gate B'
 // check — the only path that LEAVES recheck URLs set is the explicit
 // UpdateProgressWithRecheck branch used by the grounding-failure path.
@@ -886,7 +896,7 @@ func (s *AgentTaskStore) UpdateProgress(ctx context.Context, id uuid.UUID, progr
 		UPDATE agent_tasks
 		SET progress = $2, status = 'pending', iteration = iteration + 1,
 		    required_recheck_urls = '{}'
-		WHERE id = $1`, id, jsonbObject(progress))
+		WHERE id = $1 AND status = 'running'`, id, jsonbObject(progress))
 	return err
 }
 
@@ -906,7 +916,7 @@ func (s *AgentTaskStore) UpdateProgressWithRecheck(ctx context.Context, id uuid.
 		UPDATE agent_tasks
 		SET progress = $2, status = 'pending', iteration = iteration + 1,
 		    required_recheck_urls = $3
-		WHERE id = $1`, id, jsonbObject(progress), pq.Array(recheckURLs))
+		WHERE id = $1 AND status = 'running'`, id, jsonbObject(progress), pq.Array(recheckURLs))
 	return err
 }
 
@@ -1005,7 +1015,8 @@ func (s *AgentTaskStore) UpdateShaping(ctx context.Context, id uuid.UUID, config
 // SetPending resets a task back to pending (for retry after transient errors).
 func (s *AgentTaskStore) SetPending(ctx context.Context, id uuid.UUID) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE agent_tasks SET status = 'pending' WHERE id = $1`, id)
+		UPDATE agent_tasks SET status = 'pending'
+		WHERE id = $1 AND status = 'running'`, id)
 	return err
 }
 
