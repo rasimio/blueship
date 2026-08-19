@@ -598,6 +598,21 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		msg += "\n\n" + preloadedBlock
 	}
 
+	// The acceptance gate grades the final result against acceptance_criteria
+	// verbatim, but the cycle header carries only title + description — so
+	// without this block the worker's first submit can match the contract only
+	// by luck, and each later one buys a 600-char fragment of it with a full
+	// rejected iteration. Precedence must be explicit: the instruction prompt
+	// mandates a default report shape, and a worker that has to choose between
+	// "auto-fail" threats from the prompt and criteria it half-knows keeps the
+	// prompt's shape every time (2026-08-19 f835d12b burned all 20 iterations
+	// re-submitting [N]-marker citations against criteria demanding inline
+	// links).
+	if hasAcceptanceGate {
+		msg += "\n\n[acceptance criteria]\nThe finished result is accepted only when it demonstrably meets EVERY part of this contract. Where it prescribes a structure, item layout, or citation format that differs from the default report shape in your instructions, THIS contract wins — the reviewer reads only this:\n" +
+			strings.TrimSpace(*task.AcceptanceCriteria) + "\n[/acceptance criteria]"
+	}
+
 	// What earlier iterations already settled, and the protocol that keeps
 	// filling it. Scoped to the multi-iteration research flow: a one-shot
 	// heartbeat tick has no next iteration to hand anything to, and paying
