@@ -83,7 +83,11 @@ func (s *userStore) ResolveOwner(ctx context.Context) (uuid.UUID, error) {
 	return uuid.Parse(id)
 }
 
-const userProfileColumns = `id, chat_id, display_name, trust_level, bio, preferences, is_owner, timezone, created_at, updated_at`
+// timezone is nullable in the schema and stays NULL for users created by
+// hosts that don't collect one (web signup); scanning it into a plain string
+// hard-errored every profile lookup for such users — including the notify
+// path, which silently cost them their task notifications.
+const userProfileColumns = `id, chat_id, display_name, trust_level, bio, preferences, is_owner, COALESCE(timezone, '') AS timezone, created_at, updated_at`
 
 func (s *userStore) GetByID(ctx context.Context, id string) (*UserProfile, error) {
 	var p UserProfile
