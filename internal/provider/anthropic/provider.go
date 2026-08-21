@@ -62,9 +62,27 @@ func NewOAuthProvider(tokenSource TokenSource, timeout time.Duration, backoffs [
 	}
 }
 
+// streamedCompleteMinTokens is the max_tokens above which Complete answers
+// over the streaming transport. p.httpClient carries the operator's LLM
+// timeout (300 s in production); at the ~70 output tokens/s Opus produces
+// under adaptive thinking that caps a non-streamed answer near 20K tokens,
+// so a role budget raised past it would only swap truncation for "context
+// deadline exceeded". The streaming client has no wall-clock timeout — ctx
+// bounds it — so a long answer drips in instead of racing the clock. The
+// official SDKs draw the same line and refuse non-streamed requests above
+// it. The margin below 20K covers slower generations.
+const streamedCompleteMinTokens = 16384
+
 // Complete sends a completion request to the Anthropic Messages API.
 // Includes built-in retry on rate_limit and overloaded errors.
 func (p *Provider) Complete(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
+	if req.MaxTokens > streamedCompleteMinTokens {
+		p.logger.Info("anthropic: large max_tokens, completing over the streaming transport",
+			"model", req.Model,
+			"max_tokens", req.MaxTokens,
+		)
+		return p.StreamComplete(ctx, req, nil)
+	}
 	var lastErr error
 	for attempt := 0; attempt <= len(p.backoffs); attempt++ {
 		resp, err := p.sendOnce(ctx, req)

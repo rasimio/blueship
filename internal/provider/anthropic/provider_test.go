@@ -283,3 +283,75 @@ func TestCompleteSetsMessageCacheBreakpointsOnWire(t *testing.T) {
 		t.Fatalf("wire cache_control marks at %v, want [1.1 2.0]", wireMarks)
 	}
 }
+
+// A budget past the non-streamed line goes out as "stream":true and still
+// comes back as one assembled response: the HTTP client's timeout would
+// otherwise cut a long answer that a larger max_tokens was raised to allow.
+func TestCompleteStreamsWhenMaxTokensExceedsNonStreamedLine(t *testing.T) {
+	sse := sseEvents(
+		`data: {"type":"message_start","message":{"id":"msg_9","role":"assistant","model":"claude-opus-5","usage":{"input_tokens":40,"output_tokens":1,"cache_read_input_tokens":30}}}`,
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"long answer"}}`,
+		`data: {"type":"content_block_stop","index":0}`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20000}}`,
+		`data: {"type":"message_stop"}`,
+	)
+	var streamed []bool
+	provider := NewProvider("test-key", time.Second, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	provider.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			body, err := io.ReadAll(req.Body)
+			if err != nil {
+				t.Fatalf("read request body: %v", err)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatalf("unmarshal request: %v", err)
+			}
+			isStream, _ := payload["stream"].(bool)
+			streamed = append(streamed, isStream)
+			if !isStream {
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(strings.NewReader(`{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"short"}],"model":"claude-opus-5","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":3}}`)),
+					Header:     make(http.Header),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(sse)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	small, err := provider.Complete(context.Background(), bs.CompletionRequest{
+		Model:     "claude-opus-5",
+		MaxTokens: streamedCompleteMinTokens,
+		Messages:  []bs.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete (small) error: %v", err)
+	}
+	if bs.ExtractText(small.Content) != "short" {
+		t.Fatalf("small budget should use the plain transport, got %#v", small.Content)
+	}
+
+	large, err := provider.Complete(context.Background(), bs.CompletionRequest{
+		Model:     "claude-opus-5",
+		MaxTokens: streamedCompleteMinTokens + 1,
+		Messages:  []bs.Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete (large) error: %v", err)
+	}
+	if len(streamed) != 2 || streamed[0] || !streamed[1] {
+		t.Fatalf("want plain then streamed request, got stream flags %v", streamed)
+	}
+	if bs.ExtractText(large.Content) != "long answer" || large.StopReason != "end_turn" {
+		t.Fatalf("streamed completion should assemble the full response, got %#v", large)
+	}
+	if large.Usage.OutputTokens != 20000 || large.Usage.InputTokens != 40 || large.Usage.CacheReadTokens != 30 {
+		t.Fatalf("streamed completion should carry usage, got %+v", large.Usage)
+	}
+}

@@ -133,6 +133,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 	toolTurns := 0
 	forceFinal := false
 	maxTokenContinuations := 0
+	truncatedToolRecoveries := 0
 	var pendingMaxTokenText strings.Builder
 	pendingMaxTokenOutputTokens := 0
 
@@ -290,6 +291,53 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		appendTurnText(&accumulated, currentTurnText)
 		pendingMaxTokenText.Reset()
 		pendingMaxTokenOutputTokens = 0
+
+		// A max_tokens stop that landed inside a tool call: the tool_use
+		// block is a stump, not a call (see shouldRecoverTruncatedToolUse).
+		// Answer it with an error result and give the model the turn back,
+		// so it can shrink the call — the alternative below returns the
+		// stump as a finished answer and nobody ever learns the tool did not
+		// run. Counts as a tool turn: it consumes the same budget a real
+		// call would.
+		if shouldRecoverTruncatedToolUse(resp, truncatedToolRecoveries) {
+			truncatedToolRecoveries++
+			toolTurns++
+			toolResults, promptToolResults, cutTraces := truncatedToolUseResults(resp.Content, cfg.MaxTokens)
+			for _, trace := range cutTraces {
+				a.logger.Warn("tool call cut off by max_tokens; answering with an error result",
+					"model", cfg.Model,
+					"role", cfg.Role,
+					"tool", trace.Name,
+					"tool_use_id", trace.BlockID,
+					"max_tokens", cfg.MaxTokens,
+					"output_tokens", resp.Usage.OutputTokens,
+					"turn", turn+1,
+					"recovery", truncatedToolRecoveries,
+				)
+			}
+			traces = append(traces, cutTraces...)
+			if !cfg.Ephemeral {
+				pctx, pcancel := persistCtx(ctx)
+				err = a.store.Append(pctx, cfg.SessionID, bs.Message{Role: "user", Content: toolResults})
+				pcancel()
+				if err != nil {
+					return nil, fmt.Errorf("append truncated tool results: %w", err)
+				}
+			}
+			convo = append(convo, bs.Message{Role: "user", Content: promptToolResults})
+			if toolTurns >= maxToolTurnsForRole(cfg.Role) {
+				forceFinal = true
+				a.logger.Warn("tool turn budget exhausted; forcing final answer",
+					"role", cfg.Role,
+					"tool_turns", toolTurns,
+					"next_turn", turn+2,
+				)
+			}
+			if turn+1 >= cfg.MaxTurns {
+				cfg.MaxTurns = turn + 2
+			}
+			continue
+		}
 
 		// 6. Check stop reason
 		switch resp.StopReason {

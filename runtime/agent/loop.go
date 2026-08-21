@@ -911,6 +911,70 @@ func shouldAutoContinueMaxTokens(resp *bs.CompletionResponse, continuationPasses
 		!hasToolUseOutput(resp.Content)
 }
 
+// maxTruncatedToolRecoveries bounds how many max_tokens-cut tool calls one
+// run answers with an error result before it gives up and ends the turn the
+// old way. One pass lets the model learn its payload does not fit; the second
+// covers a shrink that was not enough. Past that the call is hopeless at this
+// output budget and looping on it would only burn the turn budget.
+const maxTruncatedToolRecoveries = 2
+
+// shouldRecoverTruncatedToolUse reports whether a max_tokens stop landed
+// inside a tool call. The provider then hands back whatever prefix of the
+// input JSON it could close — Anthropic keeps the complete key/value pairs,
+// the streaming parser substitutes "{}" — so the block is not a call the
+// model made, it is the stump of one. Running it executes the tool with the
+// wrong arguments; returning it as the finished answer (what this loop did
+// until 2026-08-21) hides the failure entirely: the model never learns the
+// call was cut, and an agent task replays the same oversized call every
+// iteration until its iteration budget dies. Live case: a dossier task put
+// a ~30K-character DOCX body into one attachment_create input, hit the
+// 8192-token output cap 50 iterations in a row and failed with "result is
+// empty" — every iteration's actual work was in the part of the JSON that
+// never arrived.
+func shouldRecoverTruncatedToolUse(resp *bs.CompletionResponse, recoveries int) bool {
+	return resp != nil &&
+		resp.StopReason == "max_tokens" &&
+		recoveries < maxTruncatedToolRecoveries &&
+		hasToolUseOutput(resp.Content)
+}
+
+// truncatedToolCallResult is the tool_result text a cut-off tool call gets
+// in place of execution. It names the cause and the budget so the model can
+// act on it — shrink the arguments, split the work — rather than retry the
+// identical call.
+func truncatedToolCallResult(name string, maxTokens int) string {
+	return fmt.Sprintf("[tool_call_truncated]\nThe %s call was cut off by the output token limit (max_tokens=%d) while its arguments were still being written. The input you see above is an incomplete prefix; the tool was NOT run. Do not re-send the same call. Make the arguments much smaller so the whole call fits inside the limit — keep bulk text short, produce the artefact in smaller pieces the tool supports, or move long content out of the arguments — and then call again.\n[/tool_call_truncated]", name, maxTokens)
+}
+
+// truncatedToolUseResults answers every tool_use block of a max_tokens-cut
+// response with an error tool_result, so the assistant turn that carries the
+// stumps is followed by a matching user turn (the API rejects a tool_use
+// without its result) and the model reads why nothing ran. Returns the
+// persisted blocks, their prompt-side compact copies, and the audit traces.
+func truncatedToolUseResults(content []bs.ContentBlock, maxTokens int) (results, promptResults []bs.ContentBlock, traces []ToolTrace) {
+	for _, block := range content {
+		if block.Type != "tool_use" {
+			continue
+		}
+		result := truncatedToolCallResult(block.Name, maxTokens)
+		input := string(block.Input)
+		if len(input) > 200 {
+			input = input[:200] + "..."
+		}
+		resultBlock := bs.ContentBlock{
+			Type:      "tool_result",
+			ToolUseID: block.ID,
+			Name:      block.Name,
+			Content:   result,
+			IsError:   true,
+		}
+		results = append(results, resultBlock)
+		promptResults = append(promptResults, compactToolResultBlockForPrompt(resultBlock))
+		traces = append(traces, ToolTrace{Name: block.Name, BlockID: block.ID, Input: input, Output: result, Error: true})
+	}
+	return results, promptResults, traces
+}
+
 func mergeContinuationText(prefix, continuation string) string {
 	prefix = strings.TrimRight(prefix, " \t\r\n")
 	continuation = strings.TrimLeft(continuation, " \t\r\n")
