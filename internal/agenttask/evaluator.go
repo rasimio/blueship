@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -529,6 +530,49 @@ type GroundingVerdict struct {
 // guard a model would just s/Zhang/Xiong/ in the report on retry and
 // the recomputed Gate C would pass because the corrected attribution
 // matches whatever doc was already there.
+// fetchRecordBlock tells the reviewer what the task opened across EVERY
+// iteration — the record the hard gates above already checked the citations
+// against. The per-iteration action log is the wrong evidence for a
+// "verified via browser_fetch" criterion: a synthesis iteration re-opens a
+// page or two while citing thirty it opened earlier, and a reviewer handed
+// only that iteration's log fails the report for not fetching what it did
+// fetch (2026-08-21 fc2a743b: 31 cited, every one in the task's record,
+// rejected as «fetch only two pages»). Empty when nothing was cited.
+func fetchRecordBlock(resultURLs, fetchedURLs map[string]struct{}) string {
+	if len(resultURLs) == 0 {
+		return ""
+	}
+	var unfetched []string
+	opened := 0
+	for u := range resultURLs {
+		if _, ok := fetchedURLs[u]; ok {
+			opened++
+		} else {
+			unfetched = append(unfetched, u)
+		}
+	}
+	sort.Strings(unfetched)
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n\nFETCH RECORD (whole task, machine-verified): %d distinct URLs were opened via browser_fetch over all iterations. Of the %d URLs cited in the result, %d are in that record.",
+		len(fetchedURLs), len(resultURLs), opened)
+	if len(unfetched) > 0 {
+		fmt.Fprintf(&b, " Cited but never opened: %s.", strings.Join(unfetched, ", "))
+	} else {
+		b.WriteString(" Every cited URL was opened.")
+	}
+	b.WriteString("\nJudge any criterion about URLs being checked, verified or fetched via browser_fetch by THIS record — not by the single-iteration log below, which only shows the final iteration.")
+	return b.String()
+}
+
+// acceptanceReviewPrompt assembles the reviewer's user turn. Pure, so the
+// evidence framing can be pinned by tests without a database.
+func acceptanceReviewPrompt(title, desc, criteria, result, extraHint, fetchRecord, actions string) string {
+	return fmt.Sprintf(
+		"TASK: %s\n\nDESCRIPTION:\n%s\n\nACCEPTANCE CRITERIA:\n%s\n\nRESULT:\n%s%s%s\n\nACTIONS TAKEN THIS ITERATION (machine-generated tool-call log of the FINAL iteration only — ground-truth for delivery-type criteria such as \"message sent\" or \"file created\"; earlier iterations' actions are not listed here):\n%s\nDoes the result meet the acceptance criteria?",
+		title, desc, criteria, result, extraHint, fetchRecord, actions,
+	)
+}
+
 func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.AgentTask, result string, iterationToolCalls json.RawMessage) AcceptanceVerdict {
 	if task.AcceptanceCriteria == nil || strings.TrimSpace(*task.AcceptanceCriteria) == "" {
 		return AcceptanceVerdict{Met: true}
@@ -591,8 +635,9 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 	resultURLs := extractURLs(result)
 	urlCount := len(resultURLs)
 	var verifiedURLCount int
+	fetchedURLs := map[string]struct{}{}
 	if requiredURLs > 0 || urlCount > 0 {
-		fetchedURLs := loadFetchedURLs(ctx, deps, task.ID)
+		fetchedURLs = loadFetchedURLs(ctx, deps, task.ID)
 		for u := range resultURLs {
 			if _, ok := fetchedURLs[u]; ok {
 				verifiedURLCount++
@@ -751,10 +796,8 @@ Be strict: half-done work is not done. Criteria like "code is reviewed" require 
 	if actions == "" {
 		actions = "(no tool calls this iteration)"
 	}
-	user := fmt.Sprintf(
-		"TASK: %s\n\nDESCRIPTION:\n%s\n\nACCEPTANCE CRITERIA:\n%s\n\nRESULT:\n%s%s\n\nACTIONS TAKEN THIS ITERATION (machine-generated tool-call log — ground-truth evidence of what was actually done; use it to judge criteria about actions such as \"message sent\" or \"fetched via browser\"):\n%s\nDoes the result meet the acceptance criteria?",
-		task.Title, desc, *task.AcceptanceCriteria, result, extraHint, actions,
-	)
+	user := acceptanceReviewPrompt(task.Title, desc, *task.AcceptanceCriteria, result, extraHint,
+		fetchRecordBlock(resultURLs, fetchedURLs), actions)
 
 	model := deps.Config.Models.Primary.ForRouter()
 	if model == "" {

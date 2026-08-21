@@ -594,3 +594,50 @@ func TestRejectionProgressFallsBackToPersistedTaskState(t *testing.T) {
 		t.Fatalf("valid replacement snapshot resurrected cleared state: %#v", got)
 	}
 }
+
+// The reviewer must judge "verified via browser_fetch" by the whole task's
+// fetch record, not by the final iteration's two re-fetches.
+func TestFetchRecordBlockDescribesWholeTaskRecord(t *testing.T) {
+	cited := extractURLs("see https://a.example/one and https://b.example/two and https://c.example/three")
+	fetched := map[string]struct{}{}
+	for u := range extractURLs("https://a.example/one https://b.example/two https://d.example/extra") {
+		fetched[u] = struct{}{}
+	}
+
+	block := fetchRecordBlock(cited, fetched)
+	for _, want := range []string{
+		"3 distinct URLs were opened via browser_fetch over all iterations",
+		"Of the 3 URLs cited in the result, 2 are in that record",
+		"Cited but never opened: c.example/three",
+		"not by the single-iteration log below",
+	} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("fetch record missing %q:\n%s", want, block)
+		}
+	}
+
+	if all := fetchRecordBlock(cited, func() map[string]struct{} {
+		m := map[string]struct{}{}
+		for u := range cited {
+			m[u] = struct{}{}
+		}
+		return m
+	}()); !strings.Contains(all, "Every cited URL was opened.") {
+		t.Fatalf("fully-fetched citations should say so:\n%s", all)
+	}
+	if got := fetchRecordBlock(map[string]struct{}{}, fetched); got != "" {
+		t.Fatalf("no citations → no block, got %q", got)
+	}
+}
+
+func TestAcceptanceReviewPromptFramesActionLogAsFinalIterationOnly(t *testing.T) {
+	prompt := acceptanceReviewPrompt("title", "desc", "criteria", "result", "", "\n\nFETCH RECORD: x", "browser_fetch(url)")
+	recordAt := strings.Index(prompt, "FETCH RECORD")
+	actionsAt := strings.Index(prompt, "ACTIONS TAKEN THIS ITERATION")
+	if recordAt < 0 || actionsAt < 0 || recordAt > actionsAt {
+		t.Fatalf("fetch record must precede the action log:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "FINAL iteration only") || strings.Contains(prompt, "fetched via browser") {
+		t.Fatalf("action log must be framed as the final iteration's delivery evidence, not as fetch evidence:\n%s", prompt)
+	}
+}
