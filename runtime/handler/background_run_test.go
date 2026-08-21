@@ -566,3 +566,105 @@ func TestBackgroundRunLeavesHardFinalSessionForScheduler(t *testing.T) {
 		t.Fatalf("handler archived before terminal DB transition: %v", store.archived)
 	}
 }
+
+// A plan with every step done has nothing left to research, so the synthesis
+// it triggers is the submission — not a draft to be rewritten on each of the
+// remaining iterations until the cap finally forces a Done-claim.
+func TestBackgroundRunSubmitsSynthesisOnceThePlanIsExhausted(t *testing.T) {
+	provider := &capturingProvider{responses: []*core.CompletionResponse{{
+		StopReason: "end_turn",
+		Content:    []core.ContentBlock{{Type: "text", Text: "full report, no done marker"}},
+	}}}
+	deps, store := backgroundTestDeps(provider, map[string]string{
+		"background-task":      "BASE",
+		"background-step":      "STEP-PHASE",
+		"background-synthesis": "SYNTHESIS-PHASE",
+	})
+	deps.Config.Gateway.ResolveSkillCatalog = func(context.Context) ([]core.SkillMeta, error) {
+		return []core.SkillMeta{{Slug: "analyst", Title: "Analyst"}}, nil
+	}
+	deps.Config.Gateway.ResolveSkills = func(context.Context, []string) ([]string, error) {
+		return []string{"ANALYST-ROLE"}, nil
+	}
+
+	criteria := "A complete dossier with sources."
+	task := core.AgentTask{
+		ID:                 uuid.New(),
+		UserID:             uuid.New(),
+		Title:              "research task",
+		Strategy:           core.StrategyDirect,
+		Config:             json.RawMessage(`{"skip_reflex":true}`),
+		Progress:           json.RawMessage(`{"session_id":"sess-existing","phase":"iteration_11","summary":"all steps done","plan":{"plan_rev":1,"current_step_id":"","steps":[{"id":"step_001","goal":"identify","skills":["analyst"],"status":"done"},{"id":"step_002","goal":"archives","skills":["analyst"],"status":"done"}]}}`),
+		Iteration:          11, // 12/60: far from the cap, plan exhausted
+		MaxIterations:      60,
+		AcceptanceCriteria: &criteria,
+	}
+
+	result, err := NewBackground(time.UTC, nil, nil, nil).Run(context.Background(), task, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !result.Done {
+		t.Fatal("synthesis after an exhausted plan must submit to the acceptance gate, not wait for the iteration cap")
+	}
+	if result.Output != "full report, no done marker" {
+		t.Fatalf("submission output = %q, want the report", result.Output)
+	}
+	userMsg, _ := store.appended[0].Content.(string)
+	if !strings.Contains(userMsg, "SYNTHESIS-PHASE") || strings.Contains(userMsg, "STEP-PHASE") {
+		t.Fatalf("exhausted plan must compose the synthesis prompt:\n%s", userMsg)
+	}
+
+	var progress bgProgress
+	if err := json.Unmarshal(result.Progress, &progress); err != nil {
+		t.Fatalf("result progress is not valid JSON: %v\n%s", err, result.Progress)
+	}
+	if progress.Plan == nil || len(progress.Plan.Steps) != 2 {
+		t.Fatalf("role plan was lost by synthesis: %#v", progress.Plan)
+	}
+}
+
+// The step phase is untouched: a pending step is still research, not a
+// submission, however many iterations remain.
+func TestBackgroundRunPendingStepIsNotASubmission(t *testing.T) {
+	provider := &capturingProvider{responses: []*core.CompletionResponse{{
+		StopReason: "end_turn",
+		Content:    []core.ContentBlock{{Type: "text", Text: "findings\nRESULT: step done"}},
+	}}}
+	deps, store := backgroundTestDeps(provider, map[string]string{
+		"background-task":      "BASE",
+		"background-step":      "STEP-PHASE",
+		"background-synthesis": "SYNTHESIS-PHASE",
+	})
+	deps.Config.Gateway.ResolveSkillCatalog = func(context.Context) ([]core.SkillMeta, error) {
+		return []core.SkillMeta{{Slug: "analyst", Title: "Analyst"}}, nil
+	}
+	deps.Config.Gateway.ResolveSkills = func(context.Context, []string) ([]string, error) {
+		return []string{"ANALYST-ROLE"}, nil
+	}
+
+	criteria := "A complete dossier with sources."
+	task := core.AgentTask{
+		ID:                 uuid.New(),
+		UserID:             uuid.New(),
+		Title:              "research task",
+		Strategy:           core.StrategyDirect,
+		Config:             json.RawMessage(`{"skip_reflex":true}`),
+		Progress:           json.RawMessage(`{"session_id":"sess-existing","phase":"iteration_2","plan":{"plan_rev":1,"current_step_id":"step_002","steps":[{"id":"step_001","goal":"identify","skills":["analyst"],"status":"done"},{"id":"step_002","goal":"archives","skills":["analyst"],"status":"pending"}]}}`),
+		Iteration:          2,
+		MaxIterations:      60,
+		AcceptanceCriteria: &criteria,
+	}
+
+	result, err := NewBackground(time.UTC, nil, nil, nil).Run(context.Background(), task, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Done {
+		t.Fatal("a pending plan step must not be submitted as the result")
+	}
+	userMsg, _ := store.appended[0].Content.(string)
+	if !strings.Contains(userMsg, "STEP-PHASE") {
+		t.Fatalf("pending step must compose the step prompt:\n%s", userMsg)
+	}
+}

@@ -247,6 +247,16 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			effectiveSkills = nil // planning — planner sees the catalog, not a body
 		case planStep == nil:
 			effectiveSkills = nil // plan exhausted — synthesis is role-neutral
+			// Nothing left to research means what this iteration writes IS
+			// the submission. Until 2026-08-21 the Done-claim waited for the
+			// iteration cap instead — the worker prompt names [DONE] only as
+			// a thing not to do early and never asks for it — so every planned
+			// task wrote its full report at the first synthesis and then
+			// rewrote it, unread, on every remaining iteration up to N−1:
+			// eight rewrites on an 18-iteration task, 47 on a 60-iteration
+			// one. A rejection still feeds back through [acceptance feedback]
+			// and the plan stays exhausted, so the repair loop is unchanged.
+			isSynthesisDeadline = true
 		case len(planStep.Skills) > 0:
 			effectiveSkills = planStep.Skills // the step's primary role
 		default:
