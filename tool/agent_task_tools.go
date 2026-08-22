@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 
 	bs "github.com/rasimio/blueship/internal/core"
@@ -44,7 +45,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 	// agent_task_create
 	// -------------------------------------------------------------------
 	r.Register(ToolAgentTaskCreate,
-		"Kick off an autonomous task. Choose strategy carefully — wrong choice = wasted budget:\n"+
+		"Kick off an autonomous task. The worker runs with the host's background toolbox — on this deployment the same tools you have (web, memory, notes, attachments incl. attachment_edit, calendar, sheets, github, MCP); write the mission and criteria in terms of those tools only, and name the file UUID when the job is to update an existing attachment. Choose strategy carefully — wrong choice = wasted budget:\n"+
 			"  • direct — DEFAULT for almost everything. LLM runs in a loop with the configured tools (web_search, browser_fetch, memory_*, etc.), iterates freely, and finishes when acceptance_criteria is satisfied. USE FOR: research, news digests, Q&A with web sources, deep-dives, market analysis, anything that boils down to 'iterate over tools until the answer is good enough'.\n"+
 			"  • structured — ONLY when the task is a fixed multi-phase pipeline with explicit ordering, peer-task callbacks, or revision gates (e.g. delegate code work to a coding peer: <peer>_task_create → wait → decide → execute → wait → decide → push → open_pr → merge). The plan field MUST contain a JSON array of step objects {action:tool|wait|decide|milestone|done, ...}. NEVER use structured for research/synthesis — direct does that better.\n"+
 			"  • delegate — hand off the WHOLE task to a peer agent (delegate_to = peer agent_id from BlueFleet). Peer runs its own lifecycle and reports terminal status back via callback.\n"+
@@ -125,6 +126,31 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 			}
 			if p.MaxIterations > 100 {
 				p.MaxIterations = 100
+			}
+			// A task creating a task. Workers carry this tool since the host
+			// toolbox reached parity with the chat role, and a worker that
+			// can spawn workers unbounded is the 2026-05-08 incident with
+			// extra steps — five duplicate research tasks from one turn.
+			// Lineage is stamped into config and bounded twice: depth (a
+			// task may delegate, its delegates may not) and live children
+			// per parent.
+			if parentID, inTask := bs.TaskIDFromContext(ctx); inTask {
+				parent, err := store.Get(ctx, parentID)
+				if err != nil {
+					return nil, fmt.Errorf("agent_task_create: parent task %s: %w", parentID, err)
+				}
+				siblings, err := store.ListForUser(ctx, d.UserID, "")
+				if err != nil {
+					return nil, fmt.Errorf("agent_task_create: list tasks: %w", err)
+				}
+				depth, err := spawnGuard(parent, countLiveChildren(siblings, parentID))
+				if err != nil {
+					return nil, err
+				}
+				p.Config, err = withSpawnLineage(p.Config, parentID, depth)
+				if err != nil {
+					return nil, fmt.Errorf("config: %w", err)
+				}
 			}
 			strategy := p.Strategy
 			if strategy == "" {
@@ -401,4 +427,85 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 	)
 
 	return nil
+}
+
+// Spawn bounds for a task created from inside another task's iteration.
+// maxSpawnDepth 1: the chat creates a task (depth 0), that task may create
+// sub-tasks (depth 1), and those finish their own work. maxLiveChildren
+// caps what one parent can have in flight, so a parent that re-plans every
+// iteration cannot fan out the same sub-task sixty times.
+const (
+	maxSpawnDepth   = 1
+	maxLiveChildren = 3
+	spawnedByKey    = "spawned_by"
+	spawnDepthKey   = "spawn_depth"
+)
+
+// spawnDepthOf reads a task's lineage depth from its config; a task the
+// chat created carries no key and sits at depth 0.
+func spawnDepthOf(config json.RawMessage) int {
+	if len(config) == 0 {
+		return 0
+	}
+	var cfg struct {
+		SpawnDepth int `json:"spawn_depth"`
+	}
+	if json.Unmarshal(config, &cfg) != nil {
+		return 0
+	}
+	return cfg.SpawnDepth
+}
+
+// spawnGuard decides whether parent may create one more child and returns
+// the child's depth. Both refusals name the bound, so the model reads why
+// and finishes the work itself instead of retrying the call.
+func spawnGuard(parent bs.AgentTask, liveChildren int) (int, error) {
+	depth := spawnDepthOf(parent.Config) + 1
+	if depth > maxSpawnDepth {
+		return 0, fmt.Errorf("agent_task_create: task %s is itself a sub-task (depth %d); sub-tasks may not spawn further tasks — do the work in this task", parent.ID, depth-1)
+	}
+	if liveChildren >= maxLiveChildren {
+		return 0, fmt.Errorf("agent_task_create: task %s already has %d sub-tasks in flight (limit %d); wait for them or do the work in this task", parent.ID, liveChildren, maxLiveChildren)
+	}
+	return depth, nil
+}
+
+// countLiveChildren counts parent's children that have not reached a
+// terminal state.
+func countLiveChildren(tasks []bs.AgentTask, parentID uuid.UUID) int {
+	want := parentID.String()
+	n := 0
+	for _, t := range tasks {
+		switch t.Status {
+		case "pending", "running", "paused":
+		default:
+			continue
+		}
+		if len(t.Config) == 0 {
+			continue
+		}
+		var cfg struct {
+			SpawnedBy string `json:"spawned_by"`
+		}
+		if json.Unmarshal(t.Config, &cfg) == nil && cfg.SpawnedBy == want {
+			n++
+		}
+	}
+	return n
+}
+
+// withSpawnLineage stamps the parent id and depth into the child's config,
+// keeping whatever else the caller put there.
+func withSpawnLineage(config json.RawMessage, parentID uuid.UUID, depth int) (json.RawMessage, error) {
+	cfg := map[string]json.RawMessage{}
+	if len(config) > 0 {
+		if err := json.Unmarshal(config, &cfg); err != nil {
+			return nil, err
+		}
+	}
+	by, _ := json.Marshal(parentID.String())
+	d, _ := json.Marshal(depth)
+	cfg[spawnedByKey] = by
+	cfg[spawnDepthKey] = d
+	return json.Marshal(cfg)
 }
