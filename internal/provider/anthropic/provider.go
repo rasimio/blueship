@@ -246,8 +246,14 @@ func applyThinkingAndEffort(apiReq *apiRequest, req bs.CompletionRequest) {
 	}
 	switch req.ThinkingMode {
 	case "adaptive":
-		apiReq.Thinking = &thinkingConfig{Type: "adaptive", Display: "summarized"}
-		apiReq.Temperature = 0
+		// Same silent-drop policy as effort below: a caller that asks for
+		// adaptive thinking should not 400 merely because this particular
+		// request landed on Haiku, which answers "adaptive thinking is not
+		// supported on this model".
+		if modelSupportsAdaptiveThinking(req.Model) {
+			apiReq.Thinking = &thinkingConfig{Type: "adaptive", Display: "summarized"}
+			apiReq.Temperature = 0
+		}
 	case "off":
 		// effort-only: no thinking block
 	default:
@@ -266,6 +272,17 @@ func applyThinkingAndEffort(apiReq *apiRequest, req bs.CompletionRequest) {
 // use it the param is silently dropped instead of 400ing the whole request, so
 // e.g. recurring can run on Haiku or Opus interchangeably.
 func modelSupportsEffort(model string) bool {
+	return !strings.Contains(strings.ToLower(model), "haiku")
+}
+
+// modelSupportsAdaptiveThinking reports whether the model accepts
+// thinking:{type:"adaptive"}. Haiku rejects it outright with a 400; Opus and
+// Sonnet 4.6+ accept it. Gated for the same reason as effort, and it has to be
+// gated separately: a caller pairing effort with adaptive thinking (the only
+// way to make effort mean the same thing across models) would otherwise have
+// effort quietly dropped for Haiku while the thinking block still 400'd the
+// whole request.
+func modelSupportsAdaptiveThinking(model string) bool {
 	return !strings.Contains(strings.ToLower(model), "haiku")
 }
 

@@ -475,3 +475,38 @@ func TestAPIKey401IsNotRetried(t *testing.T) {
 		t.Fatalf("sent %d requests, want 1", calls)
 	}
 }
+
+// A role configured for adaptive thinking plus effort must not 400 just
+// because this request landed on Haiku — the API rejects both the adaptive
+// thinking block and output_config.effort on that family.
+func TestHaikuDropsAdaptiveThinkingAndEffort(t *testing.T) {
+	for _, model := range []string{"claude-haiku-4-5", "claude-haiku-4-5-20251001"} {
+		var apiReq apiRequest
+		applyThinkingAndEffort(&apiReq, bs.CompletionRequest{
+			Model:        model,
+			ThinkingMode: "adaptive",
+			Effort:       "max",
+		})
+		if apiReq.Thinking != nil {
+			t.Errorf("%s: sent thinking %+v, want none", model, apiReq.Thinking)
+		}
+		if apiReq.OutputConfig != nil {
+			t.Errorf("%s: sent output_config %+v, want none", model, apiReq.OutputConfig)
+		}
+	}
+}
+
+func TestOpusKeepsAdaptiveThinkingAndEffort(t *testing.T) {
+	var apiReq apiRequest
+	applyThinkingAndEffort(&apiReq, bs.CompletionRequest{
+		Model:        "claude-opus-5",
+		ThinkingMode: "adaptive",
+		Effort:       "max",
+	})
+	if apiReq.Thinking == nil || apiReq.Thinking.Type != "adaptive" {
+		t.Fatalf("thinking = %+v, want type adaptive", apiReq.Thinking)
+	}
+	if apiReq.OutputConfig == nil || apiReq.OutputConfig.Effort != "max" {
+		t.Fatalf("output_config = %+v, want effort max", apiReq.OutputConfig)
+	}
+}
