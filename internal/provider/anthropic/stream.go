@@ -29,21 +29,33 @@ import (
 // tool_use has yet been delivered — once the caller has seen output a retry
 // would duplicate events, so the error is surfaced instead.
 func (p *Provider) StreamComplete(ctx context.Context, req bs.CompletionRequest, cb *bs.StreamCallbacks) (*bs.CompletionResponse, error) {
+	resp, emitted, err := p.streamComplete(ctx, req, cb)
+	// Retrying on a retired token is only safe while cb has seen nothing —
+	// past that a second pass would replay deltas the caller already got.
+	if err != nil && !emitted && p.retireRejectedToken(err) {
+		resp, _, err = p.streamComplete(ctx, req, cb)
+	}
+	return resp, err
+}
+
+// streamComplete runs the backoff loop and reports whether any event reached
+// cb, so the caller knows whether a further retry is safe.
+func (p *Provider) streamComplete(ctx context.Context, req bs.CompletionRequest, cb *bs.StreamCallbacks) (*bs.CompletionResponse, bool, error) {
 	var lastErr error
 	for attempt := 0; attempt <= len(p.backoffs); attempt++ {
 		resp, emitted, err := p.streamOnce(ctx, req, cb)
 		if err == nil {
-			return resp, nil
+			return resp, emitted, nil
 		}
 		lastErr = err
 
 		if emitted {
-			return nil, err // events already dispatched — a retry would duplicate
+			return nil, true, err // events already dispatched — a retry would duplicate
 		}
 
 		errMsg := err.Error()
 		if !strings.Contains(errMsg, "rate_limit") && !strings.Contains(errMsg, "overloaded") {
-			return nil, err
+			return nil, false, err
 		}
 
 		if attempt < len(p.backoffs) {
@@ -54,13 +66,13 @@ func (p *Provider) StreamComplete(ctx context.Context, req bs.CompletionRequest,
 			)
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, false, ctx.Err()
 			case <-time.After(p.backoffs[attempt]):
 			}
 		}
 	}
 
-	return nil, fmt.Errorf("anthropic stream failed after %d retries: %w", len(p.backoffs), lastErr)
+	return nil, false, fmt.Errorf("anthropic stream failed after %d retries: %w", len(p.backoffs), lastErr)
 }
 
 // streamOnce performs a single streaming attempt. The bool reports whether any
@@ -110,7 +122,7 @@ func (p *Provider) streamOnce(ctx context.Context, req bs.CompletionRequest, cb 
 
 	bearer := p.apiKey
 	if p.oauth {
-		tok, err := p.tokenSource()
+		tok, err := p.tokenSource.AccessToken()
 		if err != nil {
 			return nil, false, fmt.Errorf("anthropic-oauth auth: %w", err)
 		}
@@ -128,6 +140,10 @@ func (p *Provider) streamOnce(ctx context.Context, req bs.CompletionRequest, cb 
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return nil, false, fmt.Errorf("%w: anthropic stream API status %d: %s", errUnauthorized, resp.StatusCode, errBody)
+	}
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		return nil, false, fmt.Errorf("anthropic stream API status %d: %s", resp.StatusCode, errBody)

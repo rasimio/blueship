@@ -88,18 +88,34 @@ func OpenAICodex(refreshToken, tokenFile string, timeout time.Duration, backoffs
 	return openaicodex.NewCompletionProvider(ts, timeout, backoffs, logger)
 }
 
+// AnthropicTokenStore is the rotating OAuth token pair behind an AnthropicOAuth
+// provider. Re-exported so a long-lived host can drive refresh off the request
+// path and report token health; the request path refreshes on its own either way.
+type AnthropicTokenStore = anthropicoauth.TokenStore
+
+// AnthropicTokenStatus is a point-in-time view of token health.
+type AnthropicTokenStatus = anthropicoauth.Status
+
 // AnthropicOAuth creates a CompletionProvider using Claude subscription via OAuth.
 // refreshToken is the initial token from env (minted by the host OAuth login flow);
 // tokenFile persists rotated tokens. Requests are made through the standard
 // Anthropic Messages API but authenticated with a subscription-billed bearer
 // token instead of an API key — usage counts against the Claude Code plan.
 func AnthropicOAuth(refreshToken, tokenFile string, timeout time.Duration, backoffs []time.Duration, logger *slog.Logger) CompletionProvider {
+	provider, _ := AnthropicOAuthWithTokens(refreshToken, tokenFile, timeout, backoffs, logger)
+	return provider
+}
+
+// AnthropicOAuthWithTokens is AnthropicOAuth plus the token store, for hosts
+// that outlive a single request and want to refresh ahead of expiry rather
+// than on the first request that finds the token stale.
+func AnthropicOAuthWithTokens(refreshToken, tokenFile string, timeout time.Duration, backoffs []time.Duration, logger *slog.Logger) (CompletionProvider, *AnthropicTokenStore) {
 	ts := anthropicoauth.NewTokenStore(tokenFile, logger)
 	if err := ts.Load(); err != nil {
 		logger.Error("anthropic-oauth: load tokens", "error", err)
 	}
 	ts.Bootstrap(refreshToken)
-	return anthropic.NewOAuthProvider(ts.AccessToken, timeout, backoffs, logger)
+	return anthropic.NewOAuthProvider(ts, timeout, backoffs, logger), ts
 }
 
 // Telegram creates a TransportConfig for Telegram.

@@ -8,6 +8,7 @@ package anthropicoauth
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -37,6 +38,19 @@ const (
 	refreshTimeout = 30 * time.Second
 )
 
+// refreshBackoffs paces retries of a failed refresh. A transient 5xx or a
+// dropped connection used to surface as a failed completion, because the
+// single refresh attempt was the whole budget; the caller then had no token
+// until the next request happened to arrive.
+var refreshBackoffs = []time.Duration{1 * time.Second, 2 * time.Second, 5 * time.Second}
+
+// ErrRefreshRejected reports a refresh the endpoint refused outright. The
+// refresh token rotates on every exchange and is single-use, so this means
+// the chain has moved on without us — another process refreshed from the same
+// pair, or the session was revoked. No retry re-mints it; only a fresh
+// interactive login does.
+var ErrRefreshRejected = errors.New("anthropic-oauth: refresh token rejected")
+
 // refreshHTTPClient is used for token-refresh requests so a hung OAuth
 // endpoint can't hang the agent loop. Uses default transport so it still
 // respects HTTPS_PROXY for geo-routed deployments.
@@ -49,12 +63,27 @@ type TokenData struct {
 	ExpiresAt int64  `json:"expires_at"` // unix seconds
 }
 
+// Status is a snapshot of token health, for operator-facing readiness checks.
+// LastError is the most recent refresh failure and is cleared by the next
+// success, so a non-empty value means the store is currently unable to mint
+// access tokens.
+type Status struct {
+	Configured  bool
+	ExpiresAt   time.Time
+	LastRefresh time.Time
+	LastError   string
+	Rejected    bool // refresh token is dead; needs an interactive re-login
+}
+
 // TokenStore manages OAuth token persistence and automatic refresh.
 type TokenStore struct {
 	mu       sync.RWMutex
 	filePath string
 	data     TokenData
 	logger   *slog.Logger
+
+	lastRefresh time.Time
+	lastErr     error
 }
 
 // NewTokenStore creates a token store that reads/writes tokens to filePath.
@@ -94,6 +123,13 @@ func (s *TokenStore) Save() error {
 // writeTokenFile atomically persists token data. It's lock-free (data passed by
 // value) so it can be called both from Save (under RLock) and from
 // refreshLocked (which already holds the write lock) without deadlocking.
+//
+// The pair being replaced is kept alongside as <path>.prev. This is a manual
+// escape hatch, not an automatic fallback: if a rotation lands but the new
+// access token never works, an operator can inspect or restore the previous
+// pair instead of having nothing at all to look at. The live file is never
+// silently rolled back to it — a rotated-away refresh token is usually dead,
+// and quietly retrying a dead one would only mask the need to re-login.
 func writeTokenFile(filePath string, data TokenData) error {
 	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
@@ -103,6 +139,10 @@ func writeTokenFile(filePath string, data TokenData) error {
 	dir := filepath.Dir(filePath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create token dir: %w", err)
+	}
+
+	if prev, err := os.ReadFile(filePath); err == nil {
+		_ = os.WriteFile(filePath+".prev", prev, 0o600)
 	}
 
 	tmp := filePath + ".tmp"
@@ -133,11 +173,59 @@ func (s *TokenStore) IsConfigured() bool {
 	return s.data.Refresh != ""
 }
 
+// Status reports current token health without touching the network.
+func (s *TokenStore) Status() Status {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	st := Status{
+		Configured:  s.data.Refresh != "",
+		LastRefresh: s.lastRefresh,
+	}
+	if s.data.ExpiresAt > 0 {
+		st.ExpiresAt = time.Unix(s.data.ExpiresAt, 0)
+	}
+	if s.lastErr != nil {
+		st.LastError = s.lastErr.Error()
+		st.Rejected = errors.Is(s.lastErr, ErrRefreshRejected)
+	}
+	return st
+}
+
+// Invalidate drops the cached access token, keeping the refresh token, so the
+// next AccessToken mints a fresh one.
+//
+// Call this when Anthropic rejects a token the store still believed valid.
+// Expiry is not the only way an access token dies — refreshing the same pair
+// from somewhere else retires it, as does revoking the session — and without
+// this the store keeps serving the dead token until its nominal expiry. For an
+// 8-hour token that is a whole shift of requests 401ing with no self-recovery.
+func (s *TokenStore) Invalidate() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.data.Access = ""
+	s.data.ExpiresAt = 0
+}
+
 // AccessToken returns a valid access token, refreshing if needed.
 func (s *TokenStore) AccessToken() (string, error) {
+	return s.ensure(refreshBuffer)
+}
+
+// EnsureFresh refreshes when the access token expires within lead, and reports
+// whether the store currently holds a usable one. A caller that ticks this
+// with a lead well above refreshBuffer keeps rotation off the request path: a
+// refresh that fails there is retried on the next tick instead of surfacing as
+// a failed completion.
+func (s *TokenStore) EnsureFresh(lead time.Duration) error {
+	_, err := s.ensure(lead)
+	return err
+}
+
+func (s *TokenStore) ensure(lead time.Duration) (string, error) {
 	s.mu.RLock()
 	needsRefresh := s.data.Refresh != "" &&
-		(s.data.Access == "" || time.Now().Unix()+int64(refreshBuffer.Seconds()) >= s.data.ExpiresAt)
+		(s.data.Access == "" || time.Now().Add(lead).Unix() >= s.data.ExpiresAt)
 	token := s.data.Access
 	s.mu.RUnlock()
 
@@ -152,7 +240,7 @@ func (s *TokenStore) AccessToken() (string, error) {
 	defer s.mu.Unlock()
 
 	// Double-check after acquiring write lock.
-	if s.data.Access != "" && time.Now().Unix()+int64(refreshBuffer.Seconds()) < s.data.ExpiresAt {
+	if s.data.Access != "" && time.Now().Add(lead).Unix() < s.data.ExpiresAt {
 		return s.data.Access, nil
 	}
 
@@ -161,7 +249,9 @@ func (s *TokenStore) AccessToken() (string, error) {
 		// just rotated it server-side. Reload from disk in case the other
 		// agent persisted the new pair, then retry once.
 		if reloadErr := s.reloadFromDiskLocked(); reloadErr == nil {
-			if retryErr := s.refreshLocked(); retryErr == nil {
+			if retryErr := s.refreshOnceLocked(); retryErr == nil {
+				s.lastErr = nil
+				s.lastRefresh = time.Now()
 				return s.data.Access, nil
 			}
 		}
@@ -191,11 +281,42 @@ func (s *TokenStore) reloadFromDiskLocked() error {
 func (s *TokenStore) SetTokens(data TokenData) error {
 	s.mu.Lock()
 	s.data = data
+	s.lastErr = nil
 	s.mu.Unlock()
 	return s.Save()
 }
 
+// refreshLocked retries a failed refresh with backoff, stopping early once the
+// endpoint says the token itself is bad. The sleeps happen under the write
+// lock: concurrent callers block, but they are all waiting on the same token
+// and would fail without it anyway — serializing here is what keeps two
+// refreshes from racing and burning each other's single-use refresh token.
 func (s *TokenStore) refreshLocked() error {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		err := s.refreshOnceLocked()
+		if err == nil {
+			s.lastErr = nil
+			s.lastRefresh = time.Now()
+			return nil
+		}
+		lastErr = err
+
+		if errors.Is(err, ErrRefreshRejected) || attempt >= len(refreshBackoffs) {
+			break
+		}
+		s.logger.Warn("anthropic-oauth: refresh failed, retrying",
+			"error", err,
+			"attempt", attempt+1,
+			"backoff", refreshBackoffs[attempt],
+		)
+		time.Sleep(refreshBackoffs[attempt])
+	}
+	s.lastErr = lastErr
+	return lastErr
+}
+
+func (s *TokenStore) refreshOnceLocked() error {
 	s.logger.Info("anthropic-oauth: refreshing access token")
 
 	reqBody := map[string]string{
@@ -226,7 +347,15 @@ func (s *TokenStore) refreshLocked() error {
 			Description string `json:"error_description"`
 		}
 		json.NewDecoder(resp.Body).Decode(&errBody)
-		return fmt.Errorf("refresh failed (%d): %s — %s", resp.StatusCode, errBody.Error, errBody.Description)
+		err := fmt.Errorf("refresh failed (%d): %s — %s", resp.StatusCode, errBody.Error, errBody.Description)
+		// invalid_grant is OAuth's "this token is not yours to spend" and a
+		// 401 says the same about the client. Both are terminal; everything
+		// else (5xx, the 429 the retired console host still emits) is worth
+		// another attempt.
+		if errBody.Error == "invalid_grant" || resp.StatusCode == http.StatusUnauthorized {
+			return fmt.Errorf("%w: %s", ErrRefreshRejected, err)
+		}
+		return err
 	}
 
 	var tokenResp struct {

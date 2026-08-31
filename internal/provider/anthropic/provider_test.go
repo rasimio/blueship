@@ -160,9 +160,14 @@ func lastWireRole(t *testing.T, provider *Provider) string {
 	return lastRole
 }
 
+type staticToken string
+
+func (s staticToken) AccessToken() (string, error) { return string(s), nil }
+func (s staticToken) Invalidate()                  {}
+
 func TestOAuthDropsTrailingAssistant(t *testing.T) {
 	provider := NewOAuthProvider(
-		func() (string, error) { return "tok", nil },
+		staticToken("tok"),
 		time.Second, nil, slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
 	if got := lastWireRole(t, provider); got != "user" {
@@ -353,5 +358,120 @@ func TestCompleteStreamsWhenMaxTokensExceedsNonStreamedLine(t *testing.T) {
 	}
 	if large.Usage.OutputTokens != 20000 || large.Usage.InputTokens != 40 || large.Usage.CacheReadTokens != 30 {
 		t.Fatalf("streamed completion should carry usage, got %+v", large.Usage)
+	}
+}
+
+// rotatingToken is a TokenSource that mints a new bearer each time it is told
+// the last one was rejected, so a test can tell a genuine re-auth from a blind
+// replay of the same dead token.
+type rotatingToken struct {
+	n           int
+	invalidated int
+}
+
+func (r *rotatingToken) AccessToken() (string, error) { return fmt.Sprintf("tok-%d", r.n), nil }
+func (r *rotatingToken) Invalidate()                  { r.n++; r.invalidated++ }
+
+func TestOAuth401ForcesRefreshAndRetries(t *testing.T) {
+	ts := &rotatingToken{}
+	provider := NewOAuthProvider(ts, time.Second, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	var bearers []string
+	provider.httpClient = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			bearers = append(bearers, req.Header.Get("Authorization"))
+			if len(bearers) == 1 {
+				return &http.Response{
+					StatusCode: http.StatusUnauthorized,
+					Body:       io.NopCloser(strings.NewReader(`{"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired"}}`)),
+					Header:     make(http.Header),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"m","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	resp, err := provider.Complete(context.Background(), bs.CompletionRequest{
+		Model:     "claude-opus-4-8",
+		MaxTokens: 128,
+		Messages:  []bs.Message{{Role: "user", Content: []bs.ContentBlock{{Type: "text", Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatalf("Complete after 401 retry: %v", err)
+	}
+	if resp.Content[0].Text != "ok" {
+		t.Fatalf("unexpected content: %+v", resp.Content)
+	}
+	if ts.invalidated != 1 {
+		t.Fatalf("Invalidate called %d times, want 1", ts.invalidated)
+	}
+	if len(bearers) != 2 {
+		t.Fatalf("sent %d requests, want 2", len(bearers))
+	}
+	if bearers[0] == bearers[1] {
+		t.Fatalf("retry reused the rejected bearer %q", bearers[0])
+	}
+}
+
+func TestOAuthPersistent401GivesUp(t *testing.T) {
+	ts := &rotatingToken{}
+	provider := NewOAuthProvider(ts, time.Second, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	calls := 0
+	provider.httpClient = &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Body:       io.NopCloser(strings.NewReader(`{"type":"error","error":{"type":"authentication_error"}}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	if _, err := provider.Complete(context.Background(), bs.CompletionRequest{
+		Model:     "claude-opus-4-8",
+		MaxTokens: 128,
+		Messages:  []bs.Message{{Role: "user", Content: []bs.ContentBlock{{Type: "text", Text: "hi"}}}},
+	}); err == nil {
+		t.Fatal("want error when the refreshed token is rejected too")
+	}
+	// One retry, not a loop: a second 401 means the refresh itself is not
+	// helping, and hammering the endpoint would only burn rate limit.
+	if calls != 2 {
+		t.Fatalf("sent %d requests, want 2", calls)
+	}
+	if ts.invalidated != 1 {
+		t.Fatalf("Invalidate called %d times, want 1", ts.invalidated)
+	}
+}
+
+func TestAPIKey401IsNotRetried(t *testing.T) {
+	provider := NewProvider("test-key", time.Second, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	calls := 0
+	provider.httpClient = &http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Body:       io.NopCloser(strings.NewReader(`{"type":"error"}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+	if _, err := provider.Complete(context.Background(), bs.CompletionRequest{
+		Model:     "claude-opus-4-8",
+		MaxTokens: 128,
+		Messages:  []bs.Message{{Role: "user", Content: []bs.ContentBlock{{Type: "text", Text: "hi"}}}},
+	}); err == nil {
+		t.Fatal("want error on 401")
+	}
+	// A static API key does not get better by being re-read.
+	if calls != 1 {
+		t.Fatalf("sent %d requests, want 1", calls)
 	}
 }

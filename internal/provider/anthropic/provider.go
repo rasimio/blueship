@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,9 +23,17 @@ const messagesURL = "https://api.anthropic.com/v1/messages"
 // stays out of the cached user-prompt breakpoint.
 const claudeCodeIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
 
-// TokenSource returns a fresh bearer token. Used by the OAuth code path so
-// the request builder doesn't need to know about refresh logic.
-type TokenSource func() (string, error)
+// TokenSource supplies bearer tokens for the OAuth code path and accepts a
+// report that one was rejected upstream, so the request builder needs to know
+// nothing about refresh mechanics. Implemented by anthropicoauth.TokenStore.
+type TokenSource interface {
+	AccessToken() (string, error)
+	Invalidate()
+}
+
+// errUnauthorized marks an upstream 401 so the OAuth path can tell "our bearer
+// token is dead" apart from every other request failure.
+var errUnauthorized = errors.New("anthropic: upstream rejected credentials")
 
 // Provider implements bs.CompletionProvider using the Anthropic Messages API.
 // Auth is either a static API key (x-api-key-style bearer) or an OAuth token
@@ -83,6 +92,32 @@ func (p *Provider) Complete(ctx context.Context, req bs.CompletionRequest) (*bs.
 		)
 		return p.StreamComplete(ctx, req, nil)
 	}
+
+	resp, err := p.complete(ctx, req)
+	if err != nil && p.retireRejectedToken(err) {
+		return p.complete(ctx, req)
+	}
+	return resp, err
+}
+
+// retireRejectedToken reports whether err was upstream refusing our bearer
+// token, and if so drops it so the next attempt mints a fresh one.
+//
+// A 401 here does not mean the token expired — the store refreshes before
+// expiry — but that Anthropic retired it early, which is what happens when the
+// same refresh pair is rotated by another process or the session is revoked.
+// Without this the store keeps handing out the dead token until its nominal
+// expiry and every request 401s until then, with no self-recovery.
+func (p *Provider) retireRejectedToken(err error) bool {
+	if !p.oauth || !errors.Is(err, errUnauthorized) {
+		return false
+	}
+	p.logger.Warn("anthropic: access token rejected upstream, forcing refresh", "error", err)
+	p.tokenSource.Invalidate()
+	return true
+}
+
+func (p *Provider) complete(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
 	var lastErr error
 	for attempt := 0; attempt <= len(p.backoffs); attempt++ {
 		resp, err := p.sendOnce(ctx, req)
@@ -284,7 +319,7 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 
 	bearer := p.apiKey
 	if p.oauth {
-		tok, err := p.tokenSource()
+		tok, err := p.tokenSource.AccessToken()
 		if err != nil {
 			return nil, fmt.Errorf("anthropic-oauth auth: %w", err)
 		}
@@ -303,6 +338,9 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 		return nil, fmt.Errorf("read response: %w", err)
 	}
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("%w: anthropic API status %d: %s", errUnauthorized, resp.StatusCode, respBody)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("anthropic API status %d: %s", resp.StatusCode, respBody)
 	}
