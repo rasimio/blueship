@@ -34,6 +34,28 @@ const mimeXlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sh
 // bounded by XlsxTextHeadCap and the per-sheet caps above; every
 // truncation is stated inline.
 func ExtractXlsxMarkdown(data []byte) (string, error) {
+	return ExtractXlsxMarkdownWindow(data, XlsxWindow{})
+}
+
+// XlsxWindow selects which slice of a workbook to render. The zero value is
+// the whole-workbook head every ingest path uses.
+type XlsxWindow struct {
+	// Sheet renders only the named sheet. Empty renders every sheet up to
+	// the sheet cap.
+	Sheet string
+	// RowOffset skips that many DATA rows (the header row is always
+	// repeated, so a window never arrives without its column names).
+	RowOffset int
+}
+
+// ExtractXlsxMarkdownWindow renders one slice of a workbook. A large sheet
+// does not fit under the caps in one read, and until 2026-09-02 there was no
+// second read to ask for: the output said "ask for a specific range" while
+// attachment_read took a UUID and nothing else. Four consecutive background
+// tasks burned ~110 iterations trying to reach rows 201-1292 of one workbook,
+// one of them by guessing at internal HTTP endpoints. Paging is what makes the
+// announced truncation recoverable.
+func ExtractXlsxMarkdownWindow(data []byte, window XlsxWindow) (string, error) {
 	f, err := excelize.OpenReader(bytes.NewReader(data))
 	if err != nil {
 		return "", fmt.Errorf("xlsx: open: %w", err)
@@ -43,8 +65,16 @@ func ExtractXlsxMarkdown(data []byte) (string, error) {
 	var b strings.Builder
 	sheets := f.GetSheetList()
 	shownSheets := sheets
-	if len(shownSheets) > xlsxMaxSheets {
+	if window.Sheet != "" {
+		if indexOf(sheets, window.Sheet) == len(sheets) {
+			return "", fmt.Errorf("xlsx: no sheet %q (have: %s)", window.Sheet, strings.Join(sheets, ", "))
+		}
+		shownSheets = []string{window.Sheet}
+	} else if len(shownSheets) > xlsxMaxSheets {
 		shownSheets = shownSheets[:xlsxMaxSheets]
+	}
+	if window.RowOffset < 0 {
+		window.RowOffset = 0
 	}
 
 	for _, sheet := range shownSheets {
@@ -63,10 +93,12 @@ func ExtractXlsxMarkdown(data []byte) (string, error) {
 			continue
 		}
 
-		shownRows := rows
-		if len(shownRows) > xlsxMaxRowsSheet {
-			shownRows = shownRows[:xlsxMaxRowsSheet]
-		}
+		// header stays out of the window so every slice arrives with its
+		// column names; dataRows is what RowOffset walks.
+		header, dataRows := rows[0], rows[1:]
+		start := min(window.RowOffset, len(dataRows))
+		end := min(start+xlsxMaxRowsSheet, len(dataRows))
+		shownRows := append([]([]string){header}, dataRows[start:end]...)
 		width := 0
 		for _, row := range shownRows {
 			if len(row) > width {
@@ -100,8 +132,16 @@ func ExtractXlsxMarkdown(data []byte) (string, error) {
 				break
 			}
 		}
-		if len(rows) > len(shownRows) || b.Len() >= XlsxTextHeadCap {
-			fmt.Fprintf(&b, "\n[showing %d of %d rows — ask for a specific range for more]\n", min(len(shownRows), xlsxMaxRowsSheet), len(rows))
+		// Every slice states where it sits and how to fetch the next one —
+		// an announced truncation is only useful with the follow-up call
+		// spelled out.
+		switch {
+		case end < len(dataRows) || b.Len() >= XlsxTextHeadCap:
+			fmt.Fprintf(&b, "\n[data rows %d-%d of %d shown (header repeated). Next slice: attachment_read with sheet=%q, row_offset=%d]\n",
+				start+1, end, len(dataRows), sheet, end)
+		case start > 0:
+			fmt.Fprintf(&b, "\n[data rows %d-%d of %d shown (header repeated) — end of sheet]\n",
+				start+1, end, len(dataRows))
 		}
 		if truncCols {
 			fmt.Fprintf(&b, "[showing first %d columns]\n", xlsxMaxCols)

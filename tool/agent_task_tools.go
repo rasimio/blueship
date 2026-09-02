@@ -23,6 +23,49 @@ const (
 	ToolAgentTaskApprove = "agent_task_approve"
 )
 
+// validateRequestedTools rejects a tool allow-list naming tools that do not
+// exist. The allow-list is applied downstream with SubsetForNames, which drops
+// unknown names silently — so a plausible-looking guess ("sheets" for the
+// sheets_* family, "attachments" for attachment_*) narrows the worker's
+// registry to nothing at all. On 2026-09-02 a task created with
+// ["sheets","attachments"] spent all 20 of its iterations reporting
+// `available_tools: none` and then failed the acceptance gate. Failing the
+// create call instead costs one tool round trip and names the alternatives,
+// which is what the caller needs to get it right.
+//
+// peer: and mcp__ names address routing targets resolved per soul at dispatch
+// time and are never present in this registry, so they pass through.
+func validateRequestedTools(r *bs.ToolRegistry, requested []string) error {
+	if r == nil || len(requested) == 0 {
+		return nil
+	}
+	known := make(map[string]bool)
+	for _, def := range r.Definitions() {
+		known[def.Name] = true
+	}
+	var unknown []string
+	for _, name := range requested {
+		name = strings.TrimSpace(name)
+		if name == "" || known[name] ||
+			strings.HasPrefix(name, "peer:") || strings.HasPrefix(name, "mcp__") {
+			continue
+		}
+		unknown = append(unknown, name)
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	available := make([]string, 0, len(known))
+	for _, def := range r.Definitions() {
+		available = append(available, def.Name)
+	}
+	return fmt.Errorf(
+		"tools: no such tool: %s. The allow-list takes exact tool names, not families — "+
+			"e.g. sheets_read / sheets_write, not \"sheets\". Available: %s. "+
+			"Omit tools entirely to give the worker the full registry",
+		strings.Join(unknown, ", "), strings.Join(available, ", "))
+}
+
 // RegisterAgentTaskTools adds the BlueShip-primitive task tools
 // (agent_task_create / status / list / cancel / approve) to the registry.
 //
@@ -164,6 +207,9 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 			}
 			if strategy == bs.StrategyDelegate && p.DelegateTo == "" {
 				return nil, fmt.Errorf("strategy=delegate requires delegate_to (peer agent_id)")
+			}
+			if err := validateRequestedTools(r, p.Tools); err != nil {
+				return nil, err
 			}
 
 			task := bs.AgentTask{
@@ -358,6 +404,9 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 			}
 			if p.MaxIterations <= 0 {
 				p.MaxIterations = 20
+			}
+			if err := validateRequestedTools(r, p.Tools); err != nil {
+				return nil, err
 			}
 
 			origin := map[string]string{}

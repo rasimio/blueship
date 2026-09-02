@@ -482,6 +482,28 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 	}
 	registry := registryForTask(baseRegistry, handler.DefaultTools(), requestedTools, hasRequestedTools)
 
+	// A task whose allow-list survives none of the registry has no way to do
+	// its job, and nothing downstream notices: the worker reports
+	// `available_tools: none` for every iteration it has and the acceptance
+	// gate fails it at the cap (2026-09-02, tools ["sheets","attachments"] —
+	// family names, not tool names — 20 wasted iterations). agent_task_create
+	// now rejects unknown names up front; this catches rows that predate that
+	// check or arrive by another path. registryErr is left to the handler,
+	// which reports the underlying validation error.
+	if registryErr == nil && hasRequestedTools && registry.Count() == 0 && baseRegistry.Count() > 0 {
+		reason := "requested tools resolve to an empty registry: " + strings.Join(requestedTools, ", ")
+		s.logger.ErrorContext(ctx, "agent-tasks: task failed (no usable tools)",
+			"task_id", task.ID, "title", task.Title, "requested_tools", requestedTools)
+		span.SetAttributes(attribute.String("agent_task.outcome", "no_usable_tools"))
+		dbCtx, dbCancel := context.WithTimeout(
+			core.WithSoulID(context.Background(), task.SoulID), 10*time.Second)
+		defer dbCancel()
+		if err := s.store.Fail(dbCtx, task.ID, reason); err != nil {
+			s.logger.ErrorContext(ctx, "agent-tasks: fail update error", "error", err)
+		}
+		return false
+	}
+
 	agentDeps := core.AgentDeps{
 		LLM:                 s.deps.LLM,
 		Embedder:            s.deps.Embedder,

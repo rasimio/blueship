@@ -349,7 +349,7 @@ func TestBackgroundRunRendersAcceptanceFeedback(t *testing.T) {
 	userMsg, _ := store.appended[0].Content.(string)
 	for _, want := range []string{
 		"[acceptance feedback]",
-		"The previous iteration was rejected by the acceptance gate. Address this before finishing:",
+		"The previous iteration did not produce an accepted result. Address this before finishing:",
 		"Report cites zero URLs; criteria demands at least five distinct sources.",
 		"[/acceptance feedback]",
 	} {
@@ -666,5 +666,180 @@ func TestBackgroundRunPendingStepIsNotASubmission(t *testing.T) {
 	userMsg, _ := store.appended[0].Content.(string)
 	if !strings.Contains(userMsg, "STEP-PHASE") {
 		t.Fatalf("pending step must compose the step prompt:\n%s", userMsg)
+	}
+}
+
+// A blank reply is not a submission. Before 2026-09-02 an exhausted plan made
+// every remaining iteration a submission deadline, so a stuck worker answering
+// [no-op] handed the acceptance gate an empty string, was told "the result is
+// empty", and repeated that for the rest of its budget — 24 rejections on one
+// task, ~3 minutes each.
+func TestBackgroundRunBlankSubmissionContinuesWithFeedback(t *testing.T) {
+	provider := &capturingProvider{responses: []*core.CompletionResponse{{
+		StopReason: "end_turn",
+		Content:    []core.ContentBlock{{Type: "text", Text: "[no-op]"}},
+	}}}
+	deps, _ := backgroundTestDeps(provider, map[string]string{
+		"background-task":      "BASE",
+		"background-step":      "STEP-PHASE",
+		"background-synthesis": "SYNTHESIS-PHASE",
+	})
+	deps.Config.Gateway.ResolveSkillCatalog = func(context.Context) ([]core.SkillMeta, error) {
+		return []core.SkillMeta{{Slug: "analyst", Title: "Analyst"}}, nil
+	}
+	deps.Config.Gateway.ResolveSkills = func(context.Context, []string) ([]string, error) {
+		return []string{"ANALYST-ROLE"}, nil
+	}
+
+	criteria := "A complete dossier with sources."
+	task := core.AgentTask{
+		ID:                 uuid.New(),
+		UserID:             uuid.New(),
+		Title:              "research task",
+		Strategy:           core.StrategyDirect,
+		Config:             json.RawMessage(`{"skip_reflex":true}`),
+		Progress:           json.RawMessage(`{"session_id":"sess-existing","plan":{"plan_rev":1,"current_step_id":"","steps":[{"id":"step_001","goal":"identify","skills":["analyst"],"status":"done"}]}}`),
+		Iteration:          6,
+		MaxIterations:      30,
+		AcceptanceCriteria: &criteria,
+	}
+
+	result, err := NewBackground(time.UTC, nil, nil, nil).Run(context.Background(), task, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.Done {
+		t.Fatal("a blank reply must not be submitted to the acceptance gate")
+	}
+	if result.Output != "" {
+		t.Fatalf("blank iteration output = %q, want empty", result.Output)
+	}
+	var progress bgProgress
+	if err := json.Unmarshal(result.Progress, &progress); err != nil {
+		t.Fatalf("result progress is not valid JSON: %v\n%s", err, result.Progress)
+	}
+	if progress.BlankSubmissions != 1 {
+		t.Fatalf("blank_submissions = %d, want 1", progress.BlankSubmissions)
+	}
+	if progress.Plan == nil || len(progress.Plan.Steps) != 1 {
+		t.Fatalf("role plan was lost by the blank branch: %#v", progress.Plan)
+	}
+	fb := acceptanceFeedbackFromProgress(result.Progress)
+	if !strings.Contains(fb, "carried no result") {
+		t.Fatalf("next iteration gets no usable note about the blank reply: %q", fb)
+	}
+}
+
+// The second blank in a row asks for a named blocker instead of another
+// [no-op]: an unfinished mission with a stated obstacle is a usable result.
+func TestBackgroundRunRepeatedBlankSubmissionEscalatesNote(t *testing.T) {
+	provider := &capturingProvider{responses: []*core.CompletionResponse{{
+		StopReason: "end_turn",
+		Content:    []core.ContentBlock{{Type: "text", Text: "[no-op]"}},
+	}}}
+	deps, _ := backgroundTestDeps(provider, map[string]string{
+		"background-task":      "BASE",
+		"background-step":      "STEP-PHASE",
+		"background-synthesis": "SYNTHESIS-PHASE",
+	})
+	deps.Config.Gateway.ResolveSkillCatalog = func(context.Context) ([]core.SkillMeta, error) {
+		return []core.SkillMeta{{Slug: "analyst", Title: "Analyst"}}, nil
+	}
+	deps.Config.Gateway.ResolveSkills = func(context.Context, []string) ([]string, error) {
+		return []string{"ANALYST-ROLE"}, nil
+	}
+
+	criteria := "A complete dossier with sources."
+	task := core.AgentTask{
+		ID:                 uuid.New(),
+		UserID:             uuid.New(),
+		Title:              "research task",
+		Strategy:           core.StrategyDirect,
+		Config:             json.RawMessage(`{"skip_reflex":true}`),
+		Progress:           json.RawMessage(`{"session_id":"sess-existing","blank_submissions":2,"plan":{"plan_rev":1,"current_step_id":"","steps":[{"id":"step_001","goal":"identify","skills":["analyst"],"status":"done"}]}}`),
+		Iteration:          9,
+		MaxIterations:      30,
+		AcceptanceCriteria: &criteria,
+	}
+
+	result, err := NewBackground(time.UTC, nil, nil, nil).Run(context.Background(), task, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var progress bgProgress
+	if err := json.Unmarshal(result.Progress, &progress); err != nil {
+		t.Fatalf("result progress is not valid JSON: %v\n%s", err, result.Progress)
+	}
+	if progress.BlankSubmissions != 3 {
+		t.Fatalf("blank_submissions = %d, want 3", progress.BlankSubmissions)
+	}
+	fb := acceptanceFeedbackFromProgress(result.Progress)
+	if !strings.Contains(fb, "which step is blocked") {
+		t.Fatalf("repeated blank must ask for a named blocker: %q", fb)
+	}
+}
+
+// The last iteration still terminates: continuing there would only defer the
+// same empty hand-off to the scheduler's exhaustion path.
+func TestBackgroundRunBlankSubmissionOnFinalIterationStillCompletes(t *testing.T) {
+	provider := &capturingProvider{responses: []*core.CompletionResponse{{
+		StopReason: "end_turn",
+		Content:    []core.ContentBlock{{Type: "text", Text: "[no-op]"}},
+	}}}
+	deps, _ := backgroundTestDeps(provider, map[string]string{"background-task": "BASE"})
+
+	criteria := "A complete dossier with sources."
+	task := core.AgentTask{
+		ID:                 uuid.New(),
+		UserID:             uuid.New(),
+		Title:              "research task",
+		Strategy:           core.StrategyDirect,
+		Config:             json.RawMessage(`{"skip_reflex":true}`),
+		Progress:           json.RawMessage(`{"session_id":"sess-existing"}`),
+		Iteration:          2,
+		MaxIterations:      3,
+		AcceptanceCriteria: &criteria,
+	}
+
+	result, err := NewBackground(time.UTC, nil, nil, nil).Run(context.Background(), task, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !result.Done {
+		t.Fatal("the final iteration must stay terminal even when the reply is blank")
+	}
+}
+
+// Recurring jobs are unchanged: [no-op] is a heartbeat's legitimate way to say
+// there is nothing to report, and they carry no acceptance gate.
+func TestBackgroundRunNoOpWithoutAcceptanceGateStillCompletes(t *testing.T) {
+	provider := &capturingProvider{responses: []*core.CompletionResponse{{
+		StopReason: "end_turn",
+		Content:    []core.ContentBlock{{Type: "text", Text: "[DONE] [no-op]"}},
+	}}}
+	deps, _ := backgroundTestDeps(provider, map[string]string{"background-task": "BASE"})
+
+	schedule := "*/5 * * * *"
+	task := core.AgentTask{
+		ID:            uuid.New(),
+		UserID:        uuid.New(),
+		Title:         "heartbeat",
+		Strategy:      core.StrategyDirect,
+		Config:        json.RawMessage(`{"skip_reflex":true}`),
+		Progress:      json.RawMessage(`{"session_id":"sess-existing"}`),
+		Schedule:      &schedule,
+		Iteration:     4,
+		MaxIterations: 100,
+	}
+
+	result, err := NewBackground(time.UTC, nil, nil, nil).Run(context.Background(), task, deps)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !result.Done {
+		t.Fatal("a recurring [no-op] must still complete its cycle")
+	}
+	if result.Output != "" {
+		t.Fatalf("no-op output = %q, want empty", result.Output)
 	}
 }

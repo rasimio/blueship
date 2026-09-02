@@ -664,9 +664,12 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// does not carry the key, so the handler's own progress writes drop it —
 	// the block renders only on the iteration right after a rejection — and
 	// a passing acceptance terminates the task, so feedback never survives
-	// a success.
+	// a success. blankSubmissionProgress writes the same key when an
+	// iteration reached the submission branch with nothing to submit, so the
+	// framing names both cases rather than asserting a review that may not
+	// have happened.
 	if fb := acceptanceFeedbackFromProgress(task.Progress); fb != "" {
-		msg += fmt.Sprintf("\n\n[acceptance feedback]\nThe previous iteration was rejected by the acceptance gate. Address this before finishing:\n%s\n[/acceptance feedback]",
+		msg += fmt.Sprintf("\n\n[acceptance feedback]\nThe previous iteration did not produce an accepted result. Address this before finishing:\n%s\n[/acceptance feedback]",
 			truncate(fb, 600))
 	}
 
@@ -915,10 +918,32 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		clean = stripBackgroundStatusTails(clean)
 		clean = strings.TrimSpace(clean)
 
+		blank := clean == "" || strings.Contains(clean, "[no-op]") || isGarbageOutput(clean)
+		if blank {
+			progress.BlankSubmissions++
+		} else {
+			progress.BlankSubmissions = 0
+		}
+
 		progressJSON, _ := json.Marshal(progress)
 
 		// Filter no-op and garbage output (e.g. raw UUIDs from tool results).
-		if clean == "" || strings.Contains(clean, "[no-op]") || isGarbageOutput(clean) {
+		if blank {
+			// With a reviewer waiting, a blank reply is not a submission.
+			// Handing the gate an empty string earns "the result is empty" —
+			// a verdict about the harness, not the work — so the model learns
+			// nothing and the next iteration blanks again. On 2026-09-02 one
+			// task spent 24 of its 30 iterations, ~3 minutes each, in exactly
+			// that loop: its plan was exhausted (so every remaining iteration
+			// is a submission deadline), it was stuck on a tool limit, and it
+			// answered [no-op] every time. Stay non-terminal instead and hand
+			// the next iteration a note that names what actually went wrong.
+			if hasAcceptanceGate && !isLast {
+				return core.IterationResult{
+					Progress:      blankSubmissionProgress(progressJSON, progress.BlankSubmissions),
+					ToolCallsJSON: toolCallsJSON,
+				}, nil
+			}
 			return core.IterationResult{Done: true, Progress: progressJSON, ToolCallsJSON: toolCallsJSON}, nil
 		}
 		if len(programDeliveryRefs) == 1 && !deliveryAckValid && !deliveryAckAttempted {
@@ -1106,6 +1131,36 @@ type bgProgress struct {
 	// the working set an iteration would otherwise have to re-derive by
 	// re-reading everything. See evidence.go.
 	Evidence []EvidenceEntry `json:"evidence,omitempty"`
+	// BlankSubmissions counts consecutive iterations that reached the
+	// submission branch with nothing to submit. Reset by the first real
+	// result; read to escalate the wording of the note sent back.
+	BlankSubmissions int `json:"blank_submissions,omitempty"`
+}
+
+// blankSubmissionProgress attaches the note the next iteration reads back as
+// [acceptance feedback]. It rides the same progress key a reject reason does
+// and is deliberately not a bgProgress field, so it self-clears after one
+// iteration instead of round-tripping forever.
+func blankSubmissionProgress(progressJSON json.RawMessage, consecutive int) json.RawMessage {
+	note := "Your last reply carried no result — it was empty, [no-op], or raw tool output. " +
+		"A reviewer is waiting for the finished deliverable, so a blank iteration submits " +
+		"nothing and costs one of the iterations you have left. Write the deliverable itself now."
+	if consecutive >= 2 {
+		note += fmt.Sprintf(" This is the %dth blank reply in a row. If a tool limit or missing "+
+			"access genuinely blocks the mission, do NOT answer [no-op] again: write up what you "+
+			"did establish, then state plainly which step is blocked and what would unblock it. "+
+			"A named blocker is a usable result; silence is not.", consecutive)
+	}
+	var object map[string]any
+	if json.Unmarshal(progressJSON, &object) != nil || object == nil {
+		return progressJSON
+	}
+	object["acceptance_feedback"] = note
+	merged, err := json.Marshal(object)
+	if err != nil {
+		return progressJSON
+	}
+	return merged
 }
 
 // acceptanceFeedbackFromProgress extracts the reject reason the acceptance
