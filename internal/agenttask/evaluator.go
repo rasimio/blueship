@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -230,19 +231,34 @@ func isLooksLikeRealURL(s string) bool {
 // All URLs are canonicalised before insertion so the report-side and
 // fetch-side sets intersect through the same key space.
 //
-// Returns an empty set on any error — caller treats "no fetched URLs"
-// as a hard failure for evidentiary tasks (you can't cite what you
-// didn't read), so a DB hiccup falls on the safe side rather than
-// silently passing fake citations.
-func loadFetchedURLs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID) map[string]struct{} {
+// evidenceCtx bounds an evidence read on its own clock. Acceptance runs on the
+// iteration context, which a tool-heavy iteration can leave at or past its
+// deadline — and these reads decide whether the model gets told it fabricated
+// its citations, so they must not inherit that exhaustion. Background-rooted,
+// re-carrying the soul so a detached read stays attributed.
+func evidenceCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(
+		core.WithSoulID(context.Background(), core.SoulIDFromContext(ctx)), 15*time.Second)
+}
+
+// The error is load-bearing and must not be dropped. An empty set and an
+// unreadable set look identical to a caller but mean opposite things — "the
+// model cited pages it never opened" versus "I could not check" — and the
+// caller's gates read the first meaning into both. Discarding it fired the
+// fabrication gate on a task that had fetched 259 pages, three iterations in
+// a row, each time telling the model to go and do what it had already done
+// (2026-09-02, task 7ee9fd00).
+func loadFetchedURLs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID) (map[string]struct{}, error) {
 	out := map[string]struct{}{}
 	if deps.DB == nil {
-		return out
+		return out, nil
 	}
 	db, err := deps.DB("ship")
 	if err != nil {
-		return out
+		return out, fmt.Errorf("fetch record: open ship db: %w", err)
 	}
+	ctx, cancel := evidenceCtx(ctx)
+	defer cancel()
 
 	// Path 1: tool_calls jsonb. tool_calls.input is the URL the agent
 	// asked for (pre-rewrite). Survives even when tool_outputs table is
@@ -252,17 +268,22 @@ func loadFetchedURLs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID)
 		FROM blueship.agent_task_iterations,
 		     jsonb_array_elements(tool_calls) AS tc
 		WHERE task_id = $1 AND tc->>'name' = 'browser_fetch'`, taskID)
-	if err == nil {
-		for rows.Next() {
-			var input string
-			if err := rows.Scan(&input); err != nil {
-				continue
-			}
-			for u := range extractURLs(input) {
-				out[u] = struct{}{}
-			}
+	if err != nil {
+		return out, fmt.Errorf("fetch record: tool_calls query: %w", err)
+	}
+	for rows.Next() {
+		var input string
+		if err := rows.Scan(&input); err != nil {
+			continue
 		}
-		rows.Close()
+		for u := range extractURLs(input) {
+			out[u] = struct{}{}
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return out, fmt.Errorf("fetch record: tool_calls scan: %w", err)
 	}
 
 	// Path 2: agent_task_tool_outputs filtered to browser_fetch. Both
@@ -272,26 +293,30 @@ func loadFetchedURLs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID)
 		SELECT metadata->>'requested_url', metadata->>'final_url'
 		FROM blueship.agent_task_tool_outputs
 		WHERE task_id = $1 AND tool_name = 'browser_fetch'`, taskID)
-	if err == nil {
-		defer docRows.Close()
-		for docRows.Next() {
-			var requested, final *string
-			if err := docRows.Scan(&requested, &final); err != nil {
-				continue
+	if err != nil {
+		return out, fmt.Errorf("fetch record: tool_outputs query: %w", err)
+	}
+	defer docRows.Close()
+	for docRows.Next() {
+		var requested, final *string
+		if err := docRows.Scan(&requested, &final); err != nil {
+			continue
+		}
+		if requested != nil {
+			if k := canonURLKey(*requested); k != "" {
+				out[k] = struct{}{}
 			}
-			if requested != nil {
-				if k := canonURLKey(*requested); k != "" {
-					out[k] = struct{}{}
-				}
-			}
-			if final != nil {
-				if k := canonURLKey(*final); k != "" {
-					out[k] = struct{}{}
-				}
+		}
+		if final != nil {
+			if k := canonURLKey(*final); k != "" {
+				out[k] = struct{}{}
 			}
 		}
 	}
-	return out
+	if err := docRows.Err(); err != nil {
+		return out, fmt.Errorf("fetch record: tool_outputs scan: %w", err)
+	}
+	return out, nil
 }
 
 // extractFetchedURLsFromTrace parses a tool-trace jsonb blob (the same
@@ -383,16 +408,19 @@ type ToolOutput struct {
 // generic forensics views); passing []string{"browser_fetch"} narrows
 // to research grounding's relevant slice.
 //
-// Returns nil on DB error; caller decides whether "no outputs" is a
-// hard fail or a no-op.
-func loadToolOutputs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID, toolNames []string) []ToolOutput {
+// Like the fetch record, a read failure is reported rather than returned as
+// "nothing found": an empty result silently skips Gate C, so a broken read
+// would quietly retire the grounding audit for as long as it stayed broken.
+func loadToolOutputs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID, toolNames []string) ([]ToolOutput, error) {
 	if deps.DB == nil {
-		return nil
+		return nil, nil
 	}
 	db, err := deps.DB("ship")
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("tool outputs: open ship db: %w", err)
 	}
+	ctx, cancel := evidenceCtx(ctx)
+	defer cancel()
 	var rows *sql.Rows
 	if len(toolNames) == 0 {
 		rows, err = db.QueryContext(ctx, `
@@ -410,7 +438,7 @@ func loadToolOutputs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID,
 			ORDER BY created_at`, taskID, pq.Array(toolNames))
 	}
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("tool outputs: query: %w", err)
 	}
 	defer rows.Close()
 	var out []ToolOutput
@@ -433,7 +461,10 @@ func loadToolOutputs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID,
 			Iteration:    iter,
 		})
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("tool outputs: scan: %w", err)
+	}
+	return out, nil
 }
 
 // metaString pulls a string field out of a parsed metadata map. Missing
@@ -636,8 +667,20 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 	urlCount := len(resultURLs)
 	var verifiedURLCount int
 	fetchedURLs := map[string]struct{}{}
+	// fetchRecordReadable gates all three citation gates below. Every one of
+	// them reads an empty fetch record as proof the model invented its
+	// sources, so a record we failed to READ must not reach them — that
+	// rejection is unanswerable (the fix it demands is already done) and it
+	// costs an iteration each time.
+	fetchRecordReadable := true
 	if requiredURLs > 0 || urlCount > 0 {
-		fetchedURLs = loadFetchedURLs(ctx, deps, task.ID)
+		var fetchErr error
+		fetchedURLs, fetchErr = loadFetchedURLs(ctx, deps, task.ID)
+		if fetchErr != nil {
+			fetchRecordReadable = false
+			deps.Logger.ErrorContext(ctx, "acceptance evaluator: fetch record unreadable, citation gates skipped",
+				"task_id", task.ID, "urls_in_result", urlCount, "error", fetchErr)
+		}
 		for u := range resultURLs {
 			if _, ok := fetchedURLs[u]; ok {
 				verifiedURLCount++
@@ -650,7 +693,7 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 		// `httpshttps://` corrupted URLs that the substring-count gate
 		// accepted. Fires universally now, not only when criteria say
 		// "N URLs".
-		if urlCount > 0 && len(fetchedURLs) == 0 {
+		if fetchRecordReadable && urlCount > 0 && len(fetchedURLs) == 0 {
 			deps.Logger.Info("acceptance evaluator: hard-fail (no fetched URLs)",
 				"task_id", task.ID, "urls_in_result", urlCount)
 			minRequired := requiredURLs
@@ -668,7 +711,7 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 		// fetched. Only fires when criteria asked for a specific count;
 		// no point demanding "N fetched" from a task whose criteria
 		// never mentioned a number.
-		if requiredURLs > 0 && verifiedURLCount < requiredURLs {
+		if fetchRecordReadable && requiredURLs > 0 && verifiedURLCount < requiredURLs {
 			deps.Logger.Info("acceptance evaluator: hard-fail (verified URL count low)",
 				"task_id", task.ID,
 				"required", requiredURLs,
@@ -688,7 +731,7 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 		// least one fetched URL (i.e. the task tried) so a non-research
 		// task that happens to mention "https://example.com" once doesn't
 		// fail. The 50% floor catches "fetched 1, cited 8" patterns.
-		if urlCount >= 2 && len(fetchedURLs) >= 1 && verifiedURLCount*2 < urlCount {
+		if fetchRecordReadable && urlCount >= 2 && len(fetchedURLs) >= 1 && verifiedURLCount*2 < urlCount {
 			deps.Logger.Info("acceptance evaluator: hard-fail (citation/fetch ratio low)",
 				"task_id", task.ID,
 				"urls_in_result", urlCount,
@@ -772,7 +815,11 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 	// "did you actually read what you cite" applies to coding research,
 	// booking research, and analyst research equally.
 	var groundingVerdict *GroundingVerdict
-	docs := loadToolOutputs(ctx, deps, task.ID, []string{"browser_fetch"})
+	docs, docsErr := loadToolOutputs(ctx, deps, task.ID, []string{"browser_fetch"})
+	if docsErr != nil {
+		deps.Logger.ErrorContext(ctx, "acceptance evaluator: tool outputs unreadable, grounding audit skipped",
+			"task_id", task.ID, "error", docsErr)
+	}
 	if len(docs) > 0 {
 		v := evaluateGrounding(ctx, deps, task, result, docs)
 		groundingVerdict = &v
@@ -784,7 +831,9 @@ Reply with JSON only, no prose:
   {"met": true, "reason": "<one sentence why>"}
   {"met": false, "reason": "<one sentence naming what's missing>"}
 
-Be strict: half-done work is not done. Criteria like "code is reviewed" require evidence the review happened, not just that code exists. If the criteria specifies a minimum number of URL citations / sources, the result must contain at least that many distinct source URLs — a polished write-up with zero or too-few URLs is a synthesis from training data, not evidence-grounded work.`
+Be strict: half-done work is not done. Criteria like "code is reviewed" require evidence the review happened, not just that code exists. If the criteria specifies a minimum number of URL citations / sources, the result must contain at least that many distinct source URLs — a polished write-up with zero or too-few URLs is a synthesis from training data, not evidence-grounded work.
+
+One exception, and only one. A criterion asking for a fact the sources do not publish is MET when the result documents the search instead of the fact: it must name what was checked and why the fact is not obtainable there. "No venue states whether its backup hall is heated; all eight official pages checked, here is what each does say" satisfies that criterion. This covers facts about the world that may genuinely be unpublished — never anything the writer controls. A missing TL;DR, a missing comparison, a missing limitations section, too few citations, an unwritten section: those are always met=false, because nothing outside the report prevents them. Silence about a criterion is met=false, and so is a bare "not available" with no account of the search.`
 
 	extraHint := ""
 	if requiredURLs > 0 {
@@ -796,8 +845,15 @@ Be strict: half-done work is not done. Criteria like "code is reviewed" require 
 	if actions == "" {
 		actions = "(no tool calls this iteration)"
 	}
+	// An unreadable record is omitted rather than rendered as zero: the block
+	// asserts "N URLs were opened" as machine-verified ground truth, and a
+	// failed read would state that none were.
+	fetchRecord := ""
+	if fetchRecordReadable {
+		fetchRecord = fetchRecordBlock(resultURLs, fetchedURLs)
+	}
 	user := acceptanceReviewPrompt(task.Title, desc, *task.AcceptanceCriteria, result, extraHint,
-		fetchRecordBlock(resultURLs, fetchedURLs), actions)
+		fetchRecord, actions)
 
 	model := deps.Config.Models.Primary.ForRouter()
 	if model == "" {
