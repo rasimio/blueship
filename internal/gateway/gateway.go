@@ -1826,14 +1826,10 @@ func quoteRuleMeta(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `'`) + `"`
 }
 
-// sendDebugError sends the actual error via sink when debug mode is on.
+// sendDebugError preserves the historical call shape while keeping internal
+// causes out of every user-facing transport. Debug detail belongs in logs.
 func (g *Gateway) sendDebugError(ctx context.Context, sink bs.ResponseSink, source string, err error) {
-	if g.deps.Config.Gateway.Debug {
-		msg := fmt.Sprintf("[%s] %v", source, err)
-		sink.SendText(ctx, msg)
-	} else {
-		sink.SendText(ctx, "Sorry, something went wrong internally.")
-	}
+	sink.SendText(ctx, bs.PublicInternalError(g.logger, source, err))
 }
 
 // notifyOwnerError sends an error to the owner's DM (for background jobs).

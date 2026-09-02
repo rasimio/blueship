@@ -242,8 +242,7 @@ func (tm *turnManager) startTurn(connCtx context.Context, inb bs.InboundMessage)
 			err = tm.gw.ProcessInboundForUser(turnCtx, tm.auth.userID, tm.auth.soulID, deviceTransport, []bs.InboundMessage{inb}, sink)
 		}
 		if err != nil && turnCtx.Err() == nil {
-			tm.logger.Warn("ws: process error", "error", err)
-			tm.w.write(connCtx, OutMsg{Type: "error", Data: err.Error()})
+			tm.w.write(connCtx, OutMsg{Type: "error", Data: bs.PublicInternalError(tm.logger, "ws", err)})
 		}
 		// A turn cancelled mid-stream persists its partial answer inside the
 		// gateway, under the conversation's turn lock, before this goroutine

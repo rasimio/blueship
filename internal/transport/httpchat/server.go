@@ -632,8 +632,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			ReplyQuote:       req.ReplyQuote,
 			Ephemeral:        req.Source == "notebook",
 		}}, sink); err != nil && workCtx.Err() == nil {
-		s.logger.Warn("httpchat: process error", "error", err)
-		sink.event("error", err.Error())
+		sink.event("error", bs.PublicInternalError(s.logger, "httpchat", err))
 	}
 	// A cut-off turn is not an error: the partial answer is already on
 	// screen and persisted. Say so explicitly so the client can mark the
