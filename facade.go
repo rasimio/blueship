@@ -213,6 +213,8 @@ var (
 	UserIDFromContextOK       = core.UserIDFromContextOK
 	ContextWithAutonomousTurn = core.ContextWithAutonomousTurn
 	IsAutonomousTurn          = core.IsAutonomousTurn
+	ContextWithTaskID         = core.ContextWithTaskID
+	TaskIDFromContext         = core.TaskIDFromContext
 	WithDeniedTools           = core.WithDeniedTools
 	DeniedToolsFromContext    = core.DeniedToolsFromContext
 	IsToolDenied              = core.IsToolDenied
