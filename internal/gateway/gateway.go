@@ -50,6 +50,12 @@ type Gateway struct {
 	botsByTGID  map[int64]*botInstance
 	updatesChan chan taggedUpdate
 
+	// drain counts Telegram turns in flight so shutdown can wait for
+	// them (drain.go). The other transports drain through their own
+	// servers' Shutdown; the Telegram path spawns turns and had nothing
+	// to wait on.
+	drain drainGuard
+
 	systemPrompt string
 
 	// platformGreet is the message sent to unpaired chats that land on a
@@ -960,6 +966,20 @@ func (g *Gateway) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			// Stop taking turns, then let the running ones end. Updates
+			// left in the channel are not acknowledged to Telegram and
+			// come back after the restart; the turns already dispatched
+			// are the ones a kill would have cut mid-sentence.
+			if drain := g.deps.Config.Gateway.DrainTimeout; drain > 0 {
+				if n := g.drain.inFlight(); n > 0 {
+					g.logger.Info("telegram gateway draining", "in_flight", n, "timeout", drain.String())
+					if left := g.drain.wait(drain); left > 0 {
+						g.logger.Warn("telegram gateway drain timed out; turns abandoned", "abandoned", left)
+					} else {
+						g.logger.Info("telegram gateway drained")
+					}
+				}
+			}
 			return
 		case tagged := <-g.updatesChan:
 			bi := g.botByID(tagged.botID)
@@ -1597,7 +1617,12 @@ func (g *Gateway) getOrInitTelegramUser(ctx context.Context, bi *botInstance, ch
 			flushBot = bi
 		}
 		sink := g.newTelegramSink(chatID, flushBot)
-		go g.processMessages(ctx, us, msgs, sink)
+		drain := g.deps.Config.Gateway.DrainTimeout
+		end := g.drain.begin()
+		go func() {
+			defer end()
+			g.processMessages(turnContext(ctx, drain), us, msgs, sink)
+		}()
 	})
 
 	g.users[cacheKey] = us

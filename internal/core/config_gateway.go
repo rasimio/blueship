@@ -11,6 +11,14 @@ import (
 type GatewayConfig struct {
 	DebounceWindow time.Duration // default: 1500ms
 	DebounceCap    int           // default: 10
+
+	// DrainTimeout, when set, makes shutdown drain: the gateway stops
+	// taking new turns and waits up to this long for the ones in flight
+	// to finish under their own context before Run returns. Zero (the
+	// default) keeps the old behaviour — turns die with the process.
+	// The host's stop timeout and the service manager's exit timeout
+	// must both exceed it, or the kill arrives first anyway.
+	DrainTimeout time.Duration `yaml:"drain_timeout" json:"drain_timeout"`
 	MaxTurns       int           // default: 15
 
 	// Debug, when true, both:
