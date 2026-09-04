@@ -117,7 +117,31 @@ func (c *CascadeProvider) StreamComplete(ctx context.Context, req CompletionRequ
 
 func (c *CascadeProvider) complete(ctx context.Context, req CompletionRequest, cb *StreamCallbacks, stream bool) (*CompletionResponse, error) {
 	var failures []error
-	for i, route := range c.routes {
+	selection, selected := ctx.Value(cascadeSelectionKey{}).(CascadeSelection)
+	preferred := 0
+	if selection.Route != "" {
+		preferred = -1
+		for i, route := range c.routes {
+			if route.Name == selection.Route {
+				preferred = i
+				break
+			}
+		}
+		if preferred < 0 {
+			return nil, fmt.Errorf("cascade: unknown route %q", selection.Route)
+		}
+	}
+	order := []int{preferred}
+	if !selection.Only {
+		for i := range c.routes {
+			if i != preferred {
+				order = append(order, i)
+			}
+		}
+	}
+	observer, _ := ctx.Value(cascadeObserverKey{}).(func(CascadeAttempt))
+	for _, i := range order {
+		route := c.routes[i]
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -129,10 +153,25 @@ func (c *CascadeProvider) complete(ctx context.Context, req CompletionRequest, c
 		if route.Effort != "" {
 			attempt.Effort = route.Effort
 		}
+		if selected {
+			attempt.Effort = route.Effort
+			if i == preferred {
+				if selection.Model != "" {
+					attempt.Model = selection.Model
+				}
+				if selection.Effort != nil {
+					attempt.Effort = *selection.Effort
+				}
+			}
+		}
 		if route.MaxTokens > 0 && (attempt.MaxTokens <= 0 || attempt.MaxTokens > route.MaxTokens) {
 			attempt.MaxTokens = route.MaxTokens
 		}
 		attemptCtx, cancel := context.WithTimeout(ctx, route.Timeout)
+		observed := CascadeAttempt{Route: route.Name, Model: attempt.Model, Effort: attempt.Effort, Phase: "started"}
+		if observer != nil {
+			observer(observed)
+		}
 		var response *CompletionResponse
 		var err error
 		var emitted atomic.Bool
@@ -160,6 +199,19 @@ func (c *CascadeProvider) complete(ctx context.Context, req CompletionRequest, c
 			err = errors.New("provider returned a nil response")
 		}
 		c.finish(i, err, ctx.Err() != nil)
+		observed.Phase = "succeeded"
+		if err != nil {
+			observed.Phase = "failed"
+		}
+		if ctx.Err() != nil {
+			observed.Phase = "cancelled"
+		}
+		if response != nil {
+			observed.Usage = response.Usage
+		}
+		if observer != nil {
+			observer(observed)
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}

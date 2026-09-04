@@ -119,3 +119,40 @@ func TestCascadeDoesNotReplayAfterStreamCallbacks(t *testing.T) {
 		})
 	}
 }
+
+func TestCascadeSelectionOverridesOnlyPreferredRoute(t *testing.T) {
+	var seen []CompletionRequest
+	var attempts []CascadeAttempt
+	c, _ := NewCascadeProvider([]CascadeRoute{
+		{Name: "cloud", Model: "default", Effort: "high", Provider: cascadeFake{call: func(_ context.Context, r CompletionRequest) (*CompletionResponse, error) {
+			seen = append(seen, r)
+			return nil, errors.New("offline")
+		}}},
+		{Name: "local", Model: "qwen", Provider: cascadeFake{call: func(_ context.Context, r CompletionRequest) (*CompletionResponse, error) {
+			seen = append(seen, r)
+			return answer(), nil
+		}}},
+	})
+	effort := "max"
+	ctx := WithCascadeSelection(context.Background(), CascadeSelection{Route: "cloud", Model: "chosen", Effort: &effort})
+	ctx = WithCascadeObserver(ctx, func(a CascadeAttempt) { attempts = append(attempts, a) })
+	if _, err := c.Complete(ctx, CompletionRequest{Model: "old", Effort: "xhigh"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 2 || seen[0].Model != "chosen" || seen[0].Effort != "max" || seen[1].Model != "qwen" || seen[1].Effort != "" {
+		t.Fatalf("route settings leaked: %+v", seen)
+	}
+	if len(attempts) != 4 || attempts[1].Phase != "failed" || attempts[3].Phase != "succeeded" {
+		t.Fatal(attempts)
+	}
+	seen = nil
+	if _, err := c.Complete(WithCascadeSelection(context.Background(), CascadeSelection{Route: "local", Only: true}), CompletionRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0].Model != "qwen" {
+		t.Fatal("offline selection called cloud")
+	}
+	if _, err := c.Complete(WithCascadeSelection(context.Background(), CascadeSelection{Route: "unknown"}), CompletionRequest{}); err == nil {
+		t.Fatal("unknown route accepted")
+	}
+}
