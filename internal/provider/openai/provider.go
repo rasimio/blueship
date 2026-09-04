@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -61,12 +62,13 @@ func NewCompatibleProvider(baseURL string, apiKey string, timeout time.Duration,
 }
 
 type chatCompletionRequest struct {
-	Model       string           `json:"model"`
-	Messages    []chatMessage    `json:"messages"`
-	Tools       []toolDefinition `json:"tools,omitempty"`
-	MaxTokens   int              `json:"max_tokens,omitempty"`
-	Temperature float64          `json:"temperature,omitempty"`
-	ToolChoice  string           `json:"tool_choice,omitempty"`
+	Model           string           `json:"model"`
+	Messages        []chatMessage    `json:"messages"`
+	Tools           []toolDefinition `json:"tools,omitempty"`
+	MaxTokens       int              `json:"max_tokens,omitempty"`
+	Temperature     float64          `json:"temperature,omitempty"`
+	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
+	ToolChoice      string           `json:"tool_choice,omitempty"`
 }
 
 type chatMessage struct {
@@ -152,10 +154,12 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 	tools := buildTools(req.Tools)
 
 	payload := chatCompletionRequest{
-		Model:     req.Model,
-		Messages:  messages,
-		Tools:     tools,
-		MaxTokens: req.MaxTokens,
+		Model:           req.Model,
+		Messages:        messages,
+		Tools:           tools,
+		MaxTokens:       req.MaxTokens,
+		ReasoningEffort: req.Effort,
+		Temperature:     req.Temperature,
 	}
 	if len(tools) > 0 {
 		payload.ToolChoice = "auto"
@@ -235,6 +239,7 @@ type streamChunk struct {
 		FinishReason *string          `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *usageReport `json:"usage,omitempty"`
+	Error *apiError    `json:"error,omitempty"`
 }
 
 // StreamComplete sends a streaming completion request. Dispatches per-event
@@ -249,10 +254,12 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 
 	payload := streamChatCompletionRequest{
 		chatCompletionRequest: chatCompletionRequest{
-			Model:     req.Model,
-			Messages:  messages,
-			Tools:     tools,
-			MaxTokens: req.MaxTokens,
+			Model:           req.Model,
+			Messages:        messages,
+			Tools:           tools,
+			MaxTokens:       req.MaxTokens,
+			ReasoningEffort: req.Effort,
+			Temperature:     req.Temperature,
 		},
 		Stream: true,
 	}
@@ -307,6 +314,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		toolCalls  []toolCall
 		usage      bs.Usage
 		stopReason string
+		finished   bool
 	)
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -319,12 +327,16 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
+			finished = true
 			break
 		}
 
 		var chunk streamChunk
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			continue
+			return nil, fmt.Errorf("decode stream: %w", err)
+		}
+		if chunk.Error != nil {
+			return nil, fmt.Errorf("openai stream: %s", chunk.Error.Message)
 		}
 
 		if len(chunk.Choices) > 0 {
@@ -341,6 +353,9 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 			// JSON fragments; OnToolUse is fired once the stream ends and each
 			// call's argument JSON is fully assembled (see end of function).
 			for _, tc := range delta.ToolCalls {
+				if tc.Index() < 0 || tc.Index() >= 128 {
+					return nil, fmt.Errorf("invalid tool call index: %d", tc.Index())
+				}
 				for len(toolCalls) <= tc.Index() {
 					toolCalls = append(toolCalls, toolCall{})
 				}
@@ -359,6 +374,9 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 
 			if fr := chunk.Choices[0].FinishReason; fr != nil {
 				stopReason = *fr
+				if *fr != "" {
+					finished = true
+				}
 			}
 		}
 
@@ -367,7 +385,14 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		}
 	}
 
-	// Build content blocks.
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read stream: %w", err)
+	}
+	if !finished {
+		return nil, fmt.Errorf("incomplete completion stream: %w", io.ErrUnexpectedEOF)
+	}
+	// Build content blocks only after a complete stream. Partial arguments must
+	// never be replaced with {} and dispatched as a real tool invocation.
 	var blocks []bs.ContentBlock
 	if textBuf.Len() > 0 {
 		blocks = append(blocks, bs.ContentBlock{Type: "text", Text: textBuf.String()})
@@ -375,7 +400,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 	for _, tc := range toolCalls {
 		rawArgs := json.RawMessage(tc.Function.Arguments)
 		if !json.Valid(rawArgs) {
-			rawArgs = json.RawMessage("{}")
+			return nil, fmt.Errorf("incomplete tool arguments for %s", tc.Function.Name)
 		}
 		blocks = append(blocks, bs.ContentBlock{
 			Type:  "tool_use",

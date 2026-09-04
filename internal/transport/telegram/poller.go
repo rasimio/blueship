@@ -42,6 +42,18 @@ func (p *Poller) baseURL() string {
 	return "https://api.telegram.org"
 }
 
+// Offset is the cursor to send on the next poll. Persist it only after the
+// returned updates have been durably accepted by the consumer.
+func (p *Poller) Offset() int { return p.offset }
+
+// SetOffset restores a durable cursor on startup. Call from the polling
+// goroutine before Poll, never concurrently with it.
+func (p *Poller) SetOffset(offset int) {
+	if offset >= 0 {
+		p.offset = offset
+	}
+}
+
 type getUpdatesResponse struct {
 	OK     bool     `json:"ok"`
 	Result []Update `json:"result"`
