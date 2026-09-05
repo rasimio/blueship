@@ -79,6 +79,15 @@ type EmbeddingProvider interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 }
 
+// QueryEmbedder is an EmbeddingProvider that encodes queries differently
+// from documents (asymmetric retrieval models). Callers embedding a
+// search query should prefer EmbedQuery when the provider offers it;
+// Embed stays the document side.
+type QueryEmbedder interface {
+	EmbeddingProvider
+	EmbedQuery(ctx context.Context, text string) ([]float32, error)
+}
+
 // SearchEngine performs web searches.
 type SearchEngine interface {
 	Search(ctx context.Context, query string, limit int) ([]SearchResult, error)

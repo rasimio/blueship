@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/provider/anthropic"
 	"github.com/rasimio/blueship/internal/provider/anthropicoauth"
 	"github.com/rasimio/blueship/internal/provider/gemini"
@@ -135,6 +136,17 @@ func OpenAIEmbedding(apiKey string) EmbeddingProvider {
 func OpenAIEmbeddingWithModel(apiKey, model string, timeout time.Duration) EmbeddingProvider {
 	return openai.NewEmbeddingProvider(apiKey, model, timeout)
 }
+
+// GeminiEmbeddingWithModel creates an EmbeddingProvider over the Gemini
+// embedding API (e.g. gemini-embedding-001) at the given width (0 = the
+// model's native width). It also implements QueryEmbedder: documents and
+// queries are encoded with their own task types.
+func GeminiEmbeddingWithModel(apiKey, model string, dimension int, timeout time.Duration) EmbeddingProvider {
+	return gemini.NewEmbeddingProvider(apiKey, model, dimension, timeout)
+}
+
+// QueryEmbedder is re-exported for hosts that embed search queries.
+type QueryEmbedder = core.QueryEmbedder
 
 // Serper creates a SearchEngine using the Serper.dev Google Search API.
 func Serper(apiKey string) SearchEngine {
