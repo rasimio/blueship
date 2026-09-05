@@ -6,10 +6,11 @@ import "github.com/rasimio/blueship/internal/transport/telegram"
 // lifecycle, for local runtimes and recovery tools. The implementation is the
 // same client and poller used by the standard gateway.
 type (
-	TelegramClient  = telegram.Client
-	TelegramPoller  = telegram.Poller
-	TelegramUpdate  = telegram.Update
-	TelegramMessage = telegram.Message
+	TelegramClient               = telegram.Client
+	TelegramPoller               = telegram.Poller
+	TelegramUpdate               = telegram.Update
+	TelegramMessage              = telegram.Message
+	TelegramInlineKeyboardButton = telegram.InlineKeyboardButton
 )
 
 var (
