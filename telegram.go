@@ -11,6 +11,7 @@ type (
 	TelegramUpdate               = telegram.Update
 	TelegramMessage              = telegram.Message
 	TelegramInlineKeyboardButton = telegram.InlineKeyboardButton
+	TelegramAPIError             = telegram.APIError
 )
 
 var (

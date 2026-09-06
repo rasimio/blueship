@@ -223,7 +223,8 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 // streamChatCompletionRequest adds the stream field.
 type streamChatCompletionRequest struct {
 	chatCompletionRequest
-	Stream bool `json:"stream"`
+	Stream        bool            `json:"stream"`
+	StreamOptions map[string]bool `json:"stream_options,omitempty"`
 }
 
 // streamChunkDelta is the delta object inside a streaming chunk.
@@ -261,7 +262,8 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 			ReasoningEffort: req.Effort,
 			Temperature:     req.Temperature,
 		},
-		Stream: true,
+		Stream:        true,
+		StreamOptions: map[string]bool{"include_usage": true},
 	}
 	if len(tools) > 0 {
 		payload.ToolChoice = "auto"

@@ -163,6 +163,9 @@ type RunConfig struct {
 	OnTiming func(bs.TimingSpan)
 	// ToolTimeout caps a single tool execution. Zero uses per-tool defaults.
 	ToolTimeout time.Duration
+	// MaxToolTurns bounds tool-using rounds before one final text-only round.
+	// Zero preserves the role's default.
+	MaxToolTurns int
 }
 
 // NewLoop creates a new agent loop.
@@ -843,6 +846,13 @@ func effectiveDialogBudgetDecision(totalPromptBudget int, systemPrompt, compactS
 		PromptOverhead: promptOverhead,
 		Mode:           dialogBudgetModeTotalPrompt,
 	}
+}
+
+func (cfg RunConfig) toolTurnLimit() int {
+	if cfg.MaxToolTurns > 0 {
+		return cfg.MaxToolTurns
+	}
+	return maxToolTurnsForRole(cfg.Role)
 }
 
 func maxToolTurnsForRole(role string) int {

@@ -311,7 +311,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 				}
 			}
 			convo = append(convo, bs.Message{Role: "user", Content: promptToolResults})
-			if toolTurns >= maxToolTurnsForRole(cfg.Role) {
+			if toolTurns >= cfg.toolTurnLimit() {
 				forceFinal = true
 				a.logger.Warn("tool turn budget exhausted; forcing final answer",
 					"role", cfg.Role,
@@ -459,7 +459,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 				}
 			}
 			convo = append(convo, promptToolResultMsg)
-			if toolTurns >= maxToolTurnsForRole(cfg.Role) {
+			if toolTurns >= cfg.toolTurnLimit() {
 				forceFinal = true
 				if turn+1 >= cfg.MaxTurns {
 					cfg.MaxTurns = turn + 2
