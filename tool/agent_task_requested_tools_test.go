@@ -56,7 +56,7 @@ func TestValidateRequestedToolsAcceptsKnownAndRoutedNames(t *testing.T) {
 		{"sheets_read", "browser_fetch"},
 		// peer: and mcp__ targets resolve per soul at dispatch time and are
 		// never present in this registry.
-		{"peer:liya", "mcp__github__list_repos", "sheets_read"},
+		{"peer:worker", "mcp__github__list_repos", "sheets_read"},
 	}
 	for _, requested := range cases {
 		if err := validateRequestedTools(r, requested); err != nil {
