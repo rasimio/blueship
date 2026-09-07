@@ -166,6 +166,16 @@ type RunConfig struct {
 	// MaxToolTurns bounds tool-using rounds before one final text-only round.
 	// Zero preserves the role's default.
 	MaxToolTurns int
+	// OnOutcome is called exactly once when Run, RunTracked, or RunStream
+	// returns, including provider/persistence errors and cancellation. Nil
+	// preserves existing callers. A normal final text after tools are withheld
+	// still reports tool_budget rather than implying task completion.
+	OnOutcome func(RunOutcome)
+	// AutomaticContinuation tells the final-answer directive that the host
+	// owns durable continuation. The model writes a progress checkpoint rather
+	// than asking the user to send another message. Scheduling stays with the
+	// host; this flag never starts another run on its own.
+	AutomaticContinuation bool
 }
 
 // NewLoop creates a new agent loop.
@@ -198,6 +208,7 @@ type ToolTrace struct {
 type RunResult struct {
 	Text       string
 	ToolTraces []ToolTrace
+	Outcome    RunOutcome
 }
 
 // durableUserContent returns the transport-visible envelope written to
@@ -866,12 +877,15 @@ func maxToolTurnsForRole(role string) int {
 	}
 }
 
-func appendFinalAnswerDirective(msg *bs.Message) {
+func appendFinalAnswerDirective(msg *bs.Message, automaticContinuation ...bool) {
 	if msg == nil || msg.Role != "user" {
 		return
 	}
 	blocks := bs.NormalizeContent(msg.Content)
 	directive := bs.ContentBlock{Type: "text", Text: "\n\n[tool_limit]\nYou hit this turn's tool-call budget, so tools are withheld while you write the final answer. This is a per-turn harness limit — your access and permissions are unchanged, and every tool returns on the next user message. Answer now from the results already gathered; do not stall asking to run more lookups. If the task is unfinished, say plainly that you hit the per-turn tool limit and offer to continue — never claim you lack access, rights, or write capability.\n[/tool_limit]"}
+	if len(automaticContinuation) > 0 && automaticContinuation[0] {
+		directive.Text = "\n\n[run_checkpoint]\nThis bounded run is ending and tools are withheld for its closing response. The host owns durable continuation; access and permissions are unchanged. State the concrete results already obtained and any unfinished steps or blockers. Do not ask the user to send another message to continue, and do not call the overall task complete unless its outcome has actually been verified. Do not repeat earlier progress text.\n[/run_checkpoint]"
+	}
 	msg.Content = append(blocks, directive)
 }
 

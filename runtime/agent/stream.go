@@ -9,13 +9,16 @@ import (
 	bs "github.com/rasimio/blueship/internal/core"
 )
 
-func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb *bs.StreamCallbacks) (string, []ToolTrace, error) {
+func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb *bs.StreamCallbacks) (resultText string, resultTraces []ToolTrace, runErr error) {
 	streamProvider, ok := a.provider.(bs.StreamCompletionProvider)
 	if !ok {
 		// Fallback to batch if provider doesn't support streaming
 		text, err := a.Run(ctx, cfg, userMessage)
 		return text, nil, err
 	}
+
+	outcome := RunOutcome{Reason: RunStopProviderStop}
+	defer func() { finishRunOutcome(ctx, cfg, outcome, runErr) }()
 
 	if cfg.MaxTurns <= 0 {
 		cfg.MaxTurns = a.cfg.Gateway.MaxTurns
@@ -103,6 +106,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	ctxAnchor := turnContextAnchor(convo)
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
+		outcome.Turns = turn + 1
 		baseSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary)
 		messages := cloneMessages(convo)
 		turnTools := tools
@@ -113,7 +117,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		messages = withTurnContext(messages, ctxAnchor, turnContext)
 		if forceFinal && len(messages) > 0 {
 			// After the turn context, so the directive stays the last thing read.
-			appendFinalAnswerDirective(&messages[len(messages)-1])
+			appendFinalAnswerDirective(&messages[len(messages)-1], cfg.AutomaticContinuation)
 		}
 		effectiveSystem := baseSystem
 		scratchpadTokens := estimateMessagesTokens(convo) - dialogTokens
@@ -203,6 +207,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		responseAttrs = append(responseAttrs, anatomy.responseAttrs(resp.Usage.InputTokens)...)
 		responseAttrs = append(responseAttrs, usageTimingAttrs(resp.Usage)...)
 		a.logger.Info("LLM response", responseAttrs...)
+		outcome.ProviderStopReason = resp.StopReason
 		usedEmptyVisibleFallback := false
 		if !hasVisibleOutput(resp.Content) && (resp.StopReason == "end_turn" || resp.StopReason == "max_tokens") {
 			// A called-off turn arrives here looking exactly like a model that
@@ -224,6 +229,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			)
 			resp.Content = []bs.ContentBlock{{Type: "text", Text: text}}
 			usedEmptyVisibleFallback = true
+			outcome.Reason = RunStopEmptyOutput
 			if cb != nil && cb.OnText != nil {
 				cb.OnText(text)
 			}
@@ -285,6 +291,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		if shouldRecoverTruncatedToolUse(resp, truncatedToolRecoveries) {
 			truncatedToolRecoveries++
 			toolTurns++
+			outcome.ToolTurns = toolTurns
 			toolResults, promptToolResults, cutTraces := truncatedToolUseResults(resp.Content, cfg.MaxTokens)
 			for _, trace := range cutTraces {
 				a.logger.Warn("tool call cut off by max_tokens; answering with an error result (stream)",
@@ -312,6 +319,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			}
 			convo = append(convo, bs.Message{Role: "user", Content: promptToolResults})
 			if toolTurns >= cfg.toolTurnLimit() {
+				outcome.Reason = RunStopToolBudget
 				forceFinal = true
 				a.logger.Warn("tool turn budget exhausted; forcing final answer",
 					"role", cfg.Role,
@@ -327,9 +335,11 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 
 		switch resp.StopReason {
 		case "end_turn", "max_tokens":
+			outcome.Reason = terminalRunReason(outcome, resp.StopReason)
 			return accumulated.String(), traces, nil
 
 		case "refusal":
+			outcome.Reason = RunStopRefusal
 			// Same as Run() — surface explicitly so the user gets feedback.
 			a.logger.Warn("LLM refused to respond (stream)", "model", cfg.Model, "turn", turn+1)
 			text := accumulated.String()
@@ -348,13 +358,14 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 
 		case "tool_use":
 			toolTurns++
+			outcome.ToolTurns = toolTurns
 			var toolResults []bs.ContentBlock
 			var promptToolResults []bs.ContentBlock
 			for _, block := range resp.Content {
 				if block.Type != "tool_use" {
 					continue
 				}
-				if cfg.StrictTools && !toolDefinitionPresent(turnTools, block.Name) {
+				if forceFinal || (cfg.StrictTools && !toolDefinitionPresent(turnTools, block.Name)) {
 					result := fmt.Sprintf("tool %q is not allowed by the strict turn policy", block.Name)
 					input := string(block.Input)
 					if len(input) > 200 {
@@ -459,7 +470,14 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 				}
 			}
 			convo = append(convo, promptToolResultMsg)
+			if forceFinal {
+				if outcome.Reason != RunStopToolBudget {
+					outcome.Reason = RunStopOutputLimit
+				}
+				return accumulated.String(), traces, nil
+			}
 			if toolTurns >= cfg.toolTurnLimit() {
+				outcome.Reason = RunStopToolBudget
 				forceFinal = true
 				if turn+1 >= cfg.MaxTurns {
 					cfg.MaxTurns = turn + 2
@@ -476,6 +494,8 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			return accumulated.String(), traces, nil
 		}
 	}
+
+	outcome.Reason = RunStopTurnLimit
 
 	// A turn that produced text or called a tool (e.g. an escalation pass run
 	// with MaxTurns:1) is a valid result, not a failure.
