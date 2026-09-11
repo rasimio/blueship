@@ -30,10 +30,17 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 		return nil, fmt.Errorf("reflex model not configured")
 	}
 	var effort, thinkingMode string
+	// 512 was roomy for the models reflex used to run on; Opus 5 at high
+	// effort can exceed it, and an answer cut mid-JSON is not a plan. The
+	// role's model_config row is the authority when it sets a cap.
+	maxTokens := 512
 	if g.deps.ModelStore != nil {
 		ref := g.deps.ModelStore.Get("reflex")
 		effort = ref.Effort
 		thinkingMode = ref.ThinkingMode
+		if ref.MaxTokens > 0 {
+			maxTokens = ref.MaxTokens
+		}
 	}
 
 	g.logger.Info("calling reflex", "model", model)
@@ -45,7 +52,7 @@ func (g *Gateway) callReflex(ctx context.Context, prompt string) (*bs.ReflexResu
 
 	resp, err := g.provider.Complete(ctx, bs.CompletionRequest{
 		Model:        model,
-		MaxTokens:    512,
+		MaxTokens:    maxTokens,
 		Effort:       effort,
 		ThinkingMode: thinkingMode,
 		System:       reflexSystem,

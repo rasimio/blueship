@@ -16,6 +16,15 @@ const (
 	maxPreActions             = 2
 )
 
+// reflexDefaultMaxTokens is the answer ceiling used when the reflex role's
+// model_config row leaves max_tokens unset. A reflex answer is small — an
+// intent, a few tool names, a line of guidance — but "small" is relative to
+// the model: 512 was roomy for Flash and is not for Opus 5 at high effort,
+// whose truncated answer parses as "unexpected end of JSON input" and costs
+// the turn its guidance. The role's own row is the authority when it sets
+// a value; this is only the floor under a misconfigured or absent one.
+const reflexDefaultMaxTokens = 512
+
 // reflexResult holds the output of a reflex pipeline run for agent tasks.
 type reflexResult struct {
 	InjectedCtx string // AME traces (formatted)
@@ -70,12 +79,16 @@ func runReflexPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Locati
 	reflexModel := ""
 	var reflexEffort, reflexThinkingMode string
 	reflexContextWindow := 0
+	reflexMaxTokens := reflexDefaultMaxTokens
 	if deps.ModelStore != nil {
 		reflexModel = deps.ModelStore.ForRouter("reflex")
 		ref := deps.ModelStore.Get("reflex")
 		reflexEffort = ref.Effort
 		reflexThinkingMode = ref.ThinkingMode
 		reflexContextWindow = ref.ContextWindow
+		if ref.MaxTokens > 0 {
+			reflexMaxTokens = ref.MaxTokens
+		}
 	}
 	if reflexModel == "" {
 		deps.Logger.Warn("reflex model not configured, using fallback")
@@ -89,7 +102,7 @@ func runReflexPipeline(ctx context.Context, deps core.AgentDeps, tz *time.Locati
 	deps.Logger.Info("agent-tasks: calling reflex", "model", reflexModel)
 	req := core.CompletionRequest{
 		Model:         reflexModel,
-		MaxTokens:     512,
+		MaxTokens:     reflexMaxTokens,
 		ContextWindow: reflexContextWindow,
 		Effort:        reflexEffort,
 		ThinkingMode:  reflexThinkingMode,
