@@ -55,12 +55,24 @@ type BotKeyboardNode struct {
 //     how a key can be short and the message it sends can be a whole
 //     sentence — a demonstration key that reads «Нарисуй картинку» and
 //     actually asks for one.
+//
+// Ask slows a Say key down on purpose: the tap sends the question and
+// nothing reaches the model, and the person's next message takes the
+// place of the %s in Say. A demonstration key that fires immediately has
+// to invent the request — «нарисуй что-нибудь, на твой вкус» — and the
+// invented request is then written down as though the person had said
+// it. One question is a cheaper price than that, and the request becomes
+// theirs.
 type BotKeyboardKey struct {
 	Label   string
 	Node    string
 	Command string
 	Say     string
+	Ask     string
 }
+
+// AskPlaceholder is where the person's answer goes in an Ask key's Say.
+const AskPlaceholder = "%s"
 
 // Configured reports whether a keyboard was set up at all.
 func (k BotKeyboard) Configured() bool { return len(k.Nodes) > 0 }
@@ -70,8 +82,13 @@ type KeyAction struct {
 	// Node is the screen to switch to, when the key navigates.
 	Node string
 	// Text is what to hand the rest of the pipeline, when the key says
-	// something: a "/command" or a replacement message.
+	// something: a "/command" or a replacement message. On an Ask key it
+	// is the template the answer will be composed into, not a message to
+	// send now.
 	Text string
+	// Ask is the question the key sends instead of Text. The tap's whole
+	// effect is asking it; the answer arrives as the next message.
+	Ask string
 	// Close means take the keyboard away.
 	Close bool
 }
@@ -106,7 +123,7 @@ func (k BotKeyboard) Action(text string) (KeyAction, bool) {
 				case key.Command != "":
 					return KeyAction{Text: "/" + normalizeCommandName(key.Command)}, true
 				default:
-					return KeyAction{Text: key.Say}, true
+					return KeyAction{Text: key.Say, Ask: key.Ask}, true
 				}
 			}
 		}
@@ -199,6 +216,19 @@ func (k BotKeyboard) validKey(screen string, key BotKeyboardKey, known, seen map
 	}
 	if key.Say != "" {
 		set++
+	}
+	if key.Ask != "" {
+		// Ask rides on Say: the question is the tap's whole effect, and
+		// the answer has to land somewhere. Without a template to fill,
+		// the key would drop whatever the person said and send the same
+		// request regardless — the invented request this exists to stop.
+		if key.Say == "" || !strings.Contains(key.Say, AskPlaceholder) {
+			return &MenuError{Reason: "key " + key.Label + " asks a question, so its Say needs a " +
+				AskPlaceholder + " for the answer"}
+		}
+		if key.Node != "" || key.Command != "" {
+			return &MenuError{Reason: "key " + key.Label + " both asks a question and navigates or runs a command"}
+		}
 	}
 	if set != 1 {
 		return &MenuError{Reason: "key " + key.Label + " must do exactly one thing"}

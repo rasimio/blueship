@@ -94,6 +94,10 @@ type Gateway struct {
 	// kbScreen: which keyboard screen a chat is on, so «назад» knows
 	// where back is. Guarded by mu, like users.
 	kbScreen map[string]string
+	// kbAsk: the keyboard question a chat has been asked and not yet
+	// answered, so the next message can be composed into the request the
+	// key stood for. Guarded by mu, like kbScreen.
+	kbAsk map[string]kbAskEntry
 
 	// turnLocks serializes every chat turn for one (user, soul), regardless
 	// of transport. A web message, a Telegram message, and an autonomous
@@ -1189,6 +1193,11 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	} else {
 		text = rewritten
 	}
+	// An open keyboard question turns this message into the request its
+	// key stood for. Composed here, before shortcuts and admission, so
+	// every dispatcher below sees the request rather than a bare answer
+	// that means nothing on its own.
+	text = g.answerKeyboardAsk(bi, msg.Chat.ID, text)
 	// Expand prompt shortcuts before anything looks at the text, so a
 	// shortcut is indistinguishable from the user having typed the
 	// question — including to the onboarding dispatcher, which would

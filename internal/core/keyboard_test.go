@@ -20,7 +20,8 @@ func workingKeyboard() BotKeyboard {
 				BotKeyboardKey{Label: "Умения", Node: "skills"},
 				BotKeyboardKey{Label: "Подписка", Command: "plus"}),
 			"skills": childScreen("Что попробовать", "main",
-				BotKeyboardKey{Label: "Нарисуй картинку", Say: "Нарисуй кота в скафандре, акварелью."}),
+				BotKeyboardKey{Label: "Нарисуй картинку", Say: "Нарисуй кота в скафандре, акварелью."},
+				BotKeyboardKey{Label: "Собери файл", Ask: "Какой файл собрать?", Say: "Собери: %s"}),
 		},
 	}
 }
@@ -42,6 +43,10 @@ func TestKeyboardResolvesEachKindOfKey(t *testing.T) {
 		{"a key that runs a command", "Подписка", KeyAction{Text: "/plus"}, true},
 		{"a key that stands for a sentence", "Нарисуй картинку",
 			KeyAction{Text: "Нарисуй кота в скафандре, акварелью."}, true},
+		// An asking key hands over its template without sending it: the
+		// question is the tap's whole effect.
+		{"a key that asks first", "Собери файл",
+			KeyAction{Text: "Собери: %s", Ask: "Какой файл собрать?"}, true},
 		{"back", "‹ Назад", KeyAction{}, true},
 		{"close", "Закрыть", KeyAction{Close: true}, true},
 		// Everything else is something the person said.
@@ -106,6 +111,28 @@ func TestKeyboardValidationCatchesKeysThatGoNowhere(t *testing.T) {
 		{"a key labelled as a slash command", broken(func(k *BotKeyboard) {
 			k.Nodes["main"] = screen("Меню", BotKeyboardKey{Label: "/plus", Command: "plus"})
 		}), false},
+		// An asking key is a contract with the person's next message: the
+		// question must have somewhere to put the answer, and the key may
+		// not do a second thing behind the question's back.
+		{"an asking key with no template", broken(func(k *BotKeyboard) {
+			k.Nodes["main"] = screen("Меню", BotKeyboardKey{Label: "Собери файл", Ask: "Какой файл собрать?"})
+		}), false},
+		{"an asking key whose template drops the answer", broken(func(k *BotKeyboard) {
+			k.Nodes["main"] = screen("Меню", BotKeyboardKey{
+				Label: "Собери файл", Ask: "Какой файл собрать?", Say: "Собери файл-пример"})
+		}), false},
+		{"an asking key that also navigates", broken(func(k *BotKeyboard) {
+			k.Nodes["main"] = screen("Меню", BotKeyboardKey{
+				Label: "Собери файл", Ask: "Какой файл собрать?", Say: "Собери: %s", Node: "skills"})
+		}), false},
+		{"an asking key that also runs a command", broken(func(k *BotKeyboard) {
+			k.Nodes["main"] = screen("Меню", BotKeyboardKey{
+				Label: "Собери файл", Ask: "Какой файл собрать?", Say: "Собери: %s", Command: "plus"})
+		}), false},
+		{"an asking key with an answer slot", broken(func(k *BotKeyboard) {
+			k.Nodes["main"] = screen("Меню", BotKeyboardKey{
+				Label: "Собери отчёт", Ask: "Какой отчёт собрать?", Say: "Собери: %s"})
+		}), true},
 	} {
 		if err := tc.kb.Valid(testCommands); (err == nil) != tc.ok {
 			t.Errorf("%s: Valid() = %v, want ok=%v", tc.name, err, tc.ok)

@@ -2,7 +2,9 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -189,6 +191,87 @@ func (g *Gateway) setKeyboardScreen(botID uuid.UUID, chatID, node string) {
 	g.kbScreen[telegramUserCacheKey(botID, chatID)] = node
 }
 
+// kbAskEntry is one open keyboard question: the template its answer will
+// be composed into, and when it was asked.
+type kbAskEntry struct {
+	template string
+	at       time.Time
+}
+
+// keyboardAskTTL bounds how long a question stays open. Long enough to
+// answer after reading the chat, short enough that tomorrow morning's
+// message is not silently rewritten into yesterday's request.
+const keyboardAskTTL = 15 * time.Minute
+
+func (g *Gateway) setKeyboardAsk(botID uuid.UUID, chatID, template string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.kbAsk == nil {
+		g.kbAsk = map[string]kbAskEntry{}
+	}
+	g.kbAsk[telegramUserCacheKey(botID, chatID)] = kbAskEntry{template: template, at: time.Now()}
+}
+
+func (g *Gateway) clearKeyboardAsk(botID uuid.UUID, chatID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.kbAsk, telegramUserCacheKey(botID, chatID))
+}
+
+// takeKeyboardAsk consumes the open question, if one is still live.
+func (g *Gateway) takeKeyboardAsk(botID uuid.UUID, chatID string) (string, bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	key := telegramUserCacheKey(botID, chatID)
+	entry, ok := g.kbAsk[key]
+	if !ok {
+		return "", false
+	}
+	delete(g.kbAsk, key)
+	if time.Since(entry.at) > keyboardAskTTL {
+		return "", false
+	}
+	return entry.template, true
+}
+
+// askKeyboardQuestion sends a key's question and opens the wait for its
+// answer. The question is a plain message: a persistent keyboard is not
+// replaced by one, so the keys stay where the person can still change
+// their mind. A question that never reaches the chat leaves nothing open.
+func (g *Gateway) askKeyboardQuestion(ctx context.Context, bi *botInstance, tgChatID int64, chatID, question, template string) {
+	if bi == nil || bi.client == nil {
+		return
+	}
+	g.setKeyboardAsk(bi.id, chatID, template)
+	if _, err := bi.client.SendMessage(ctx, fmt.Sprintf("%d", tgChatID), question); err != nil {
+		g.logger.Warn("keyboard: could not ask", "chat_id", tgChatID, "error", err)
+		g.clearKeyboardAsk(bi.id, chatID)
+	}
+}
+
+// answerKeyboardAsk composes a message into the request an open keyboard
+// question stood for.
+//
+// Returns the text unchanged when no question is open, when the message
+// is a command rather than an answer (a person who types /stop is not
+// answering), or when it carries no words a template could take — a bare
+// photo or voice note. Rewriting those would put words in the person's
+// mouth, which is the failure the question exists to avoid.
+func (g *Gateway) answerKeyboardAsk(bi *botInstance, tgChatID int64, text string) string {
+	if bi == nil {
+		return text
+	}
+	template, ok := g.takeKeyboardAsk(bi.id, tgCanonical(tgChatID))
+	if !ok {
+		return text
+	}
+	answer := strings.TrimSpace(text)
+	if answer == "" || strings.HasPrefix(answer, "/") {
+		return text
+	}
+	return strings.Replace(template, bs.AskPlaceholder, answer, 1)
+}
+
 // showKeyboard opens a screen: one message carrying that screen's keys.
 // An empty node means the root. Falls back to a plain message when the
 // host configured no keyboard, so callers need no branch of their own.
@@ -241,15 +324,16 @@ func (g *Gateway) showKeyboard(ctx context.Context, bi *botInstance, tgChatID in
 		return
 	}
 	g.setKeyboardScreen(bi.id, tgCanonical(tgChatID), node)
+	g.clearKeyboardAsk(bi.id, tgCanonical(tgChatID))
 }
 
 // handleKeyboardTap resolves a tapped key.
 //
 // Returns the text the rest of the pipeline should see and whether the
-// tap was fully handled here. Navigation and closing are handled here —
-// they say nothing to the model. A key that runs a command or stands
-// for a sentence returns that text instead, so it reaches the same code
-// a typed message would.
+// tap was fully handled here. Navigation, closing and asking are handled
+// here — they say nothing to the model. A key that runs a command or
+// stands for a sentence returns that text instead, so it reaches the
+// same code a typed message would.
 func (g *Gateway) handleKeyboardTap(ctx context.Context, bi *botInstance, tgChatID int64, text string) (string, bool) {
 	kb := g.keyboard()
 	action, ok := kb.Action(text)
@@ -263,9 +347,19 @@ func (g *Gateway) handleKeyboardTap(ctx context.Context, bi *botInstance, tgChat
 			g.logger.Warn("keyboard: could not close", "chat_id", tgChatID, "error", err)
 		}
 		g.setKeyboardScreen(bi.id, chatID, "")
+		g.clearKeyboardAsk(bi.id, chatID)
+		return "", true
+	}
+	// A question first: the tap says this and nothing else, and the
+	// request is composed from the person's own answer later.
+	if action.Ask != "" {
+		g.askKeyboardQuestion(ctx, bi, tgChatID, chatID, action.Ask, action.Text)
 		return "", true
 	}
 	if action.Text != "" {
+		// A key chosen instead of answering an open question replaces
+		// it: two open requests would race for the same next message.
+		g.clearKeyboardAsk(bi.id, chatID)
 		return action.Text, false
 	}
 
