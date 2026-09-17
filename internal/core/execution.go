@@ -23,6 +23,12 @@ type ExecutionRequest struct {
 	SoulID    uuid.UUID
 	Kind      ExecutionKind
 	Transport string
+
+	// Task is the scheduled task asking to tick, set only when the agent-task
+	// scheduler is the caller. Background work is not one thing — a reminder
+	// tick and a research job cost and mean different amounts — and only the
+	// host can say which of its tasks its policy treats differently.
+	Task *AgentTask
 }
 
 // ExecutionDecision is the host's admission result.

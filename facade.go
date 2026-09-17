@@ -255,6 +255,7 @@ const (
 	StrategyDirect     = core.StrategyDirect
 	StrategyStructured = core.StrategyStructured
 	StrategyDelegate   = core.StrategyDelegate
+	StrategyRecurring  = core.StrategyRecurring
 )
 
 const (

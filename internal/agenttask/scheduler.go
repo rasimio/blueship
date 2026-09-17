@@ -1228,6 +1228,7 @@ func (s *Scheduler) executionAllowed(ctx context.Context, task core.AgentTask) b
 	decision, err := s.deps.AuthorizeExecution(ctx, core.ExecutionRequest{
 		UserID: task.UserID, SoulID: task.SoulID,
 		Kind: core.ExecutionBackground, Transport: "agent_task",
+		Task: &task,
 	})
 	if err != nil {
 		s.logger.WarnContext(ctx, "agent-tasks: execution authorization failed",
