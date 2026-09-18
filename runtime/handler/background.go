@@ -109,7 +109,18 @@ const maxRevisions = 3
 func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.AgentDeps) (iterationResult core.IterationResult, runErr error) {
 	var pendingDeliveries []core.TaskDeliveryRef
 	var programDeliveryRefs map[string]core.TaskDeliveryRef
+	var validationRequest core.ResponseValidationRequest
 	defer func() {
+		if runErr == nil && iterationResult.Notify != "" && deps.Config != nil && deps.Config.ResponseValidator != nil {
+			safe, err := validateBackgroundNotification(ctx, deps.Config.ResponseValidator, validationRequest, iterationResult.Notify, len(pendingDeliveries) > 0)
+			if err != nil {
+				iterationResult.Notify = ""
+				pendingDeliveries = nil
+				runErr = err
+			} else {
+				iterationResult.Notify = safe
+			}
+		}
 		if len(pendingDeliveries) > 0 {
 			iterationResult.PendingDeliveries = append([]core.TaskDeliveryRef(nil), pendingDeliveries...)
 		}
@@ -396,6 +407,7 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// process tz). A heartbeat that reasons about reminder windows must see the
 	// user's wall-clock, not the server's.
 	now := time.Now().In(deps.Config.Gateway.TimezoneFor(ctx, b.tz))
+	validationRequest.CurrentDatetime, validationRequest.Timezone = now.Format(time.RFC3339), now.Location().String()
 	systemPrompt = fmt.Sprintf("[current_datetime: %s]\n\n%s",
 		now.Format("2006-01-02 15:04 -07:00 (MST, Monday)"), systemPrompt)
 
@@ -768,7 +780,15 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		toolOverride = []string{}
 		maxTurns = 1
 	}
+	var initialReceipts []core.ToolExecutionResult
+	for _, trace := range preloadedTraces {
+		if trace.Receipt != nil {
+			initialReceipts = append(initialReceipts, *trace.Receipt)
+		}
+	}
 	result, err := loop.RunTracked(ctx, agent.RunConfig{
+		InitialToolResults:  initialReceipts,
+		TurnNow:             now,
 		SessionID:           sessID,
 		SystemPrompt:        systemPrompt,
 		InjectedContext:     injectedCtx,
@@ -786,6 +806,13 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	}, msg)
 	if err != nil {
 		return core.IterationResult{}, fmt.Errorf("agent loop: %w", err)
+	}
+	validationRequest.SessionID, validationRequest.UserText = sessID, msg
+	validationRequest.Tools = append(validationRequest.Tools, initialReceipts...)
+	for _, trace := range result.ToolTraces {
+		if trace.Receipt != nil {
+			validationRequest.Tools = append(validationRequest.Tools, *trace.Receipt)
+		}
 	}
 	if len(preloadedTraces) > 0 {
 		combined := make([]agent.ToolTrace, 0, len(preloadedTraces)+len(result.ToolTraces))
@@ -1326,10 +1353,11 @@ func runBackendPrefetch(ctx context.Context, deps core.AgentDeps, cfg backendPre
 		}
 		output, isError := deps.Registry.Execute(ctx, name, input)
 		trace := agent.ToolTrace{
-			Name:   name,
-			Input:  string(input),
-			Output: output,
-			Error:  isError,
+			Name:    name,
+			Input:   string(input),
+			Output:  output,
+			Error:   isError,
+			Receipt: &core.ToolExecutionResult{Name: name, Input: append([]byte(nil), input...), Output: output, IsError: isError},
 		}
 		traces = append(traces, trace)
 		outputs[name] = output

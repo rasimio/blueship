@@ -67,6 +67,9 @@ type (
 	TurnPolicy                    = core.TurnPolicy
 	TurnPolicyRequest             = core.TurnPolicyRequest
 	TurnPolicyResolver            = core.TurnPolicyResolver
+	ResponseValidator             = core.ResponseValidator
+	ResponseValidationRequest     = core.ResponseValidationRequest
+	ToolExecutionResult           = core.ToolExecutionResult
 	Usage                         = core.Usage
 	AgentHandler                  = core.AgentHandler
 	AgentTask                     = core.AgentTask
@@ -78,6 +81,7 @@ type (
 	TaskProgramDecision           = core.TaskProgramDecision
 	TaskProgramQuietHours         = core.TaskProgramQuietHours
 	TaskDeliveryRef               = core.TaskDeliveryRef
+	TaskDeliveryValidator         = core.TaskDeliveryValidator
 	SkillMeta                     = core.SkillMeta
 	ExecutionKind                 = core.ExecutionKind
 	ExecutionRequest              = core.ExecutionRequest
@@ -207,19 +211,21 @@ var (
 	ExtractText          = core.ExtractText
 	ProjectLegacyMessage = core.ProjectLegacyMessage
 
-	WithSoulID                = core.WithSoulID
-	SoulIDFromContext         = core.SoulIDFromContext
-	SoulIDFromContextOK       = core.SoulIDFromContextOK
-	WithUserID                = core.WithUserID
-	UserIDFromContext         = core.UserIDFromContext
-	UserIDFromContextOK       = core.UserIDFromContextOK
-	ContextWithAutonomousTurn = core.ContextWithAutonomousTurn
-	IsAutonomousTurn          = core.IsAutonomousTurn
-	ContextWithTaskID         = core.ContextWithTaskID
-	TaskIDFromContext         = core.TaskIDFromContext
-	WithDeniedTools           = core.WithDeniedTools
-	DeniedToolsFromContext    = core.DeniedToolsFromContext
-	IsToolDenied              = core.IsToolDenied
+	WithSoulID                    = core.WithSoulID
+	WithResponseValidationContext = core.WithResponseValidationContext
+	ResponseValidationContext     = core.ResponseValidationContext
+	SoulIDFromContext             = core.SoulIDFromContext
+	SoulIDFromContextOK           = core.SoulIDFromContextOK
+	WithUserID                    = core.WithUserID
+	UserIDFromContext             = core.UserIDFromContext
+	UserIDFromContextOK           = core.UserIDFromContextOK
+	ContextWithAutonomousTurn     = core.ContextWithAutonomousTurn
+	IsAutonomousTurn              = core.IsAutonomousTurn
+	ContextWithTaskID             = core.ContextWithTaskID
+	TaskIDFromContext             = core.TaskIDFromContext
+	WithDeniedTools               = core.WithDeniedTools
+	DeniedToolsFromContext        = core.DeniedToolsFromContext
+	IsToolDenied                  = core.IsToolDenied
 
 	OK   = core.OK
 	Fail = core.Fail

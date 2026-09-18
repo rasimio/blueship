@@ -71,7 +71,9 @@ type Config struct {
 	// TurnPolicyResolver optionally resolves an atomic per-turn policy before
 	// reflex/rule tool directives run. The hook is host-owned so intent
 	// detection and concrete tool names never leak into BlueShip.
-	TurnPolicyResolver TurnPolicyResolver `yaml:"-" json:"-"`
+	TurnPolicyResolver    TurnPolicyResolver    `yaml:"-" json:"-"`
+	ResponseValidator     ResponseValidator     `yaml:"-" json:"-"`
+	TaskDeliveryValidator TaskDeliveryValidator `yaml:"-" json:"-"`
 
 	// ReflexPreActionSelector optionally adds deterministic pre-actions before
 	// Cortex. BlueShip executes and logs them through the normal reflex
@@ -241,6 +243,7 @@ type LimitsConfig struct {
 
 // TimeoutsConfig defines timeouts for external calls.
 type TimeoutsConfig struct {
+	TaskWall       time.Duration // total one-shot lifetime, including queueing/pauses (default: 30m)
 	LLM            time.Duration // main Claude call (default: 120s)
 	Compact        time.Duration // Haiku compaction (default: 30s)
 	Embedding      time.Duration // embedding API (default: 15s)
@@ -299,6 +302,9 @@ type A2APeerConfig struct {
 
 // applyDefaults fills in zero values with sensible defaults.
 func (c *Config) ApplyDefaults() {
+	if c.Timeouts.TaskWall <= 0 {
+		c.Timeouts.TaskWall = DefaultTaskWallTimeout
+	}
 	// BlueShip keeps its own tables in a dedicated schema so it never pollutes
 	// the host application's public schema. The embedded migrations assume this
 	// schema; defaulting it here lets a fresh database bootstrap with no config.

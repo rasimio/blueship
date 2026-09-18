@@ -111,6 +111,7 @@ func runTaskProgram(ctx context.Context, deps core.AgentDeps, program core.TaskP
 
 		inputCtx, cancel := context.WithTimeout(ctx, taskProgramInputTimeout)
 		output, isError := deps.Registry.Execute(inputCtx, tool, input)
+		receipt := &core.ToolExecutionResult{Name: tool, Input: append([]byte(nil), input...), Output: output, IsError: isError}
 		inputErr := inputCtx.Err()
 		cancel()
 		if inputErr != nil && !isError {
@@ -155,6 +156,7 @@ func runTaskProgram(ctx context.Context, deps core.AgentDeps, program core.TaskP
 			Input:   string(input),
 			Output:  output,
 			Error:   isError,
+			Receipt: receipt,
 		})
 		results[id] = taskProgramInputResult{Output: output, Error: isError}
 		if isError && configured.OnError == core.TaskProgramOnErrorFail {

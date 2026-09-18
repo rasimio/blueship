@@ -20,7 +20,7 @@ import (
 // stay a one-liner without importing encoding/json at the call site.
 var jsonUnmarshal = json.Unmarshal
 
-// DefaultTaskTimeout is applied to tasks without an explicit deadline. A heavy
+// DefaultTaskTimeout bounds one iteration, within the overall task deadline. A heavy
 // research iteration (many browser_fetch + a long synthesis turn) can run well
 // past 5 min; 10 gives it room to finish before the iteration ctx cancels the
 // next LLM/DB call. Critical state writes are additionally detached from this
@@ -217,6 +217,9 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		}
 	}
 	s.drainRetryableNotifications(ctx)
+	if err := s.maintainTaskDeadlines(ctx, time.Now(), s.store); err != nil {
+		return fmt.Errorf("agent-tasks: deadline maintenance: %w", err)
+	}
 
 	// Auto-complete tasks that exhausted iterations but weren't marked done.
 	// This is the one TERMINAL failure worth alerting the owner about — a
@@ -358,6 +361,11 @@ func (s *Scheduler) Run(ctx context.Context) error {
 func (s *Scheduler) runTask(ctx context.Context, task core.AgentTask, handler core.AgentHandler, dispatchTag string) {
 	defer s.taskWg.Done()
 	defer s.setBusy(task.ID.String(), false)
+	if task.Deadline != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, *task.Deadline)
+		defer cancel()
+	}
 	// Third agent between creation and execution: shape the task once
 	// (skill from the catalog, iteration cap) before the first iteration.
 	task = s.routeTaskSkill(ctx, task)
@@ -404,6 +412,9 @@ func (s *Scheduler) runTask(ctx context.Context, task core.AgentTask, handler co
 			return
 		}
 		if next.Deadline != nil && !next.Deadline.After(time.Now()) {
+			if _, err := s.expireTask(ctx, next, time.Now(), s.store); err != nil {
+				s.logger.ErrorContext(ctx, "agent-tasks: expire failed", "task_id", next.ID, "error", err)
+			}
 			return
 		}
 		if ctx.Err() != nil {
@@ -426,6 +437,12 @@ func (s *Scheduler) Wait() {
 // recurring tasks return false. The lease + concurrency slot are owned by
 // runTask, not here.
 func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, handler core.AgentHandler, dispatchTag string) (again bool) {
+	if task.Deadline != nil && !task.Deadline.After(time.Now()) {
+		if _, err := s.expireTask(ctx, task, time.Now(), s.store); err != nil {
+			s.logger.ErrorContext(ctx, "agent-tasks: expire failed", "task_id", task.ID, "error", err)
+		}
+		return false
+	}
 	// Recheck at the actual execution boundary as well as at scheduler pickup:
 	// a host policy can change after dispatch or between back-to-back steps.
 	if !s.executionAllowed(ctx, task) {
@@ -526,13 +543,9 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		RuleEngine:          s.deps.RuleEngine,
 	}
 
-	// Apply deadline or default timeout.
-	var cancel context.CancelFunc
-	if task.Deadline != nil && task.Deadline.After(time.Now()) {
-		ctx, cancel = context.WithDeadline(ctx, *task.Deadline)
-	} else {
-		ctx, cancel = context.WithTimeout(ctx, DefaultTaskTimeout)
-	}
+	// Bound each iteration AND the durable total lifetime. An expired
+	// deadline must never grant a fresh ten-minute iteration.
+	ctx, cancel := context.WithDeadline(ctx, iterationDeadline(time.Now(), task))
 	defer cancel()
 
 	// Tag the ctx with task id + iteration so per-task tool side-effects
@@ -621,6 +634,15 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		}()
 	}()
 
+	if task.Deadline != nil && !task.Deadline.After(time.Now()) {
+		iterationOutcome, iterationError = "failed", core.TaskDeadlineExceeded
+		dbCtx, dbCancel := newDBCtx()
+		defer dbCancel()
+		if _, expireErr := s.expireTask(dbCtx, task, time.Now(), s.store); expireErr != nil {
+			s.logger.ErrorContext(ctx, "agent-tasks: expire failed", "task_id", task.ID, "error", expireErr)
+		}
+		return false
+	}
 	if err != nil {
 		iterationOutcome = "failed"
 		iterationError = err.Error()
@@ -674,7 +696,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		notifyCtx, notifyCancel := newDBCtx()
 		defer notifyCancel()
 		outcome, err := deliverTaskNotification(
-			notifyCtx, s.notify, s.notifyJournal,
+			notifyCtx, s.validatedTaskNotifier(task, result.PendingDeliveries), s.notifyJournal,
 			task.ID, task.UserID, result.Notify, result.PendingDeliveries,
 		)
 		if err != nil {
@@ -740,6 +762,15 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		if task.Schedule == nil && task.AcceptanceCriteria != nil &&
 			strings.TrimSpace(*task.AcceptanceCriteria) != "" {
 			verdict := evaluateAcceptance(ctx, agentDeps, task, result.Output, result.ToolCallsJSON)
+			if task.Deadline != nil && !task.Deadline.After(time.Now()) {
+				iterationOutcome, iterationError = "failed", core.TaskDeadlineExceeded
+				dbCtx, dbCancel := newDBCtx()
+				defer dbCancel()
+				if _, err := s.expireTask(dbCtx, task, time.Now(), s.store); err != nil {
+					s.logger.ErrorContext(ctx, "agent-tasks: expire failed", "task_id", task.ID, "error", err)
+				}
+				return false
+			}
 			met := verdict.Met
 			iterationAcceptanceMet = &met
 			iterationAcceptanceReason = verdict.Reason
@@ -821,6 +852,8 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		completeCtx, completeCancel := newDBCtx()
 		completeErr := s.store.Complete(completeCtx, task.ID, result.Output)
 		if completeErr != nil {
+			result.IsFinal = false
+			iterationOutcome, iterationError = "failed", completeErr.Error()
 			s.logger.ErrorContext(ctx, "agent-tasks: complete update error", "error", completeErr)
 		}
 		completeCancel()
@@ -832,7 +865,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 			s.archiveTaskSession(ctx, task.ID, task.SoulID, sessionID)
 		}
 		// Recurring tasks: reset for next run.
-		if task.Schedule != nil {
+		if completeErr == nil && task.Schedule != nil {
 			resetCtx, resetCancel := newDBCtx()
 			if err := s.store.ResetForNextRun(resetCtx, task.ID); err != nil {
 				s.logger.ErrorContext(ctx, "agent-tasks: reset for next run error", "error", err)
@@ -841,7 +874,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		}
 		// Notify origin agent (delegate-strategy callback). Non-recurring
 		// only — recurring tasks never originate from a peer.
-		if task.Schedule == nil && s.onStatusChange != nil {
+		if completeErr == nil && task.Schedule == nil && s.onStatusChange != nil {
 			task.Status = "done"
 			task.Result = &result.Output
 			go s.onStatusChange(core.WithSoulID(context.Background(), task.SoulID), task)
@@ -1075,6 +1108,14 @@ func (s *Scheduler) retryTaskNotification(ctx context.Context, intent core.TaskN
 				"notification user %s does not match task user %s", intent.UserID, task.UserID)))
 		return resolveErr
 	}
+	for _, ref := range intent.Refs {
+		if ref.InputID == "task_lifecycle" && ref.ItemKey == "progress" &&
+			task.Status != "pending" && task.Status != "running" && task.Status != "paused" {
+			_, err := resolveTaskNotificationAttempt(ctx, s.notifyJournal, intent.ID,
+				core.TaskNotificationReceipt{}, core.PermanentlyNotSent(fmt.Errorf("task is already terminal")))
+			return err
+		}
+	}
 	if s.notify == nil {
 		baseCtx := core.WithUserID(core.WithSoulID(ctx, task.SoulID), task.UserID)
 		_, err := resolveTaskNotificationAttempt(baseCtx, s.notifyJournal, intent.ID,
@@ -1087,7 +1128,7 @@ func (s *Scheduler) retryTaskNotification(ctx context.Context, intent core.TaskN
 	transportCtx = core.ContextWithNotificationAttemptID(transportCtx, intent.ID)
 	transportCtx, transportCancel := context.WithTimeout(transportCtx, notificationAttemptTimeout)
 	defer transportCancel()
-	receipt, notifyErr := s.notify(transportCtx, intent.UserID, intent.Text)
+	receipt, notifyErr := s.validatedTaskNotifier(task, intent.Refs)(transportCtx, intent.UserID, intent.Text)
 	delivered, resolveErr := resolveTaskNotificationAttempt(transportCtx, s.notifyJournal, intent.ID, receipt, notifyErr)
 	if delivered && resolveErr == nil && s.deps != nil && s.deps.AgentIterationCompletedHook != nil {
 		hookCtx := core.WithUserID(core.WithSoulID(context.Background(), task.SoulID), task.UserID)

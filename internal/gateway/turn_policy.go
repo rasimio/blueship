@@ -278,10 +278,11 @@ func (g *Gateway) runTurnPolicyPreActions(
 			traceOutput = bounded + "..."
 		}
 		traces = append(traces, agent.ToolTrace{
-			Name:   action.Tool,
-			Input:  input,
-			Output: traceOutput,
-			Error:  isError,
+			Name:    action.Tool,
+			Input:   input,
+			Output:  traceOutput,
+			Error:   isError,
+			Receipt: &bs.ToolExecutionResult{Name: action.Tool, Input: append([]byte(nil), action.Input...), Output: result, IsError: isError},
 		})
 		if isError {
 			fmt.Fprintf(&guidance,

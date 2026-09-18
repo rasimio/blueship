@@ -15,6 +15,10 @@ import (
 // a host overrides any field to speak its own language/persona. The framework
 // itself owns no tenant- or language-specific text — that is a host concern.
 type UIStrings struct {
+	// Task lifecycle notifications take the task title as their single %s.
+	TaskProgressQueuedFmt  string
+	TaskProgressRunningFmt string
+	TaskDeadlineFmt        string
 	// ModelRefused is shown to the user when the model declines to answer
 	// and produced no text (so the turn isn't silent).
 	ModelRefused string
@@ -51,6 +55,15 @@ type UIStrings struct {
 }
 
 func (u *UIStrings) applyDefaults() {
+	if u.TaskProgressQueuedFmt == "" {
+		u.TaskProgressQueuedFmt = "Task %s is still waiting to run. There is no completed result yet."
+	}
+	if u.TaskProgressRunningFmt == "" {
+		u.TaskProgressRunningFmt = "Task %s is still in progress. There is no completed result yet."
+	}
+	if u.TaskDeadlineFmt == "" {
+		u.TaskDeadlineFmt = "Task %s reached its time limit and has stopped. A completed result is not available."
+	}
 	if u.ModelRefused == "" {
 		u.ModelRefused = "(the model declined to answer this request — rephrase / simplify the context)"
 	}

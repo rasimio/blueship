@@ -27,13 +27,15 @@ type Loop struct {
 
 // RunConfig controls agent loop execution.
 type RunConfig struct {
-	SessionID      string
-	SystemPrompt   string
-	CompactSummary string // existing compaction summary from previous runs
-	Model          string
-	MaxTokens      int
-	ContextWindow  int
-	MaxTurns       int
+	ResponseValidator  bs.ResponseValidator
+	InitialToolResults []bs.ToolExecutionResult
+	SessionID          string
+	SystemPrompt       string
+	CompactSummary     string // existing compaction summary from previous runs
+	Model              string
+	MaxTokens          int
+	ContextWindow      int
+	MaxTurns           int
 	// ReplyToMessageID, when non-empty, is stamped on the user
 	// message row at append time so the cabinet's history endpoint
 	// can render a relational reply-quote chip pointing at the
@@ -197,11 +199,12 @@ func (a *Loop) SetCompactor(c *Compactor) {
 
 // ToolTrace records a single tool invocation during the agent loop.
 type ToolTrace struct {
-	Name    string `json:"name"`
-	BlockID string `json:"block_id,omitempty"`
-	Input   string `json:"input"`
-	Output  string `json:"output,omitempty"`
-	Error   bool   `json:"error,omitempty"`
+	Name    string                  `json:"name"`
+	BlockID string                  `json:"block_id,omitempty"`
+	Input   string                  `json:"input"`
+	Output  string                  `json:"output,omitempty"`
+	Error   bool                    `json:"error,omitempty"`
+	Receipt *bs.ToolExecutionResult `json:"-"`
 }
 
 // RunResult extends the text response with tool execution trace.

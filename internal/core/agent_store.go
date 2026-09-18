@@ -851,6 +851,7 @@ func (s *AgentTaskStore) TrySetRunning(ctx context.Context, id uuid.UUID) (bool,
 		UPDATE agent_tasks
 		SET status = 'running', last_run_at = NOW()
 		WHERE id = $1 AND status = 'pending'
+		  AND (deadline IS NULL OR deadline > NOW())
 		RETURNING id`, id)
 	if err == nil {
 		return true, nil
@@ -923,12 +924,23 @@ func (s *AgentTaskStore) UpdateProgressWithRecheck(ctx context.Context, id uuid.
 // Complete marks a task as done with a final result, increments iteration,
 // and clears any pending recheck URLs (a passing submit obviates them).
 func (s *AgentTaskStore) Complete(ctx context.Context, id uuid.UUID, result string) error {
-	_, err := s.db.ExecContext(ctx, `
+	updated, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks
 		SET status = 'done', result = $2, completed_at = NOW(),
 		    iteration = iteration + 1, required_recheck_urls = '{}'
-		WHERE id = $1`, id, result)
-	return err
+		WHERE id = $1 AND status = 'running'
+		  AND (deadline IS NULL OR deadline > NOW())`, id, result)
+	if err != nil {
+		return err
+	}
+	n, err := updated.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("complete agent task: task is no longer running or its deadline expired")
+	}
+	return nil
 }
 
 // CompleteExhausted force-terminates tasks that exhausted max_iterations
@@ -1028,7 +1040,7 @@ func (s *AgentTaskStore) SetPendingForNotificationRetry(ctx context.Context, id 
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks
 		SET status = 'pending', last_run_at = NULL
-		WHERE id = $1`, id)
+		WHERE id = $1 AND status = 'running'`, id)
 	return err
 }
 
@@ -1094,6 +1106,9 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 	}
 	if task.Strategy == "" {
 		task.Strategy = StrategyRecurring
+	}
+	if task.Deadline == nil {
+		task.Deadline = TaskWallDeadline(task, time.Now(), DefaultTaskWallTimeout)
 	}
 	// pq.StringArray serialises nil as SQL NULL, which trips the
 	// NOT-NULL constraint on tools/use_agents even though the schema
@@ -1435,7 +1450,7 @@ func (s *AgentTaskStore) PauseTask(ctx context.Context, id uuid.UUID, progress j
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks
 		SET progress = $2, status = 'paused', iteration = iteration + 1
-		WHERE id = $1`, id, jsonbObject(progress))
+		WHERE id = $1 AND status = 'running'`, id, jsonbObject(progress))
 	return err
 }
 

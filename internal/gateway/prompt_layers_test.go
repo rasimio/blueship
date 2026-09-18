@@ -45,6 +45,24 @@ func TestSystemPromptPutsPersonaAfterPlatformLayers(t *testing.T) {
 	}
 }
 
+func TestSystemPromptReloadsIdentityImmediatelyAfterEdit(t *testing.T) {
+	soulID := uuid.New()
+	cfg := &bs.Config{}
+	persona := "old identity"
+	cfg.Gateway.ResolveSoulPersona = func(context.Context, uuid.UUID) (string, error) { return persona, nil }
+	cfg.Gateway.ResolvePlatformPrompts = func(context.Context, string) (string, string, error) { return "platform", "agents", nil }
+	g := &Gateway{deps: &bs.Deps{Config: cfg}}
+	ctx := bs.WithSoulID(context.Background(), soulID)
+	if _, err := g.systemPromptForSoul(ctx, soulID, ""); err != nil {
+		t.Fatal(err)
+	}
+	persona = "updated identity"
+	prompt, err := g.systemPromptForSoul(ctx, soulID, "")
+	if err != nil || strings.Contains(prompt, "old identity") || !strings.HasSuffix(prompt, "updated identity") {
+		t.Fatalf("persona edit remained stale: %q %v", prompt, err)
+	}
+}
+
 // The platform-layer cache is keyed by profile. It used to be a one-shot
 // latch, which was correct while every soul read the same two files — but the
 // profile comes from model_config, which is refreshed every turn, so a latch

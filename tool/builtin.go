@@ -120,6 +120,22 @@ func RegisterBuiltinTools(r *bs.ToolRegistry, d *bs.Deps) {
 				if err := json.Unmarshal(input, &p); err != nil {
 					return nil, err
 				}
+				if validate := d.Config.ResponseValidator; validate != nil {
+					request, _ := bs.ResponseValidationContext(ctx)
+					request.Text, request.PendingTools = p.Text, nil
+					if request.CurrentDatetime == "" {
+						loc := d.Config.Gateway.TimezoneFor(ctx, tz)
+						request.CurrentDatetime, request.Timezone = time.Now().In(loc).Format(time.RFC3339), loc.String()
+					}
+					text, err := validate(ctx, request)
+					if err != nil {
+						return nil, fmt.Errorf("message_send: validate outgoing text: %w", err)
+					}
+					if strings.TrimSpace(text) == "" {
+						return nil, fmt.Errorf("message_send: outgoing text was not validated")
+					}
+					p.Text = text
+				}
 				target := p.To
 				// A symbolic recipient means the user who owns the current
 				// invocation. Tenant-bound tasks must use SendToUser so they

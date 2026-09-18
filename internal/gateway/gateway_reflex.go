@@ -208,7 +208,7 @@ func (g *Gateway) runRulePreActions(ctx context.Context, us *UserState, timings 
 		}
 		// The " [rule]" suffix separates an operator-prescribed call from one
 		// the model chose, so a /debug dump says which of the two happened.
-		*preTraces = append(*preTraces, agent.ToolTrace{Name: pa.Tool + " [rule]", Input: inputStr, Output: outputStr, Error: isError})
+		*preTraces = append(*preTraces, agent.ToolTrace{Name: pa.Tool + " [rule]", Input: inputStr, Output: outputStr, Error: isError, Receipt: &bs.ToolExecutionResult{Name: pa.Tool, Input: append([]byte(nil), pa.Input...), Output: result, IsError: isError}})
 		if isError {
 			g.logger.Warn("rule pre-action failed", "rule_id", rule.ID, "tool", pa.Tool, "error", result)
 			continue
@@ -241,7 +241,7 @@ func (g *Gateway) runReflexPreActions(ctx context.Context, us *UserState, timing
 		if len(outputStr) > 500 {
 			outputStr = outputStr[:500] + "..."
 		}
-		*preTraces = append(*preTraces, agent.ToolTrace{Name: pa.Tool, Input: inputStr, Output: outputStr, Error: isError})
+		*preTraces = append(*preTraces, agent.ToolTrace{Name: pa.Tool, Input: inputStr, Output: outputStr, Error: isError, Receipt: &bs.ToolExecutionResult{Name: pa.Tool, Input: append([]byte(nil), pa.Input...), Output: result, IsError: isError}})
 		if isError {
 			g.logger.Warn("reflex pre-action failed", "tool", pa.Tool, "error", result)
 			continue
@@ -300,7 +300,7 @@ func (g *Gateway) runBrowserFetchPreAction(ctx context.Context, us *UserState, t
 	if len(outputStr) > 500 {
 		outputStr = outputStr[:500] + "..."
 	}
-	*preTraces = append(*preTraces, agent.ToolTrace{Name: tool.ToolBrowserFetch, Input: string(input), Output: outputStr, Error: isError})
+	*preTraces = append(*preTraces, agent.ToolTrace{Name: tool.ToolBrowserFetch, Input: string(input), Output: outputStr, Error: isError, Receipt: &bs.ToolExecutionResult{Name: tool.ToolBrowserFetch, Input: append([]byte(nil), input...), Output: result, IsError: isError}})
 	if isError {
 		g.logger.Warn("reflex pre-action failed", "tool", tool.ToolBrowserFetch, "error", result)
 		return
@@ -898,7 +898,7 @@ func (g *Gateway) runInteraction(
 	reflexCb, cortexCb *bs.StreamCallbacks,
 	onReflexDone func(),
 ) (reply string, traces []agent.ToolTrace, escalated bool, err error) {
-	if cortexCfg.TurnPolicyActive {
+	if cortexCfg.TurnPolicyActive || cortexCfg.ResponseValidator != nil {
 		reply, traces, err = loop.RunStream(ctx, cortexCfg, content, cortexCb)
 		return reply, traces, false, err
 	}

@@ -137,6 +137,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 	// Accumulate text and tool traces across all turns.
 	var accumulated strings.Builder
 	var traces []ToolTrace
+	receipts := append([]bs.ToolExecutionResult(nil), cfg.InitialToolResults...)
 	toolTurns := 0
 	forceFinal := false
 	maxTokenContinuations := 0
@@ -250,7 +251,9 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		currentTurnText := bs.ExtractText(resp.Content)
 		if !usedEmptyVisibleFallback && shouldAutoContinueMaxTokens(resp, maxTokenContinuations) {
 			appendTurnText(&pendingMaxTokenText, currentTurnText)
-			appendTurnText(&accumulated, currentTurnText)
+			if cfg.ResponseValidator == nil {
+				appendTurnText(&accumulated, currentTurnText)
+			}
 			pendingMaxTokenOutputTokens += resp.Usage.OutputTokens
 			convo = append(convo,
 				bs.Message{Role: "assistant", Content: resp.Content},
@@ -278,6 +281,13 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		// 5. Store assistant response (skipped for an ephemeral run). Detached
 		// ctx so a long turn that just consumed the iteration budget can't lose
 		// this state write.
+		if cfg.ResponseValidator != nil {
+			resp.Content, err = validateResponse(ctx, cfg, userMessage, resp.Content, receipts)
+			if err != nil {
+				return nil, err
+			}
+			currentTurnText = bs.ExtractText(resp.Content)
+		}
 		assistantMsg := bs.Message{
 			Role:        "assistant",
 			Content:     resp.Content,
@@ -432,7 +442,8 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 
 				toolStarted := time.Now()
 				toolTimeout := resolveToolExecutionTimeout(cfg.ToolTimeout, block.Name)
-				result, isError, timedOut := executeToolWithTimeout(ctx, a.registry, block.Name, block.Input, toolTimeout)
+				toolCtx := bs.WithResponseValidationContext(ctx, responseValidationRequest(cfg, userMessage, receipts))
+				result, isError, timedOut := executeToolWithTimeout(toolCtx, a.registry, block.Name, block.Input, toolTimeout)
 				latencyMs := int(time.Since(toolStarted) / time.Millisecond)
 				emitTiming(cfg, "tool.execute", toolStarted, toolTimingDetail(cfg, turn+1, block.Name, isError))
 				a.logger.Info("tool result",
@@ -452,6 +463,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 					Content:   result,
 					IsError:   isError,
 				}
+				receipts = append(receipts, bs.ToolExecutionResult{Name: block.Name, Input: append([]byte(nil), block.Input...), Output: result, IsError: isError})
 				toolResults = append(toolResults, resultBlock)
 				promptToolResults = append(promptToolResults, compactToolResultBlockForPrompt(resultBlock))
 				inputStr := string(block.Input)
@@ -462,7 +474,8 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 				if len(outputStr) > 500 {
 					outputStr = outputStr[:500] + "..."
 				}
-				traces = append(traces, ToolTrace{Name: block.Name, Input: inputStr, Output: outputStr, Error: isError})
+				receipt := receipts[len(receipts)-1]
+				traces = append(traces, ToolTrace{Name: block.Name, Input: inputStr, Output: outputStr, Error: isError, Receipt: &receipt})
 			}
 
 			// Defensive: stop_reason was "tool_use" but no tool_use blocks

@@ -1112,6 +1112,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	loop := prepared.loop
 	now := prepared.now
 	runCfg := prepared.config
+	for _, trace := range preTraces {
+		if trace.Receipt != nil {
+			runCfg.InitialToolResults = append(runCfg.InitialToolResults, *trace.Receipt)
+		}
+	}
 	// Read any images into text before the turn runs, so cortex answers from a
 	// description instead of pixels it may not be able to see. Cortex still
 	// writes the reply — persona, memory and tools are unaffected.

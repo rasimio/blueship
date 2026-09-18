@@ -232,6 +232,18 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 			if p.Cadence != "" {
 				task.Cadence = &p.Cadence
 			}
+			if value := strings.TrimSpace(p.Deadline); value != "" {
+				deadline, err := time.Parse(time.RFC3339, value)
+				if err != nil {
+					return nil, fmt.Errorf("deadline: not an ISO datetime with timezone: %q", value)
+				}
+				task.Deadline = &deadline
+			}
+			var wallTimeout time.Duration
+			if d.Config != nil {
+				wallTimeout = d.Config.Timeouts.TaskWall
+			}
+			task.Deadline = bs.TaskWallDeadline(task, time.Now(), wallTimeout)
 			created, err := store.Create(ctx, task)
 			if err != nil {
 				return nil, fmt.Errorf("create agent_task: %w", err)
@@ -242,6 +254,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 				"status":         created.Status,
 				"strategy":       created.Strategy,
 				"max_iterations": created.MaxIterations,
+				"deadline":       created.Deadline,
 			}, nil
 		},
 	)
@@ -289,6 +302,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 				"delegate_to":         t.DelegateTo,
 				"use_agents":          []string(t.UseAgents),
 				"completed_at":        t.CompletedAt,
+				"deadline":            t.Deadline,
 			}, nil
 		},
 	)

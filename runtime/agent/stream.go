@@ -14,7 +14,18 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 	if !ok {
 		// Fallback to batch if provider doesn't support streaming
 		text, err := a.Run(ctx, cfg, userMessage)
+		if cfg.ResponseValidator != nil && err == nil && cb != nil && cb.OnText != nil {
+			cb.OnText(text)
+		}
 		return text, nil, err
+	}
+	// No provider text may reach a transport before the host has checked it.
+	var publishValidatedText func(string)
+	if cfg.ResponseValidator != nil && cb != nil {
+		publishValidatedText = cb.OnText
+		buffered := *cb
+		buffered.OnText = nil
+		cb = &buffered
 	}
 
 	outcome := RunOutcome{Reason: RunStopProviderStop}
@@ -87,6 +98,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 
 	var accumulated strings.Builder
 	var traces []ToolTrace
+	receipts := append([]bs.ToolExecutionResult(nil), cfg.InitialToolResults...)
 	toolTurns := 0
 	forceFinal := false
 	maxTokenContinuations := 0
@@ -237,7 +249,9 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 		currentTurnText := bs.ExtractText(resp.Content)
 		if !usedEmptyVisibleFallback && shouldAutoContinueMaxTokens(resp, maxTokenContinuations) {
 			appendTurnText(&pendingMaxTokenText, currentTurnText)
-			appendTurnText(&accumulated, currentTurnText)
+			if cfg.ResponseValidator == nil {
+				appendTurnText(&accumulated, currentTurnText)
+			}
 			pendingMaxTokenOutputTokens += resp.Usage.OutputTokens
 			convo = append(convo,
 				bs.Message{Role: "assistant", Content: resp.Content},
@@ -262,6 +276,13 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			appendTokens += pendingMaxTokenOutputTokens
 		}
 
+		if cfg.ResponseValidator != nil {
+			resp.Content, err = validateResponse(ctx, cfg, userMessage, resp.Content, receipts)
+			if err != nil {
+				return "", nil, err
+			}
+			currentTurnText = bs.ExtractText(resp.Content)
+		}
 		assistantMsg := bs.Message{
 			Role:        "assistant",
 			Content:     resp.Content,
@@ -278,6 +299,9 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			}
 		}
 		convo = append(convo, assistantMsg)
+		if publishValidatedText != nil && currentTurnText != "" {
+			publishValidatedText(currentTurnText)
+		}
 
 		// Collect this turn's text, de-duped (see appendTurnText).
 		appendTurnText(&accumulated, currentTurnText)
@@ -412,7 +436,8 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 				a.logger.Info("executing tool", "tool", block.Name, "tool_use_id", block.ID)
 				start := time.Now()
 				toolTimeout := resolveToolExecutionTimeout(cfg.ToolTimeout, block.Name)
-				result, isError, timedOut := executeToolWithTimeout(ctx, a.registry, block.Name, block.Input, toolTimeout)
+				toolCtx := bs.WithResponseValidationContext(ctx, responseValidationRequest(cfg, userMessage, receipts))
+				result, isError, timedOut := executeToolWithTimeout(toolCtx, a.registry, block.Name, block.Input, toolTimeout)
 				latencyMs := int(time.Since(start) / time.Millisecond)
 				emitTiming(cfg, "tool.execute", start, toolTimingDetail(cfg, turn+1, block.Name, isError))
 				a.logger.Info("tool result",
@@ -436,7 +461,8 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 				if len(outputStr) > 500 {
 					outputStr = outputStr[:500] + "..."
 				}
-				traces = append(traces, ToolTrace{Name: block.Name, Input: inputStr, Output: outputStr, Error: isError})
+				receipt := bs.ToolExecutionResult{Name: block.Name, Input: append([]byte(nil), block.Input...), Output: result, IsError: isError}
+				traces = append(traces, ToolTrace{Name: block.Name, Input: inputStr, Output: outputStr, Error: isError, Receipt: &receipt})
 				resultBlock := bs.ContentBlock{
 					Type:      "tool_result",
 					ToolUseID: block.ID,
@@ -444,6 +470,7 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 					Content:   result,
 					IsError:   isError,
 				}
+				receipts = append(receipts, bs.ToolExecutionResult{Name: block.Name, Input: append([]byte(nil), block.Input...), Output: result, IsError: isError})
 				toolResults = append(toolResults, resultBlock)
 				promptToolResults = append(promptToolResults, compactToolResultBlockForPrompt(resultBlock))
 			}
