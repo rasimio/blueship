@@ -373,6 +373,11 @@ type pendingMsg struct {
 	// ephemeral marks a private, read-only notebook ask:
 	// context from memory, but no persistence — see core.WithEphemeral.
 	ephemeral bool
+	// transportNote is what the transport has to tell the model about
+	// where this message came from — a Telegram guest summons, answered in
+	// front of people who are not in the conversation. It goes in front
+	// of the turn for the model only and is never persisted.
+	transportNote string
 }
 
 func appendVisibleTranscript(text, transcript string) string {
@@ -383,6 +388,22 @@ func appendVisibleTranscript(text, transcript string) string {
 		return transcript
 	}
 	return text + "\n\n" + transcript
+}
+
+// prependTransportNotes puts what the transport knows about where the turn
+// came from in front of everything else the model reads, reply quotes and
+// parent files included. Provider-only, like the quote.
+func prependTransportNotes(msgs []pendingMsg, blocks []bs.ContentBlock) []bs.ContentBlock {
+	var notes []bs.ContentBlock
+	for _, m := range msgs {
+		if strings.TrimSpace(m.transportNote) != "" {
+			notes = append(notes, bs.ContentBlock{Type: "text", Text: m.transportNote})
+		}
+	}
+	if len(notes) == 0 {
+		return blocks
+	}
+	return append(notes, blocks...)
 }
 
 func joinedVisibleText(msgs []pendingMsg) *string {

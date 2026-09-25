@@ -8,6 +8,10 @@ type Update struct {
 	// PreCheckoutQuery must be answered within about ten seconds or
 	// Telegram cancels the payment and tells the buyer it failed.
 	PreCheckoutQuery *PreCheckoutQuery `json:"pre_checkout_query,omitempty"`
+	// GuestMessage is a summons from a chat the bot is not a member of:
+	// somebody mentioned it there, or replied to its guest answer. It is
+	// answered once, through answerGuestQuery with GuestQueryID.
+	GuestMessage *Message `json:"guest_message,omitempty"`
 }
 
 // PreCheckoutQuery is Telegram asking whether a confirmed purchase may go
@@ -61,6 +65,10 @@ type Message struct {
 	// SuccessfulPayment comes on a message with no text and no
 	// attachment, which is exactly the shape the inbound path drops.
 	SuccessfulPayment *SuccessfulPayment `json:"successful_payment,omitempty"`
+	// GuestQueryID is set on a guest message only. Its Chat is the chat
+	// the bot was summoned into, which may share an id with one of the
+	// bot's own chats without being that chat.
+	GuestQueryID string `json:"guest_query_id,omitempty"`
 }
 
 // PhotoSize represents one size variant of a Telegram photo.
@@ -116,6 +124,7 @@ type User struct {
 
 // Chat represents a Telegram chat.
 type Chat struct {
-	ID   int64  `json:"id"`
-	Type string `json:"type"`
+	ID    int64  `json:"id"`
+	Type  string `json:"type"`
+	Title string `json:"title,omitempty"`
 }

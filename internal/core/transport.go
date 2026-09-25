@@ -78,6 +78,17 @@ type TextStreamSink interface {
 	SendTextDelta(ctx context.Context, delta string) error
 }
 
+// FinalTextSink is an optional capability for text-streaming sinks that
+// render the finished answer in place of what streamed — a Telegram guest
+// reply, which is a single message edited as the answer grows. Deltas are
+// raw model output; the final text has had leaked tool calls and file
+// markers dealt with, so it is what the message has to end up saying.
+// A streaming sink without it gets no final text: the web client already
+// holds every delta.
+type FinalTextSink interface {
+	SendFinalText(ctx context.Context, text string) error
+}
+
 // MetaSink is an optional sink capability for transports that need to know
 // the session ID / assistant message ID of the current turn (so an upstream
 // relayer can link persisted tool_calls back to the message that owns them).

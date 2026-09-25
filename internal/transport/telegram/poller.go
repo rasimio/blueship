@@ -142,8 +142,9 @@ func (p *Poller) Run(ctx context.Context, ch chan<- Update) {
 // there is no error anywhere — the bot simply never hears about it.
 // pre_checkout_query is the expensive one: unanswered, Telegram cancels
 // the payment and tells the buyer it failed, which looks like a broken
-// card rather than a line missing from a query string.
-var AllowedUpdates = []string{"message", "callback_query", "pre_checkout_query"}
+// card rather than a line missing from a query string. guest_message
+// only arrives for a bot whose Guest Mode is switched on in BotFather.
+var AllowedUpdates = []string{"message", "callback_query", "pre_checkout_query", "guest_message"}
 
 func allowedUpdatesJSON() string {
 	quoted := make([]string, len(AllowedUpdates))

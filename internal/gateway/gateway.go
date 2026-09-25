@@ -1109,6 +1109,10 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		g.handleSuccessfulPayment(ctx, m)
 		return
 	}
+	if m := update.GuestMessage; m != nil {
+		g.handleGuestMessage(ctx, bi, m)
+		return
+	}
 
 	// Handle callback queries (inline button presses).
 	// LEGACY: the /model command's inline-keyboard callbacks land here; the

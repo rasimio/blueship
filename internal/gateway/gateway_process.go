@@ -896,7 +896,7 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		// a picture is exactly the thing no text quote can stand in for.
 		withParentFiles = prependReplyMediaBlocks(msgs, blocks)
 	}
-	blocks = withParentFiles
+	blocks = prependTransportNotes(msgs, withParentFiles)
 	content = providerContentFromBlocks(blocks)
 	timings.RecordSince("gateway.reply_attachments", replyAttachmentsStarted,
 		fmt.Sprintf("parent=%t blocks=%d", replyToMessageID != "", len(blocks)))
@@ -1463,7 +1463,11 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 		// delivered chunk-by-chunk via cb.OnText; calling SendText again
 		// here would duplicate the whole response in the rendered bubble.
 		if reply != "" {
-			if _, isStream := sink.(bs.TextStreamSink); !isStream {
+			if fs, ok := sink.(bs.FinalTextSink); ok {
+				if err := fs.SendFinalText(ctx, reply); err != nil {
+					g.logger.Warn("final text delivery failed", "chat_id", us.ChatID, "error", err)
+				}
+			} else if _, isStream := sink.(bs.TextStreamSink); !isStream {
 				sink.SendText(ctx, reply)
 			}
 			if !ephemeral {

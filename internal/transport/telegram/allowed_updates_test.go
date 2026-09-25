@@ -19,6 +19,7 @@ func TestAllowedUpdatesCoversPayments(t *testing.T) {
 		"message":            "no inbound chat at all",
 		"callback_query":     "every inline button stops working",
 		"pre_checkout_query": "every payment is cancelled with no reason shown to the buyer",
+		"guest_message":      "a mention from a chat the bot is not in goes unanswered",
 	}
 	have := map[string]bool{}
 	for _, u := range AllowedUpdates {

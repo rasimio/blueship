@@ -52,6 +52,25 @@ type UIStrings struct {
 	// the turn ended between the tap and its delivery, or the command was
 	// typed out of the blue.
 	StopNothingRunning string
+
+	// Telegram guest mode: the bot answers a mention in a chat it is not
+	// a member of, with exactly one message that it then edits.
+	//
+	// GuestPlaceholder is that message while the answer is being written.
+	// It goes up at once, because the summons has to be answered before
+	// the turn has anything to say.
+	GuestPlaceholder string
+	// GuestNoAnswer replaces the placeholder when the turn ended without
+	// an answer, so the chat is not left with a bot that looks stuck.
+	GuestNoAnswer string
+	// GuestUnpairedFmt answers somebody who has no conversation with the
+	// bot yet; %s is the link to start one.
+	GuestUnpairedFmt string
+	// GuestMarkerFmt heads the guest turn in the conversation's history,
+	// so the owner and the soul later see where it happened; %s is
+	// GuestPrivateChat or the group's title.
+	GuestMarkerFmt   string
+	GuestPrivateChat string
 }
 
 func (u *UIStrings) applyDefaults() {
@@ -96,6 +115,21 @@ func (u *UIStrings) applyDefaults() {
 	}
 	if u.StopNothingRunning == "" {
 		u.StopNothingRunning = "Nothing is being written right now."
+	}
+	if u.GuestPlaceholder == "" {
+		u.GuestPlaceholder = "…"
+	}
+	if u.GuestNoAnswer == "" {
+		u.GuestNoAnswer = "No answer this time — try again."
+	}
+	if u.GuestUnpairedFmt == "" {
+		u.GuestUnpairedFmt = "We haven't met yet. Start a chat with me first: %s"
+	}
+	if u.GuestMarkerFmt == "" {
+		u.GuestMarkerFmt = "[guest · %s]"
+	}
+	if u.GuestPrivateChat == "" {
+		u.GuestPrivateChat = "private chat"
 	}
 }
 
