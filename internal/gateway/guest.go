@@ -38,7 +38,9 @@ const guestEditInterval = time.Second
 type guestClient interface {
 	AnswerGuestQuery(ctx context.Context, guestQueryID, text string) (string, error)
 	EditInlineMessageText(ctx context.Context, inlineMessageID, text string) error
-	FinalizeInlineResponse(ctx context.Context, inlineMessageID, text string) error
+	FinalizeInlineWithMedia(ctx context.Context, inlineMessageID, text string, media []telegram.InlineMedia) error
+	UploadForInline(ctx context.Context, chatID int64, kind, filename, mime string, data []byte) (telegram.InlineMedia, int, error)
+	DeleteMessage(ctx context.Context, chatID int64, messageID int) error
 }
 
 // handleGuestMessage takes a guest summons off the dispatch loop: resolving
@@ -62,10 +64,11 @@ func (g *Gateway) answerGuest(ctx context.Context, bi *botInstance, msg *telegra
 		return
 	}
 	sink := &guestSink{
-		client:   bi.client,
-		queryID:  msg.GuestQueryID,
-		noAnswer: g.deps.Config.UI.GuestNoAnswer,
-		logger:   g.logger,
+		client:       bi.client,
+		queryID:      msg.GuestQueryID,
+		uploadChatID: msg.From.ID,
+		noAnswer:     g.deps.Config.UI.GuestNoAnswer,
+		logger:       g.logger,
 	}
 	// Answered before the turn starts: the summons has to be answered while
 	// the turn is still gathering memory, and the placeholder is also the
@@ -305,13 +308,17 @@ func stripBotMention(text, username string) string {
 
 // guestSink writes a turn into the one message a guest summons allows. The
 // placeholder goes up before the turn starts, streamed text replaces it at a
-// throttled pace, the final answer is rendered over it, and settle covers a
-// turn that ended with nothing delivered.
+// throttled pace, the final answer is rendered over it — with the turn's
+// files, when it produced any — and settle covers a turn that ended with
+// nothing delivered.
 type guestSink struct {
 	client   guestClient
 	queryID  string
 	noAnswer string
 	logger   *slog.Logger
+	// uploadChatID is the caller's private chat with the bot, where a file
+	// has to be sent to get the file id an inline message needs.
+	uploadChatID int64
 
 	mu        sync.Mutex
 	inlineID  string
@@ -319,6 +326,8 @@ type guestSink struct {
 	lastEdit  time.Time
 	delivered bool
 	failed    bool // log the first streamed-edit failure, not every delta
+	media     []telegram.InlineMedia
+	staged    []int // private-chat messages that exist only to hold media
 }
 
 func (s *guestSink) open(ctx context.Context, placeholder string) error {
@@ -352,17 +361,44 @@ func (s *guestSink) SendTextDelta(ctx context.Context, delta string) error {
 	return nil
 }
 
-// SendFinalText renders the finished answer. A guest answer cannot carry
-// the soul's files — there is no second message to send them in — so their
-// markers are dropped rather than shown as raw ids.
+// SendAttachment takes a file the turn produced — a generated picture, a
+// report — into the answer. It cannot be sent as a message of its own, so
+// it is uploaded through the caller's private chat for a file id and goes
+// into the answer's one message with the final text. Markers the gateway
+// could not resolve are dropped from the text rather than shown as raw ids.
+func (s *guestSink) SendAttachment(ctx context.Context, rec bs.AttachmentRecord, data []byte) (int, error) {
+	kind := "document"
+	if rec.Kind == "image" {
+		kind = "photo"
+	}
+	name := rec.Name
+	if name == "" {
+		name = "file"
+	}
+	media, stagedID, err := s.client.UploadForInline(ctx, s.uploadChatID, kind, name, rec.Mime, data)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if stagedID != 0 {
+		s.staged = append(s.staged, stagedID)
+	}
+	if err != nil {
+		return 0, err
+	}
+	s.media = append(s.media, media)
+	// No message id: nothing in any chat stands for this file on its own.
+	return 0, nil
+}
+
+// SendFinalText renders the finished answer, with the turn's files.
 func (s *guestSink) SendFinalText(ctx context.Context, text string) error {
 	text = stripAttachMarkers(text)
-	if text == "" {
-		return nil
-	}
 	s.mu.Lock()
 	id := s.inlineID
+	media := append([]telegram.InlineMedia(nil), s.media...)
 	s.mu.Unlock()
+	if text == "" && len(media) == 0 {
+		return nil
+	}
 	if id == "" {
 		return fmt.Errorf("guest answer: the summons was never answered")
 	}
@@ -370,7 +406,7 @@ func (s *guestSink) SendFinalText(ctx context.Context, text string) error {
 	// already written must reach the chat.
 	deliveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	err := s.client.FinalizeInlineResponse(deliveryCtx, id, text)
+	err := s.client.FinalizeInlineWithMedia(deliveryCtx, id, text, media)
 	if err == nil {
 		s.mu.Lock()
 		s.delivered = true
@@ -393,27 +429,41 @@ func (s *guestSink) SendVoice(context.Context, []byte) error {
 // The placeholder stands in for it.
 func (s *guestSink) SendTyping(context.Context) error { return nil }
 
-// settle closes out a turn that delivered no final answer — failed, silenced
-// by a rule, or produced nothing. What streamed stays; with nothing streamed
-// the placeholder is replaced, so the chat is not left with a bot that looks
-// like it is still thinking.
+// settle closes out the answer once the turn is over.
+//
+// A turn that delivered no final answer — failed, silenced by a rule, or
+// produced nothing — keeps what streamed; with nothing streamed the
+// placeholder is replaced, so the chat is not left with a bot that looks like
+// it is still thinking. Then the private-chat copies made for file ids go:
+// by now the answer holds the files, and the caller never asked for them
+// there.
 func (s *guestSink) settle(ctx context.Context) {
+	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+	defer cancel()
+
 	s.mu.Lock()
-	if s.delivered || s.inlineID == "" {
-		s.mu.Unlock()
-		return
-	}
+	finish := !s.delivered && s.inlineID != ""
 	s.delivered = true
 	id := s.inlineID
 	text := stripAttachMarkers(s.buf.String())
+	media := append([]telegram.InlineMedia(nil), s.media...)
+	staged := s.staged
+	s.staged = nil
 	s.mu.Unlock()
-	if text == "" {
-		text = s.noAnswer
+
+	if finish {
+		if text == "" && len(media) == 0 {
+			text = s.noAnswer
+		}
+		if err := s.client.FinalizeInlineWithMedia(settleCtx, id, text, media); err != nil {
+			s.logger.Warn("guest: settle failed", "error", err)
+		}
 	}
-	settleCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-	defer cancel()
-	if err := s.client.FinalizeInlineResponse(settleCtx, id, text); err != nil {
-		s.logger.Warn("guest: settle failed", "error", err)
+	for _, messageID := range staged {
+		if err := s.client.DeleteMessage(settleCtx, s.uploadChatID, messageID); err != nil {
+			s.logger.Warn("guest: could not remove a file's private-chat copy",
+				"chat_id", s.uploadChatID, "message_id", messageID, "error", err)
+		}
 	}
 }
 

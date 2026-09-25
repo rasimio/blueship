@@ -156,3 +156,110 @@ func TestFinalizeInlineResponseCutsWhatRichAndPlainCannotHold(t *testing.T) {
 		t.Fatal("the cut is not marked")
 	}
 }
+
+func TestUploadForInlineSendsSilentlyAndReturnsTheLargestPhoto(t *testing.T) {
+	var method string
+	var fields map[string]string
+	c := testClient(func(req *http.Request) (*http.Response, error) {
+		method = req.URL.Path[strings.LastIndex(req.URL.Path, "/")+1:]
+		if err := req.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		fields = map[string]string{}
+		for k, v := range req.MultipartForm.Value {
+			fields[k] = v[0]
+		}
+		return jsonResponse(http.StatusOK, `{"ok":true,"result":{"message_id":55,
+			"photo":[{"file_id":"small","width":90},{"file_id":"large","width":1280}]}}`), nil
+	})
+	media, staged, err := c.UploadForInline(context.Background(), 4242, "photo", "art.png", "image/png", []byte("png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if method != "sendPhoto" || fields["chat_id"] != "4242" || fields["disable_notification"] != "true" {
+		t.Fatalf("method = %s fields = %v", method, fields)
+	}
+	if media != (InlineMedia{Kind: "photo", FileID: "large"}) || staged != 55 {
+		t.Fatalf("media = %+v staged = %d", media, staged)
+	}
+}
+
+func TestUploadForInlineDocument(t *testing.T) {
+	c := testClient(func(req *http.Request) (*http.Response, error) {
+		if !strings.HasSuffix(req.URL.Path, "/sendDocument") {
+			t.Fatalf("path = %s", req.URL.Path)
+		}
+		return jsonResponse(http.StatusOK, `{"ok":true,"result":{"message_id":56,"document":{"file_id":"doc"}}}`), nil
+	})
+	media, staged, err := c.UploadForInline(context.Background(), 1, "document", "r.md", "text/markdown", []byte("# r"))
+	if err != nil || media != (InlineMedia{Kind: "document", FileID: "doc"}) || staged != 56 {
+		t.Fatalf("media = %+v staged = %d err = %v", media, staged, err)
+	}
+}
+
+// One picture under a short answer is a photo with a caption — the way
+// Telegram shows a picture with words, and the caption stays copyable.
+func TestFinalizeInlineWithMediaShortAnswerIsAPhotoWithCaption(t *testing.T) {
+	c, calls := recordingClient(t, func(int, string) (int, string) {
+		return http.StatusOK, `{"ok":true,"result":true}`
+	})
+	photo := InlineMedia{Kind: "photo", FileID: "large"}
+	if err := c.FinalizeInlineWithMedia(context.Background(), "AAQ", "**look**", []InlineMedia{photo}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*calls) != 1 || (*calls)[0].method != "editMessageMedia" {
+		t.Fatalf("calls = %+v", *calls)
+	}
+	p := (*calls)[0].payload
+	media := p["media"].(map[string]any)
+	if p["inline_message_id"] != "AAQ" || media["type"] != "photo" || media["media"] != "large" || media["caption"] != "<b>look</b>" {
+		t.Fatalf("payload = %v", p)
+	}
+}
+
+// Past a caption's length the answer and the picture go in together as a
+// rich message, the picture referenced by the file id it was uploaded as.
+func TestFinalizeInlineWithMediaLongAnswerIsRichWithTheFileEmbedded(t *testing.T) {
+	c, calls := recordingClient(t, func(int, string) (int, string) {
+		return http.StatusOK, `{"ok":true,"result":true}`
+	})
+	long := strings.Repeat("слово ", 300)
+	if err := c.FinalizeInlineWithMedia(context.Background(), "AAQ", long, []InlineMedia{{Kind: "photo", FileID: "large"}}); err != nil {
+		t.Fatal(err)
+	}
+	if (*calls)[0].method != "editMessageText" {
+		t.Fatalf("calls = %+v", *calls)
+	}
+	rich := (*calls)[0].payload["rich_message"].(map[string]any)
+	if !strings.Contains(rich["markdown"].(string), "![](tg://photo?id=m1)") {
+		t.Fatalf("markdown does not embed the photo: %q", rich["markdown"])
+	}
+	items := rich["media"].([]any)
+	item := items[0].(map[string]any)
+	if item["id"] != "m1" || item["media"].(map[string]any)["media"] != "large" {
+		t.Fatalf("media = %v", items)
+	}
+}
+
+// Refused rich still gets the picture there: it is what was asked for, and
+// the full text is in the history.
+func TestFinalizeInlineWithMediaFallsBackToThePictureWithACutCaption(t *testing.T) {
+	c, calls := recordingClient(t, func(n int, method string) (int, string) {
+		if method == "editMessageText" {
+			return http.StatusBadRequest, `{"ok":false,"error_code":400,"description":"Bad Request: can't parse rich message"}`
+		}
+		return http.StatusOK, `{"ok":true,"result":true}`
+	})
+	long := strings.Repeat("я", 3000)
+	if err := c.FinalizeInlineWithMedia(context.Background(), "AAQ", long, []InlineMedia{{Kind: "photo", FileID: "large"}}); err != nil {
+		t.Fatal(err)
+	}
+	last := (*calls)[len(*calls)-1]
+	if last.method != "editMessageMedia" {
+		t.Fatalf("last call = %s", last.method)
+	}
+	caption := last.payload["media"].(map[string]any)["caption"].(string)
+	if n := utf8.RuneCountInString(caption); n > maxCaptionLength {
+		t.Fatalf("caption is %d runes, over %d", n, maxCaptionLength)
+	}
+}

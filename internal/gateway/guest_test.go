@@ -229,12 +229,18 @@ type fakeGuestClient struct {
 	answers []string
 	edits   []string
 	finals  []string
+	media   [][]telegram.InlineMedia
+	uploads []int64 // chats files were uploaded through
+	deleted []int
+	// log is every call in order, so a test can say what happened before what.
+	log []string
 }
 
 func (c *fakeGuestClient) AnswerGuestQuery(_ context.Context, _ string, text string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.answers = append(c.answers, text)
+	c.log = append(c.log, "answer")
 	return "inline-1", nil
 }
 
@@ -242,18 +248,37 @@ func (c *fakeGuestClient) EditInlineMessageText(_ context.Context, _ string, tex
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.edits = append(c.edits, text)
+	c.log = append(c.log, "edit")
 	return nil
 }
 
-func (c *fakeGuestClient) FinalizeInlineResponse(_ context.Context, _ string, text string) error {
+func (c *fakeGuestClient) FinalizeInlineWithMedia(_ context.Context, _ string, text string, media []telegram.InlineMedia) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.finals = append(c.finals, text)
+	c.media = append(c.media, media)
+	c.log = append(c.log, "final")
+	return nil
+}
+
+func (c *fakeGuestClient) UploadForInline(_ context.Context, chatID int64, kind, _, _ string, _ []byte) (telegram.InlineMedia, int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.uploads = append(c.uploads, chatID)
+	c.log = append(c.log, "upload")
+	return telegram.InlineMedia{Kind: kind, FileID: "file-" + kind}, 900 + len(c.uploads), nil
+}
+
+func (c *fakeGuestClient) DeleteMessage(_ context.Context, _ int64, messageID int) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deleted = append(c.deleted, messageID)
+	c.log = append(c.log, "delete")
 	return nil
 }
 
 func newTestGuestSink(c *fakeGuestClient) *guestSink {
-	return &guestSink{client: c, queryID: "gq", noAnswer: "no answer",
+	return &guestSink{client: c, queryID: "gq", noAnswer: "no answer", uploadChatID: 4242,
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 }
 
@@ -302,6 +327,54 @@ func TestGuestSinkSettlesATurnThatDeliveredNothing(t *testing.T) {
 	s.settle(context.Background())
 	if len(c.finals) != 1 || c.finals[0] != "half an answer" {
 		t.Fatalf("what streamed must stay: finals = %v", c.finals)
+	}
+}
+
+// A picture the turn made has to reach the chat it was asked for in. The only
+// way into an inline message is a file id, got by uploading through the
+// caller's private chat; that copy goes once the answer holds the file, and
+// not before.
+func TestGuestSinkPutsTheTurnsFilesIntoTheAnswer(t *testing.T) {
+	c := &fakeGuestClient{}
+	s := newTestGuestSink(c)
+	_ = s.open(context.Background(), "…")
+
+	if _, err := s.SendAttachment(context.Background(),
+		bs.AttachmentRecord{Name: "art.png", Mime: "image/png", Kind: "image"}, []byte("png")); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.uploads) != 1 || c.uploads[0] != 4242 {
+		t.Fatalf("uploaded through %v, want the caller's private chat", c.uploads)
+	}
+	if err := s.SendFinalText(context.Background(), "here it is"); err != nil {
+		t.Fatal(err)
+	}
+	s.settle(context.Background())
+
+	if len(c.finals) != 1 || c.finals[0] != "here it is" {
+		t.Fatalf("finals = %v", c.finals)
+	}
+	if len(c.media[0]) != 1 || c.media[0][0] != (telegram.InlineMedia{Kind: "photo", FileID: "file-photo"}) {
+		t.Fatalf("media = %+v, want the picture as a photo", c.media[0])
+	}
+	if len(c.deleted) != 1 || c.deleted[0] != 901 {
+		t.Fatalf("deleted = %v, want the private-chat copy removed", c.deleted)
+	}
+	if got := strings.Join(c.log, ","); got != "answer,upload,final,delete" {
+		t.Fatalf("calls = %s: the copy may only go once the answer holds the file", got)
+	}
+}
+
+// A picture with no words is still an answer.
+func TestGuestSinkDeliversAFileWithoutText(t *testing.T) {
+	c := &fakeGuestClient{}
+	s := newTestGuestSink(c)
+	_ = s.open(context.Background(), "…")
+	_, _ = s.SendAttachment(context.Background(), bs.AttachmentRecord{Name: "report.md", Kind: "text"}, []byte("# r"))
+	_ = s.SendFinalText(context.Background(), "[attached: 0b7c0c8e-8f7e-4b0e-9d7e-2f6b1d1c2a3b]")
+	s.settle(context.Background())
+	if len(c.finals) != 1 || c.finals[0] != "" || c.media[0][0].Kind != "document" {
+		t.Fatalf("finals = %q media = %+v", c.finals, c.media)
 	}
 }
 
