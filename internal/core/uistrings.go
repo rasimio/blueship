@@ -71,6 +71,13 @@ type UIStrings struct {
 	// GuestPrivateChat or the group's title.
 	GuestMarkerFmt   string
 	GuestPrivateChat string
+
+	// VoiceOn and VoiceOff confirm /voice: from now on answers are, or are
+	// no longer, followed by a voice note. VoiceUnavailable answers it when
+	// there is no speech provider or the setting could not be saved.
+	VoiceOn          string
+	VoiceOff         string
+	VoiceUnavailable string
 }
 
 func (u *UIStrings) applyDefaults() {
@@ -130,6 +137,15 @@ func (u *UIStrings) applyDefaults() {
 	}
 	if u.GuestPrivateChat == "" {
 		u.GuestPrivateChat = "private chat"
+	}
+	if u.VoiceOn == "" {
+		u.VoiceOn = "Voice replies are on: each answer will follow as a voice note. /voice turns them off."
+	}
+	if u.VoiceOff == "" {
+		u.VoiceOff = "Voice replies are off. /voice turns them back on."
+	}
+	if u.VoiceUnavailable == "" {
+		u.VoiceUnavailable = "Voice replies are not available right now."
 	}
 }
 

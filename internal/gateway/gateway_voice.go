@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -37,10 +38,21 @@ func (g *Gateway) isVoiceEnabled(ctx context.Context, us *UserState) bool {
 	return profile.VoiceEnabled()
 }
 
+// voiceDeliveryTimeout bounds the voice notes that follow one answer. A long
+// answer is several synthesis requests in a row, each allowed the provider's
+// own timeout.
+const voiceDeliveryTimeout = 5 * time.Minute
+
 // synthesizeAndSendVoice synthesizes TTS and sends audio via ResponseSink.
 // If sink supports StreamingVoiceSink, uses sentence-level pipelining
 // for lower latency (client starts playback before full audio is ready).
+//
+// It runs after the turn has returned, and returning ends the turn's context
+// — so the voice note gets a clock of its own. On the turn's context every
+// synthesis request was cancelled before it reached the provider.
 func (g *Gateway) synthesizeAndSendVoice(ctx context.Context, sink bs.ResponseSink, us *UserState, text string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceDeliveryTimeout)
+	defer cancel()
 	cfg := g.deps.Config
 	voice := cfg.TTSVoice
 
@@ -91,26 +103,89 @@ func (g *Gateway) synthesizeAndSendVoice(ctx context.Context, sink bs.ResponseSi
 	g.synthesizeBatch(ctx, sink, text, voice, instruct)
 }
 
+// ttsMaxInputRunes bounds the text of one synthesis request. OpenAI's speech
+// API and the services built to its shape refuse more than 4096 characters,
+// ElevenLabs more than 5000; a longer answer goes out as several voice notes,
+// cut between sentences.
+const ttsMaxInputRunes = 4000
+
 func (g *Gateway) synthesizeBatch(ctx context.Context, sink bs.ResponseSink, text, voice, instruct string) {
 	cfg := g.deps.Config
-	g.logger.Info("tts: synthesizing", "text_len", len(text), "voice", voice, "text_preview", truncateStr(text, 200))
+	parts := splitForSpeech(text, ttsMaxInputRunes)
+	g.logger.Info("tts: synthesizing", "text_len", len(text), "parts", len(parts), "voice", voice, "text_preview", truncateStr(text, 200))
 
-	audio, err := cfg.TTS.Synthesize(ctx, text, voice, instruct)
-	if err != nil {
-		g.logger.Warn("tts: synthesize failed", "error", err)
-		return
-	}
-	if cfg.TTSConverter != nil {
-		if converted, err := cfg.TTSConverter(audio); err == nil {
-			audio = converted
-		} else {
-			g.logger.Warn("tts: convert failed", "error", err)
+	// In order, one after another: the notes are one answer, and a part
+	// that fails ends it rather than leaving a gap in the middle.
+	for i, part := range parts {
+		audio, err := cfg.TTS.Synthesize(ctx, part, voice, instruct)
+		if err != nil {
+			g.logger.Warn("tts: synthesize failed", "part", i+1, "parts", len(parts), "error", err)
+			return
+		}
+		if cfg.TTSConverter != nil {
+			if converted, err := cfg.TTSConverter(audio); err == nil {
+				audio = converted
+			} else {
+				g.logger.Warn("tts: convert failed", "error", err)
+				return
+			}
+		}
+		if err := sink.SendVoice(ctx, audio); err != nil {
+			g.logger.Warn("tts: send voice failed", "part", i+1, "parts", len(parts), "error", err)
 			return
 		}
 	}
-	if err := sink.SendVoice(ctx, audio); err != nil {
-		g.logger.Warn("tts: send voice failed", "error", err)
+}
+
+// splitForSpeech cuts text into pieces of at most limit runes: between
+// sentences where it can, between words inside a sentence too long on its
+// own, and mid-word only for a word longer than the limit.
+func splitForSpeech(text string, limit int) []string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
 	}
+	if utf8.RuneCountInString(text) <= limit {
+		return []string{text}
+	}
+	var parts []string
+	var cur strings.Builder
+	curLen := 0
+	flush := func() {
+		if s := strings.TrimSpace(cur.String()); s != "" {
+			parts = append(parts, s)
+		}
+		cur.Reset()
+		curLen = 0
+	}
+	add := func(piece string) {
+		n := utf8.RuneCountInString(piece)
+		if curLen > 0 && curLen+1+n > limit {
+			flush()
+		}
+		if curLen > 0 {
+			cur.WriteByte(' ')
+			curLen++
+		}
+		cur.WriteString(piece)
+		curLen += n
+	}
+	for _, sentence := range splitSentences(text) {
+		if utf8.RuneCountInString(sentence) <= limit {
+			add(sentence)
+			continue
+		}
+		for _, word := range strings.Fields(sentence) {
+			for utf8.RuneCountInString(word) > limit {
+				runes := []rune(word)
+				add(string(runes[:limit]))
+				word = string(runes[limit:])
+			}
+			add(word)
+		}
+	}
+	flush()
+	return parts
 }
 
 // splitSentences splits text on sentence boundaries for TTS pipelining.
@@ -180,8 +255,14 @@ func (s *telegramSink) SendText(ctx context.Context, text string) error {
 	return s.client.SendRichLong(ctx, s.chatID, text)
 }
 
+// SendVoice sends through the bot this chat is on. The host's Sender is one
+// fixed bot: a voice note sent through it reaches nobody who talks to any
+// other bot, and the person who does get it gets it from a stranger.
 func (s *telegramSink) SendVoice(ctx context.Context, audio []byte) error {
 	chatID := fmt.Sprintf("%d", s.chatID)
+	if s.client != nil {
+		return s.client.SendVoice(ctx, chatID, audio)
+	}
 	if s.gw.deps.Sender != nil {
 		return s.gw.deps.Sender.SendVoice(ctx, chatID, audio)
 	}

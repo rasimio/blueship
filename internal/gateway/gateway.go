@@ -1040,6 +1040,9 @@ func (g *Gateway) prepareTelegramInbound(
 	if g.maybeRunStopCommand(ctx, bi, rawChatID, us, text) {
 		return nil, 0, false
 	}
+	if g.maybeRunVoiceCommand(ctx, bi, rawChatID, us, text) {
+		return nil, 0, false
+	}
 
 	decision, err := g.authorizeExecution(ctx, us.UserID, us.SoulID, bs.ExecutionInteractive, "telegram")
 	if err != nil {

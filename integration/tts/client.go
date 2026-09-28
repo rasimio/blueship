@@ -58,23 +58,22 @@ func NewElevenLabsClient(apiKey, voiceID, model, language string, speed float64,
 	}
 }
 
-// Synthesize sends text to the TTS API and returns audio bytes.
-// For ElevenLabs: returns OGG Opus directly (no conversion needed).
-// For OpenAI-compatible: returns WAV.
+// Synthesize sends text to the TTS API and returns OGG Opus audio, which
+// Telegram accepts as a voice note without conversion.
 func (c *Client) Synthesize(ctx context.Context, text, voice, instruct string) ([]byte, error) {
 	if c.endpointMP3 != "" {
 		return c.synthesizeElevenLabs(ctx, text, instruct)
 	}
-	return c.synthesizeOpenAI(ctx, text, voice, instruct)
+	return c.synthesizeOpenAI(ctx, text, voice, instruct, "opus")
 }
 
-// SynthesizeMP3 returns MP3 audio (for clients that don't support OGG Opus).
+// SynthesizeMP3 returns MP3 audio for clients that cannot play OGG Opus, such
+// as the macOS voice client.
 func (c *Client) SynthesizeMP3(ctx context.Context, text, voice, instruct string) ([]byte, error) {
 	if c.endpointMP3 != "" {
 		return c.synthesizeElevenLabsWithEndpoint(ctx, c.endpointMP3, text, instruct)
 	}
-	// Fallback to default format
-	return c.Synthesize(ctx, text, voice, instruct)
+	return c.synthesizeOpenAI(ctx, text, voice, instruct, "mp3")
 }
 
 func (c *Client) synthesizeElevenLabs(ctx context.Context, text, instruct string) ([]byte, error) {
@@ -125,11 +124,11 @@ func (c *Client) synthesizeElevenLabsWithEndpoint(ctx context.Context, endpoint,
 	return io.ReadAll(resp.Body)
 }
 
-func (c *Client) synthesizeOpenAI(ctx context.Context, text, voice, instruct string) ([]byte, error) {
+func (c *Client) synthesizeOpenAI(ctx context.Context, text, voice, instruct, format string) ([]byte, error) {
 	payload := map[string]any{
 		"model":           c.model,
 		"input":           text,
-		"response_format": "opus", // OGG-Opus directly, skips the WAV→OGG ffmpeg hop
+		"response_format": format,
 	}
 	if voice != "" {
 		payload["voice"] = voice
