@@ -76,6 +76,17 @@ func (c *Client) SynthesizeMP3(ctx context.Context, text, voice, instruct string
 	return c.synthesizeOpenAI(ctx, text, voice, instruct, "mp3")
 }
 
+// SynthesizeFormat asks an OpenAI-compatible endpoint for audio in format
+// (its response_format: "wav", "pcm", "mp3", "opus") — for a caller that
+// processes the audio itself, such as a host that evens out the level and
+// encodes the result. ElevenLabs is not offered this way.
+func (c *Client) SynthesizeFormat(ctx context.Context, text, voice, instruct, format string) ([]byte, error) {
+	if c.endpointMP3 != "" {
+		return nil, fmt.Errorf("tts: SynthesizeFormat serves OpenAI-compatible endpoints only")
+	}
+	return c.synthesizeOpenAI(ctx, text, voice, instruct, format)
+}
+
 func (c *Client) synthesizeElevenLabs(ctx context.Context, text, instruct string) ([]byte, error) {
 	return c.synthesizeElevenLabsWithEndpoint(ctx, c.endpoint, text, instruct)
 }

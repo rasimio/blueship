@@ -36,7 +36,10 @@ func TestOpenAICompatibleClientAsksForTheCallersFormat(t *testing.T) {
 	if audio, err := client.SynthesizeMP3(context.Background(), "Привет", "polina", ""); err != nil || string(audio) != "audio" {
 		t.Fatalf("mp3: %q %v", audio, err)
 	}
-	if len(formats) != 2 || formats[0] != "opus" || formats[1] != "mp3" {
+	if audio, err := client.SynthesizeFormat(context.Background(), "Привет", "polina", "", "wav"); err != nil || string(audio) != "audio" {
+		t.Fatalf("wav: %q %v", audio, err)
+	}
+	if len(formats) != 3 || formats[0] != "opus" || formats[1] != "mp3" || formats[2] != "wav" {
 		t.Fatalf("formats requested: %v", formats)
 	}
 	if authorization != "Bearer dlk_key" {
