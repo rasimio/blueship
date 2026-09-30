@@ -212,12 +212,41 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 
 	choice := result.Choices[0]
 	contentBlocks := toContentBlocks(choice.Message)
+	stopReason := stopReasonForBlocks(choice.FinishReason, contentBlocks)
+	if mapStopReason(choice.FinishReason) == "max_tokens" && stumpCutToolCalls(contentBlocks, choice.Message.ToolCalls) {
+		stopReason = "max_tokens"
+	}
 
 	return &bs.CompletionResponse{
 		Content:    contentBlocks,
-		StopReason: stopReasonForBlocks(choice.FinishReason, contentBlocks),
+		StopReason: stopReason,
 		Usage:      result.Usage.usage(),
 	}, nil
+}
+
+// cutToolCallStump is the input a tool call cut off by the output limit goes
+// back with. The block itself stays — the conversation needs every call
+// paired with a result — but the response stops on max_tokens, and the agent
+// loop answers a tool call under that stop with [tool_call_truncated] instead
+// of running it. The model learns its arguments did not fit and shrinks
+// them. Under any other stop invalid arguments are broken, not cut.
+var cutToolCallStump = json.RawMessage(`{}`)
+
+// stumpCutToolCalls replaces the input of every call whose arguments were
+// cut mid-JSON with the stump, and reports whether there was one.
+func stumpCutToolCalls(blocks []bs.ContentBlock, calls []toolCall) bool {
+	cut := map[string]bool{}
+	for _, call := range calls {
+		if !json.Valid(json.RawMessage(call.Function.Arguments)) {
+			cut[call.ID] = true
+		}
+	}
+	for i := range blocks {
+		if blocks[i].Type == "tool_use" && cut[blocks[i].ID] {
+			blocks[i].Input = cutToolCallStump
+		}
+	}
+	return len(cut) > 0
 }
 
 // streamChatCompletionRequest adds the stream field.
@@ -394,15 +423,22 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		return nil, fmt.Errorf("incomplete completion stream: %w", io.ErrUnexpectedEOF)
 	}
 	// Build content blocks only after a complete stream. Partial arguments must
-	// never be replaced with {} and dispatched as a real tool invocation.
+	// never be dispatched as a real tool invocation: a call the output limit
+	// cut goes back as a stump under a max_tokens stop, which the agent loop
+	// answers without running it (cutToolCallStump). Partial arguments under
+	// any other stop are broken, and that is an error.
 	var blocks []bs.ContentBlock
 	if textBuf.Len() > 0 {
 		blocks = append(blocks, bs.ContentBlock{Type: "text", Text: textBuf.String()})
 	}
+	cut := false
 	for _, tc := range toolCalls {
 		rawArgs := json.RawMessage(tc.Function.Arguments)
 		if !json.Valid(rawArgs) {
-			return nil, fmt.Errorf("incomplete tool arguments for %s", tc.Function.Name)
+			if mapStopReason(stopReason) != "max_tokens" {
+				return nil, fmt.Errorf("incomplete tool arguments for %s", tc.Function.Name)
+			}
+			rawArgs, cut = cutToolCallStump, true
 		}
 		blocks = append(blocks, bs.ContentBlock{
 			Type:  "tool_use",
@@ -414,7 +450,8 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 
 	// Surface fully-assembled tool calls — OpenAI's SSE delivers arguments
 	// piecewise, so this is the earliest the JSON is structurally complete.
-	if cb != nil && cb.OnToolUse != nil {
+	// A cut response runs none of its calls, so it announces none.
+	if cb != nil && cb.OnToolUse != nil && !cut {
 		for _, block := range blocks {
 			if block.Type == "tool_use" {
 				cb.OnToolUse(block.ID, block.Name, block.Input)
@@ -422,9 +459,13 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		}
 	}
 
+	finalStop := stopReasonForBlocks(stopReason, blocks)
+	if cut {
+		finalStop = "max_tokens"
+	}
 	return &bs.CompletionResponse{
 		Content:    blocks,
-		StopReason: stopReasonForBlocks(stopReason, blocks),
+		StopReason: finalStop,
 		Usage:      usage,
 	}, nil
 }
