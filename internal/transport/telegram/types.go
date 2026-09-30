@@ -51,7 +51,9 @@ type CallbackQuery struct {
 
 // Message represents a Telegram message.
 type Message struct {
-	MessageID      int         `json:"message_id"`
+	MessageID int `json:"message_id"`
+	// Date is when Telegram received the message, Unix seconds.
+	Date           int64       `json:"date,omitempty"`
 	From           *User       `json:"from,omitempty"`
 	Chat           Chat        `json:"chat"`
 	Text           string      `json:"text"`

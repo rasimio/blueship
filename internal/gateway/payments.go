@@ -51,6 +51,7 @@ func (g *Gateway) handlePreCheckout(ctx context.Context, bi *botInstance, q *tel
 		return
 	}
 	g.answerPreCheckout(ctx, bi, q, "")
+	g.observePaymentApproved(ctx, bi, q)
 }
 
 func (g *Gateway) answerPreCheckout(ctx context.Context, bi *botInstance, q *telegram.PreCheckoutQuery, refusal string) {

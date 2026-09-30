@@ -752,10 +752,11 @@ func (g *Gateway) expandCommandPrompt(bi *botInstance, text string) string {
 // The buttons matter more than the sentence: a person who has just been
 // refused is the least likely to go and compose a command, so the escape
 // has to be one tap away from the message that blocked them.
-func (g *Gateway) sendDenial(ctx context.Context, bi *botInstance, tgChatID int64, text string, actions []bs.DecisionAction) {
+func (g *Gateway) sendDenial(ctx context.Context, bi *botInstance, tgChatID int64, reason, text string, actions []bs.DecisionAction) {
 	if bi == nil || bi.client == nil {
 		return
 	}
+	seen := bs.DeliverySeen{TGChatID: tgChatID, Kind: bs.DeliveryDenial, Name: reason}
 	rows := make([][]telegram.InlineKeyboardButton, 0, len(actions))
 	for _, a := range actions {
 		if strings.TrimSpace(a.Label) == "" || strings.TrimSpace(a.Command) == "" {
@@ -767,12 +768,18 @@ func (g *Gateway) sendDenial(ctx context.Context, bi *botInstance, tgChatID int6
 		}})
 	}
 	if len(rows) == 0 {
-		_, _ = bi.client.SendMessage(ctx, fmt.Sprintf("%d", tgChatID), text)
+		seen.MessageID = sentID(bi.client.SendMessage(ctx, fmt.Sprintf("%d", tgChatID), text))
+		g.observeDelivery(ctx, bi, seen)
 		return
 	}
-	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, text, rows); err != nil {
+	res, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, text, rows)
+	if err != nil {
 		g.logger.Warn("gateway: denial keyboard send failed", "chat_id", tgChatID, "error", err)
+		return
 	}
+	countButtons(rows, &seen)
+	seen.MessageID = sentID(res, nil)
+	g.observeDelivery(ctx, bi, seen)
 }
 
 // runHostCommand invokes a host command by name and delivers its answer.
@@ -843,9 +850,14 @@ func (g *Gateway) runHostCommand(ctx context.Context, bi *botInstance, tgChatID,
 		g.sendOnboardingText(ctx, bi, tgChatID, result.Text)
 		return
 	}
-	if _, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, result.Text, rows); err != nil {
+	res, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, result.Text, rows)
+	if err != nil {
 		g.logger.Warn("gateway: host command reply failed", "command", name, "error", err)
+		return
 	}
+	seen := bs.DeliverySeen{TGChatID: tgChatID, Kind: bs.DeliveryHostCommand, Name: name, MessageID: sentID(res, nil)}
+	countButtons(rows, &seen)
+	g.observeDelivery(ctx, bi, seen)
 }
 
 // maybeRunHostCommand dispatches a command the host answers itself.
@@ -1002,6 +1014,9 @@ func (g *Gateway) prepareTelegramInbound(
 	if g.maybeRunDeeplinkLink(ctx, bi, rawChatID, tgUserID, text) {
 		return nil, 0, false
 	}
+	// Recorded before onboarding runs, so the /start a person arrived
+	// with exists by the time an account is created from it.
+	g.observeStart(ctx, bi, msg, text)
 	if g.maybeRunBotOnboarding(ctx, bi, chatID, rawChatID, tgUserID, text, tgSender{
 		Name:     msg.From.FirstName,
 		Handle:   msg.From.Username,
@@ -1058,7 +1073,7 @@ func (g *Gateway) prepareTelegramInbound(
 			if denial == "" {
 				denial = g.deps.Config.UI.ExecutionDenied
 			}
-			g.sendDenial(ctx, bi, rawChatID, denial, decision.Actions)
+			g.sendDenial(ctx, bi, rawChatID, decision.Reason, denial, decision.Actions)
 		}
 		return nil, 0, false
 	}
