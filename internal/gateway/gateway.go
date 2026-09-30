@@ -1370,23 +1370,8 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 		text, visibleText = g.readVideoIntoTurn(ctx, bi.client, input, text, visibleText)
 	}
 
-	if msg.Voice != nil && g.whisper != nil && g.whisper.IsConfigured() {
-		audio, err := bi.client.DownloadFile(ctx, msg.Voice.FileID, 10*1024*1024)
-		if err != nil {
-			g.logger.Warn("failed to download voice", "error", err)
-		} else {
-			transcript, err := g.whisper.Transcribe(ctx, audio, "voice.ogg")
-			if err != nil {
-				g.logger.Warn("failed to transcribe voice", "error", err)
-			} else if transcript != "" {
-				if text != "" {
-					text = text + "\n\n" + transcript
-				} else {
-					text = transcript
-				}
-				visibleText = appendVisibleTranscript(visibleText, transcript)
-			}
-		}
+	if msg.Voice != nil {
+		text, visibleText = g.readVoiceIntoTurn(ctx, bi.client, msg.Chat.ID, msg.Voice, text, visibleText)
 	}
 
 	images := append([]bs.ContentBlock(nil), docImages...)
