@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -430,8 +431,9 @@ func (g *Gateway) SendToUser(ctx context.Context, userID uuid.UUID, text string)
 // provider receipt. It deliberately has no retry or plain-text fallback: after
 // an EOF/timeout the Bot API gives us no idempotency key with which to tell a
 // lost response from a lost send, so another request could create a duplicate.
+// Only an explicit rejection, which created nothing, leads to a second form.
 func (g *Gateway) SendToUserOnce(ctx context.Context, userID uuid.UUID, text string) (bs.TaskNotificationReceipt, error) {
-	bi, tgChatID, err := g.resolveUserBot(ctx, userID)
+	bi, tgChatID, err := g.resolveNotificationBot(ctx, userID)
 	receipt := bs.TaskNotificationReceipt{
 		Transport: "telegram",
 		ChatID:    strconv.FormatInt(tgChatID, 10),
@@ -458,9 +460,23 @@ func (g *Gateway) SendToUserOnce(ctx context.Context, userID uuid.UUID, text str
 	// either way: the plain path only re-sends after an explicit markup
 	// rejection, which creates nothing.
 	var result *telegram.SendMessageResult
-	if telegram.NeedsRich(text) {
+	text, reportID, withReport := bs.SplitTaskReportMarker(text)
+	sent := false
+	if withReport && g.isHostCallbackCommand("task_result") {
+		rows := [][]telegram.InlineKeyboardButton{{{Text: g.deps.Config.UI.TaskReportButton, CallbackData: hostCallbackPrefix + "task_result:" + reportID.String()}}}
+		result, err = bi.client.SendMessageWithKeyboard(ctx, tgChatID, text, rows)
+		sent = true
+		// A rejected keyboard message created nothing: fall back to the plain
+		// notice rather than lose it (the report stays in /status).
+		if _, rejected := explicitTelegramRejection(err); rejected && !isTelegramRateLimit(err) {
+			result, err, sent = nil, nil, false
+		}
+	}
+	if !sent && utf8.RuneCountInString(text) > telegram.MaxMessageLength {
+		result, err = sendLongOnce(ctx, bi.client, tgChatID, text)
+	} else if !sent && telegram.NeedsRich(text) {
 		result, err = bi.client.SendRichMessage(ctx, tgChatID, text)
-	} else {
+	} else if !sent {
 		result, err = bi.client.SendMessage(ctx, strconv.FormatInt(tgChatID, 10), text)
 	}
 	if err != nil {
@@ -481,6 +497,66 @@ func (g *Gateway) SendToUserOnce(ctx context.Context, userID uuid.UUID, text str
 	receipt.MessageID = strconv.Itoa(result.Result.MessageID)
 	receipt.DeliveredAt = time.Now()
 	return receipt, nil
+}
+
+// sendLongOnce delivers text above the ordinary-message limit, which
+// Telegram otherwise rejects outright (a daily tale failed every send,
+// 2026-09-24). One Rich Message holds it with a single receipt; an explicit
+// rejection created nothing, so the text then goes as consecutive ordinary
+// parts, receipted by the first.
+func sendLongOnce(ctx context.Context, client *telegram.Client, chatID int64, text string) (*telegram.SendMessageResult, error) {
+	if utf8.RuneCountInString(text) <= telegram.MaxRichMessageLength {
+		result, err := client.SendRichMessage(ctx, chatID, text)
+		if _, rejected := explicitTelegramRejection(err); !rejected || isTelegramRateLimit(err) {
+			return result, err
+		}
+	}
+	var first *telegram.SendMessageResult
+	for _, part := range telegram.SplitMessage(text) {
+		result, err := client.SendMessage(ctx, strconv.FormatInt(chatID, 10), part)
+		if err != nil {
+			if first == nil {
+				return nil, err
+			}
+			// Earlier parts are in the chat: not a clean rejection to retry.
+			return first, fmt.Errorf("telegram: long message delivered in part: %v", err)
+		}
+		if first == nil {
+			first = result
+		}
+	}
+	return first, nil
+}
+
+func isTelegramRateLimit(err error) bool {
+	apiErr, rejected := explicitTelegramRejection(err)
+	return rejected && (apiErr.ErrorCode == 429 || apiErr.StatusCode == 429)
+}
+
+func (g *Gateway) resolveNotificationBot(ctx context.Context, userID uuid.UUID) (*botInstance, int64, error) {
+	origin, pinned := bs.TaskOriginFromContext(ctx)
+	if !pinned {
+		return g.resolveUserBot(ctx, userID)
+	}
+	chatID, err := strconv.ParseInt(origin.ChatID, 10, 64)
+	if origin.Transport != "telegram" || err != nil || chatID == 0 {
+		return nil, 0, userBotResolutionFailure(fmt.Errorf("invalid pinned notification route"), false)
+	}
+	bi := g.botByID(origin.BotID)
+	if bi == nil {
+		return nil, 0, userBotResolutionFailure(fmt.Errorf("origin bot is no longer available"), false)
+	}
+	if g.deps.ResolveTelegramChat == nil {
+		return nil, 0, userBotResolutionFailure(fmt.Errorf("origin ownership resolver unavailable"), false)
+	}
+	owner, soul, err := g.deps.ResolveTelegramChat(ctx, origin.BotID, chatID)
+	if err != nil {
+		return nil, 0, userBotResolutionFailure(fmt.Errorf("resolve origin ownership: %w", err), !errors.Is(err, bs.ErrTelegramChatUnpaired))
+	}
+	if owner != userID || soul != bs.SoulIDFromContext(ctx) || soul == uuid.Nil {
+		return nil, 0, userBotResolutionFailure(fmt.Errorf("origin no longer belongs to task owner and soul"), false)
+	}
+	return bi, chatID, nil
 }
 
 func explicitTelegramRejection(err error) (*telegram.APIError, bool) {

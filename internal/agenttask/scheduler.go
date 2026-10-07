@@ -43,6 +43,11 @@ const scheduleDueTolerance = time.Second
 //     (direct / structured / delegate). Strategy maps to a handler in
 //     strategyHandlers; if absent the task is failed.
 type Scheduler struct {
+	wakeup           func()
+	wakeMu           sync.Mutex
+	wakeTimer        *time.Timer
+	wakeAt           time.Time
+	graphRunner      GraphTaskRunner
 	store            *core.AgentTaskStore
 	handlers         map[string]core.AgentHandler
 	strategyHandlers map[string]core.AgentHandler
@@ -80,8 +85,12 @@ type Scheduler struct {
 	// the scheduler re-parses task config on every 60s tick, so without the
 	// dedup a persistent typo would WARN forever. Lazily allocated under mu.
 	// Warn-only state — losing it on restart just repeats one log line.
-	dailyAtWarned map[string]bool
-	taskWg        sync.WaitGroup // tracks in-flight executeTask goroutines
+	dailyAtWarned         map[string]bool
+	taskWg                sync.WaitGroup // tracks in-flight executeTask goroutines
+	notificationWg        sync.WaitGroup // post-finalization outbox drains
+	notificationMu        sync.Mutex
+	notificationRunning   bool
+	notificationRequested bool
 	// sem bounds how many tasks execute concurrently across the whole
 	// scheduler — the back-to-back runner (runTask) holds a slot for a
 	// one-off task's entire plan, so without a cap a burst of pending
@@ -202,6 +211,7 @@ func (s *Scheduler) WakeFromCallback(ctx context.Context, peerTaskID string) {
 }
 
 func (s *Scheduler) Run(ctx context.Context) error {
+	defer s.schedulePersistedWake(ctx)
 	s.reapOrphansAtBoot(ctx)
 	s.logger.Info("agent-tasks: tick")
 	// When a live gateway owns autonomous-history coordination, it drains and
@@ -216,9 +226,25 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			s.logger.InfoContext(ctx, "agent-tasks: reconciled autonomous history", "count", projected)
 		}
 	}
-	s.drainRetryableNotifications(ctx)
+	s.drainNotificationsAsync(ctx)
 	if err := s.maintainTaskDeadlines(ctx, time.Now(), s.store); err != nil {
 		return fmt.Errorf("agent-tasks: deadline maintenance: %w", err)
+	}
+
+	if err := s.maintainGraphDeadlines(ctx, time.Now()); err != nil {
+		return fmt.Errorf("agent-tasks: graph deadline maintenance: %w", err)
+	}
+	// Reconcile after terminal writes, including API cancellation and crash
+	// recovery; a session-store outage must not block task dispatch.
+	if archiver, ok := s.msgStore.(interface {
+		ArchiveTerminalTaskSessions(context.Context, int) (int64, error)
+	}); ok {
+		cleanupCtx, end := context.WithTimeout(ctx, 5*time.Second)
+		_, err := archiver.ArchiveTerminalTaskSessions(cleanupCtx, 50)
+		end()
+		if err != nil {
+			s.logger.WarnContext(ctx, "agent-tasks: terminal session cleanup failed", "error", err)
+		}
 	}
 
 	// Auto-complete tasks that exhausted iterations but weren't marked done.
@@ -347,7 +373,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 		go s.runTask(ctx, task, handler, dispatchTag)
 	}
 
-	return nil
+	return s.dispatchGraphTasks(ctx)
 }
 
 // runTask is the back-to-back runner (S2-a2 worker-pool lite). It holds a
@@ -360,7 +386,20 @@ func (s *Scheduler) Run(ctx context.Context) error {
 // iteration inside executeTaskOnce, so a crash mid-loop just resumes next tick.
 func (s *Scheduler) runTask(ctx context.Context, task core.AgentTask, handler core.AgentHandler, dispatchTag string) {
 	defer s.taskWg.Done()
-	defer s.setBusy(task.ID.String(), false)
+	wakeCtx := ctx
+	defer func() {
+		s.setBusy(task.ID.String(), false)
+		// Slot release runs before this defer. Wake queued work only after a
+		// terminal legacy run, never on its unclassified pending-error retry.
+		if s.wakeup != nil && task.Schedule == nil && task.Cadence == nil && task.Strategy != core.StrategyRecurring && wakeCtx.Err() == nil {
+			checkCtx, end := context.WithTimeout(wakeCtx, 2*time.Second)
+			defer end()
+			current, err := s.store.Get(checkCtx, task.ID)
+			if err == nil && (current.Status == "done" || current.Status == "failed" || current.Status == "canceled") {
+				s.signalWakeup()
+			}
+		}
+	}()
 	if task.Deadline != nil {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithDeadline(ctx, *task.Deadline)
@@ -428,6 +467,37 @@ func (s *Scheduler) runTask(ctx context.Context, task core.AgentTask, handler co
 // Called during graceful shutdown to ensure DB ops finish before connections close.
 func (s *Scheduler) Wait() {
 	s.taskWg.Wait()
+	s.notificationWg.Wait()
+}
+
+func (s *Scheduler) drainNotificationsAsync(ctx context.Context) {
+	if s.notifyJournal == nil {
+		return
+	}
+	s.notificationMu.Lock()
+	if s.notificationRunning {
+		s.notificationRequested = true
+		s.notificationMu.Unlock()
+		return
+	}
+	s.notificationRunning = true
+	s.notificationWg.Add(1)
+	s.notificationMu.Unlock()
+	go func() {
+		defer s.notificationWg.Done()
+		for {
+			s.drainRetryableNotifications(context.WithoutCancel(ctx))
+			s.notificationMu.Lock()
+			if s.notificationRequested {
+				s.notificationRequested = false
+				s.notificationMu.Unlock()
+				continue
+			}
+			s.notificationRunning = false
+			s.notificationMu.Unlock()
+			return
+		}
+	}()
 }
 
 // executeTaskOnce runs ONE iteration of a task. It returns again=true when the
@@ -478,6 +548,14 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		s.logger.DebugContext(ctx, "agent-tasks: task already claimed", "task_id", task.ID)
 		return false
 	}
+	// Capture the DB-generated claim timestamp, not a local-clock estimate.
+	// In-flight checkpoints use it to reject writes from a replaced worker.
+	claimedTask, claimReadErr := s.store.Get(ctx, task.ID)
+	if claimReadErr != nil || claimedTask.Status != "running" || claimedTask.LastRunAt == nil {
+		s.logger.WarnContext(ctx, "agent-tasks: could not read current claim", "task_id", task.ID, "error", claimReadErr)
+		return false
+	}
+	claimStartedAt := *claimedTask.LastRunAt
 
 	// Build per-task tool registry. When the host installed a
 	// registryBuilder we rebuild every iteration so per-tool closures
@@ -541,6 +619,10 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		ContextInjector:     s.deps.ContextInjector,
 		ReflexPreparer:      s.deps.ReflexPreparer,
 		RuleEngine:          s.deps.RuleEngine,
+		SaveCheckpoint: func(cpCtx context.Context, cp core.TaskCheckpoint) error {
+			cp.Iteration = task.Iteration + 1
+			return s.store.CheckpointTask(cpCtx, task.ID, claimStartedAt, cp)
+		},
 	}
 
 	// Bound each iteration AND the durable total lifetime. An expired
@@ -579,7 +661,28 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 
 	var result core.IterationResult
 	var err error
-	if registryErr != nil {
+	durableOneShot := task.Schedule == nil && task.Cadence == nil && task.Strategy != core.StrategyRecurring
+	var submission *core.TaskSubmission
+	if durableOneShot {
+		submission, err = s.store.TaskSubmission(ctx, task.ID)
+		if err != nil {
+			s.logger.ErrorContext(ctx, "agent-tasks: load submission", "task_id", task.ID, "error", err)
+			return false
+		}
+		if submission != nil && submission.NextReviewAt.After(time.Now()) {
+			if err := s.store.SetPending(ctx, task.ID); err != nil {
+				s.logger.ErrorContext(ctx, "agent-tasks: defer review claim", "task_id", task.ID, "error", err)
+			}
+			return false
+		}
+	}
+	if submission != nil {
+		result = core.IterationResult{Done: true, Output: submission.Output, Notify: submission.Notify, Progress: submission.Progress, ToolCallsJSON: submission.ToolCalls}
+		if err = json.Unmarshal(submission.PendingDeliveries, &result.PendingDeliveries); err != nil {
+			s.logger.ErrorContext(ctx, "agent-tasks: invalid saved delivery refs", "task_id", task.ID, "error", err)
+			return false
+		}
+	} else if registryErr != nil {
 		err = registryErr
 	} else {
 		result, err = handler.Run(ctx, task, agentDeps)
@@ -754,7 +857,40 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		return false
 	}
 
+	if result.Done && durableOneShot && strings.TrimSpace(result.Output) == "" {
+		finishCtx, finishCancel := newDBCtx()
+		empty := fmt.Sprintf(s.deps.Config.UI.TaskEmptyResultFmt, task.Title)
+		artifact, changed, finishErr := s.store.FinalizeTask(finishCtx, task.ID, core.TaskFinalization{
+			Outcome: "partial", Reason: "empty_submission", ClaimStartedAt: &claimStartedAt,
+			Progress: result.Progress, EmptyBody: empty, EmptyNotify: empty,
+			Notify: fmt.Sprintf(s.deps.Config.UI.TaskPartialFmt, task.Title, task.ID.String()[:8]),
+		})
+		finishCancel()
+		if finishErr != nil || !changed {
+			iterationOutcome = "failed"
+			if finishErr != nil {
+				iterationError = finishErr.Error()
+			}
+			s.logger.ErrorContext(ctx, "agent-tasks: finalize empty submission", "task_id", task.ID, "error", finishErr)
+			return false
+		}
+		iterationOutcome = "empty_submission"
+		result.Output, result.IsFinal, result.Partial = artifact.Body, true, true
+		s.afterArtifactFinalized(ctx, task, result, "failed")
+		return false
+	}
+
 	if result.Done {
+		if durableOneShot && submission == nil && strings.TrimSpace(result.Output) != "" {
+			persistCtx, persistCancel := newDBCtx()
+			saveErr := s.store.SaveTaskSubmission(persistCtx, task.ID, claimStartedAt, result)
+			persistCancel()
+			if saveErr != nil {
+				iterationOutcome, iterationError = "failed", saveErr.Error()
+				s.logger.ErrorContext(ctx, "agent-tasks: persist submission", "task_id", task.ID, "error", saveErr)
+				return false
+			}
+		}
 		// Acceptance criteria gate: if the task carries criteria and the
 		// handler claims done on a non-recurring strategy, ask the LLM
 		// to verify. Recurring jobs (Schedule != nil) always complete on
@@ -774,6 +910,36 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 			met := verdict.Met
 			iterationAcceptanceMet = &met
 			iterationAcceptanceReason = verdict.Reason
+			if verdict.Unavailable && durableOneShot {
+				attempts := 0
+				if submission != nil {
+					attempts = submission.ReviewAttempts
+				}
+				dbCtx, dbCancel := newDBCtx()
+				defer dbCancel()
+				if attempts >= 2 {
+					artifact, changed, finishErr := s.store.FinalizeTask(dbCtx, task.ID, core.TaskFinalization{
+						Outcome: "partial", Body: result.Output, Reason: "verification_unavailable",
+						ClaimStartedAt: &claimStartedAt, Progress: result.Progress,
+						Notify: fmt.Sprintf(s.deps.Config.UI.TaskPartialFmt, task.Title, task.ID.String()[:8]),
+					})
+					if finishErr != nil {
+						s.logger.ErrorContext(ctx, "agent-tasks: preserve unverified result", "task_id", task.ID, "error", finishErr)
+					}
+					if changed {
+						result.Output, result.IsFinal, result.Partial = artifact.Body, true, true
+						s.afterArtifactFinalized(ctx, task, result, "failed")
+					}
+					iterationOutcome = "verification_unavailable"
+				} else {
+					delay := time.Duration(attempts+1) * 30 * time.Second
+					if err := s.store.DeferTaskVerification(dbCtx, task.ID, claimStartedAt, verdict.Reason, time.Now().Add(delay)); err != nil {
+						s.logger.ErrorContext(ctx, "agent-tasks: defer verification", "task_id", task.ID, "error", err)
+					}
+					iterationOutcome = "verification_wait"
+				}
+				return false
+			}
 			// Capture Gate C output (always — shadow mode runs even on
 			// pass paths so calibration sees the full distribution).
 			if verdict.Grounding != nil {
@@ -811,11 +977,19 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 				progressWithReason := rejectionProgress(task.Progress, result.Progress, verdict.Reason)
 				dbCtx, dbCancel := newDBCtx()
 				defer dbCancel()
-				if err := s.store.UpdateProgressWithRecheck(dbCtx, task.ID, progressWithReason, recheckURLs); err != nil {
-					s.logger.ErrorContext(ctx, "agent-tasks: progress update error", "error", err)
+				var repairErr error
+				if durableOneShot {
+					repairErr = s.store.RejectTaskSubmission(dbCtx, task.ID, claimStartedAt, progressWithReason, recheckURLs)
+				} else {
+					repairErr = s.store.UpdateProgressWithRecheck(dbCtx, task.ID, progressWithReason, recheckURLs)
 				}
-				// Non-terminal: a one-off retries immediately (back-to-back).
-				return task.Schedule == nil
+				if repairErr != nil {
+					s.logger.ErrorContext(ctx, "agent-tasks: schedule rejected result repair", "task_id", task.ID, "error", repairErr)
+					return false
+				}
+				// Non-terminal: a one-off retries immediately (back-to-back);
+				// a cadence task's next attempt waits for its cadence.
+				return task.Schedule == nil && !cadenceRunEnded(task, result)
 			}
 		}
 
@@ -827,6 +1001,23 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		// rejected drafts.
 		iterationOutcome = "done"
 		result.IsFinal = true
+		if durableOneShot {
+			finishCtx, finishCancel := newDBCtx()
+			artifact, changed, finishErr := s.store.FinalizeTask(finishCtx, task.ID, core.TaskFinalization{
+				Outcome: "completed", Body: result.Output, Notify: result.Notify, Progress: result.Progress,
+				ClaimStartedAt: &claimStartedAt, PendingDeliveries: result.PendingDeliveries,
+			})
+			finishCancel()
+			if finishErr != nil || !changed {
+				result.IsFinal = false
+				iterationOutcome = "failed"
+				s.logger.ErrorContext(ctx, "agent-tasks: finalize result", "task_id", task.ID, "error", finishErr)
+				return false
+			}
+			result.Output = artifact.Body
+			s.afterArtifactFinalized(ctx, task, result, "done")
+			return false
+		}
 		notifyOutcome, notifyErr := deliverNotify()
 		if stopForNotificationFailure(
 			classifyNotificationFailure(task, result, notifyOutcome, notifyErr, true),
@@ -908,7 +1099,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		}
 		// Non-terminal mid-task iteration: a one-off advances to the next step
 		// immediately (back-to-back); recurring waits for the next tick.
-		return task.Schedule == nil
+		return task.Schedule == nil && !cadenceRunEnded(task, result)
 	}
 }
 
@@ -1058,9 +1249,9 @@ func resolveTaskNotificationAttempt(
 	return false, fmt.Errorf("notify uncertain: %w", notifyErr)
 }
 
-// drainRetryableNotifications retries immutable journaled text before running
-// any task programs. A single tick is bounded so a large provider backlog
-// cannot starve normal task scheduling.
+// drainRetryableNotifications retries immutable journaled text in the separate
+// outbox worker. Each pass is bounded; kicks received during a pass coalesce
+// into another pass so newly finalized results do not wait for polling.
 func (s *Scheduler) drainRetryableNotifications(ctx context.Context) {
 	if s.notifyJournal == nil {
 		return
@@ -1298,6 +1489,30 @@ func (s *Scheduler) resolveHandler(task core.AgentTask) (core.AgentHandler, stri
 		return h, "strategy:" + task.Strategy, ok
 	}
 	return nil, "", false
+}
+
+// cadenceRunEnded spaces a cadence task's runs: once a run has written to
+// the user or submitted its result, the next attempt waits for the cadence
+// instead of starting back-to-back. Otherwise every rejected attempt
+// delivered again: a daily tale arrived 15 times in two hours (2026-09-24).
+func cadenceRunEnded(task core.AgentTask, result core.IterationResult) bool {
+	if task.Cadence == nil || strings.TrimSpace(*task.Cadence) == "" {
+		return false
+	}
+	if result.Done {
+		return true
+	}
+	var calls []struct {
+		Name  string `json:"name"`
+		Error bool   `json:"error"`
+	}
+	_ = json.Unmarshal(result.ToolCallsJSON, &calls)
+	for _, call := range calls {
+		if call.Name == "message_send" && !call.Error {
+			return true
+		}
+	}
+	return false
 }
 
 // cadenceElapsed returns true when the task is allowed to tick — either
@@ -1568,4 +1783,18 @@ func (s *Scheduler) archiveTaskSession(
 		s.logger.WarnContext(logCtx, "agent-tasks: archive terminal session failed",
 			"task_id", taskID, "session_id", sessionID, "error", err)
 	}
+}
+
+// afterArtifactFinalized runs only after the result and outbox transaction commits.
+func (s *Scheduler) afterArtifactFinalized(ctx context.Context, task core.AgentTask, result core.IterationResult, status string) {
+	sessionID := sessionIDFromProgress(result.Progress)
+	if sessionID == "" {
+		sessionID = sessionIDFromProgress(task.Progress)
+	}
+	s.archiveTaskSession(ctx, task.ID, task.SoulID, sessionID)
+	if s.onStatusChange != nil {
+		task.Status, task.Result = status, &result.Output
+		go s.onStatusChange(core.WithSoulID(context.WithoutCancel(ctx), task.SoulID), task)
+	}
+	s.drainNotificationsAsync(ctx)
 }

@@ -41,6 +41,9 @@ func (p *Provider) StreamComplete(ctx context.Context, req bs.CompletionRequest,
 // streamComplete runs the backoff loop and reports whether any event reached
 // cb, so the caller knows whether a further retry is safe.
 func (p *Provider) streamComplete(ctx context.Context, req bs.CompletionRequest, cb *bs.StreamCallbacks) (*bs.CompletionResponse, bool, error) {
+	if bs.DeferredProviderRetries(ctx) {
+		return p.streamOnce(ctx, req, cb)
+	}
 	var lastErr error
 	for attempt := 0; attempt <= len(p.backoffs); attempt++ {
 		resp, emitted, err := p.streamOnce(ctx, req, cb)
@@ -146,7 +149,7 @@ func (p *Provider) streamOnce(ctx context.Context, req bs.CompletionRequest, cb 
 	}
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return nil, false, fmt.Errorf("anthropic stream API status %d: %s", resp.StatusCode, errBody)
+		return nil, false, bs.NewHTTPFailure(resp.StatusCode, resp.Header.Get("Retry-After"), fmt.Errorf("anthropic stream API status %d: %s", resp.StatusCode, errBody))
 	}
 
 	return parseAnthropicStream(ctx, resp.Body, cb)

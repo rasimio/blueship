@@ -3,6 +3,7 @@ package gemini
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -312,5 +313,26 @@ func TestBuildToolsRemovesUnsupportedAdditionalProperties(t *testing.T) {
 	}
 	if !strings.Contains(schema, `"schedule"`) || !strings.Contains(schema, `"freq"`) {
 		t.Fatalf("schema fields were lost: %s", schema)
+	}
+}
+
+type failedTransport struct{ cause error }
+
+func (t failedTransport) RoundTrip(*http.Request) (*http.Response, error) { return nil, t.cause }
+
+func TestTransportFailurePreservesRetryClassificationAndRedaction(t *testing.T) {
+	for _, cause := range []error{context.DeadlineExceeded, context.Canceled, io.ErrUnexpectedEOF} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			p := NewCompletionProvider("private-test-key", time.Second)
+			p.httpClient.Transport = failedTransport{cause: cause}
+			_, err := p.Complete(bs.WithDeferredProviderRetries(context.Background()), bs.CompletionRequest{Model: "test", Messages: []bs.Message{{Role: "user", Content: "hi"}}})
+			if err == nil || strings.Contains(err.Error(), "private-test-key") || !errors.Is(err, cause) {
+				t.Fatalf("lost redaction or transport identity: %v", err)
+			}
+			retry, _ := bs.TaskRetryPolicy(err)
+			if retry != !errors.Is(cause, context.Canceled) {
+				t.Fatalf("wrong retry classification: %v", err)
+			}
+		})
 	}
 }

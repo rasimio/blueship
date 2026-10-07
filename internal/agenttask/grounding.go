@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/rasimio/blueship/internal/core"
 )
@@ -85,17 +87,22 @@ Aim for 8-20 claim entries on a typical research report. Each entry should be on
 // computes a pass/fail decision based on grounded-ratio + a hard-
 // category check.
 //
-// Never blocks on failure: any LLM/JSON/DB hiccup returns
-// {Met: true, Reason: "<diagnostic>"} so a flaky evaluator doesn't
-// turn into a denial-of-service against the cortex. The shadow-mode
-// rollout (Deploy 1) records every verdict regardless of Met so we
-// can calibrate the threshold from real data before flipping to
-// enforcement.
+// Infrastructure failures are reported as Unavailable so the saved draft can
+// be verified later without pretending that its claims passed the audit.
 //
 // The auditor sees deduplicated documents, cited ones first, up to
 // groundingPerDocCap chars each and groundingTotalBudget total; see
 // selectGroundingDocs for why that ordering is load-bearing.
 func evaluateGrounding(ctx context.Context, deps core.AgentDeps, task core.AgentTask, report string, docs []ToolOutput) GroundingVerdict {
+	if task.ExecutorVersion == 2 && len(docs) > 0 {
+		if parts := partitionGroundingReport(report); len(parts) > 1 {
+			return evaluateGroundingParts(ctx, deps, task, report, docs, parts, nil)
+		}
+	}
+	return evaluateGroundingPart(ctx, deps, task, report, docs, "")
+}
+
+func evaluateGroundingPart(ctx context.Context, deps core.AgentDeps, task core.AgentTask, report string, docs []ToolOutput, target string) GroundingVerdict {
 	if len(docs) == 0 {
 		return GroundingVerdict{
 			Met:    true,
@@ -103,16 +110,14 @@ func evaluateGrounding(ctx context.Context, deps core.AgentDeps, task core.Agent
 		}
 	}
 	if deps.LLM == nil {
-		return GroundingVerdict{Met: true, Reason: "no LLM configured for grounding eval"}
+		return GroundingVerdict{Unavailable: true, Reason: "no LLM configured for grounding eval"}
 	}
 
-	modelRef := pickGroundingModel(deps)
-	model := modelRef.ForRouter()
-	if model == "" {
-		return GroundingVerdict{Met: true, Reason: "no model configured for grounding eval"}
+	request, docStats := groundingRequest(deps, task, report, docs, target)
+	if request.Model == "" {
+		return GroundingVerdict{Unavailable: true, Reason: "no model configured for grounding eval"}
 	}
 
-	user, docStats := buildGroundingUserMessage(report, docs)
 	deps.Logger.Info("grounding evaluator: audit set",
 		"task_id", task.ID,
 		"rows", docStats.Rows,
@@ -125,32 +130,31 @@ func evaluateGrounding(ctx context.Context, deps core.AgentDeps, task core.Agent
 		"min_shown_pct", docStats.MinShownFraction,
 	)
 
-	resp, err := deps.LLM.Complete(ctx, core.CompletionRequest{
-		Model:        model,
-		System:       groundingSystemPrompt,
-		Messages:     []core.Message{{Role: "user", Content: core.NormalizeContent(user)}},
-		MaxTokens:    groundingMaxOutputToks,
-		Temperature:  0.2,
-		Effort:       modelRef.Effort,
-		ThinkingMode: modelRef.ThinkingMode,
-	})
+	resp, err := deps.LLM.Complete(ctx, request)
 	if err != nil {
 		deps.Logger.Warn("grounding evaluator: llm call failed",
-			"task_id", task.ID, "model", model, "error", err)
-		return GroundingVerdict{Met: true, Reason: "grounding LLM call failed: " + err.Error()}
+			"task_id", task.ID, "model", request.Model, "error", err)
+		_, delay := core.TaskRetryPolicy(err)
+		return GroundingVerdict{Unavailable: true, Reason: "grounding LLM call failed: " + err.Error(), RetryDelay: delay}
+	}
+
+	if resp == nil || resp.StopReason == "max_tokens" {
+		return GroundingVerdict{Unavailable: true, Reason: "grounding evaluator returned an incomplete audit"}
 	}
 
 	raw := contentToText(resp.Content)
 	verdict, parseErr := parseGroundingResponse(raw)
 	if parseErr != nil {
-		// Persist the diagnostic but don't block — malformed JSON is a
-		// prompt-quality issue we'll fix offline once we see it.
+		// Preserve the draft; malformed reviewer output does not verify it.
 		deps.Logger.Warn("grounding evaluator: parse failed",
 			"task_id", task.ID, "error", parseErr, "raw_head", headForLog(raw))
-		return GroundingVerdict{Met: true, Reason: "grounding evaluator JSON parse failed: " + parseErr.Error()}
+		return GroundingVerdict{Unavailable: true, Reason: "grounding evaluator JSON parse failed: " + parseErr.Error()}
 	}
 
 	verdict = scoreGroundingVerdict(verdict)
+	if task.ExecutorVersion == 2 {
+		verdict = strictGraphGrounding(verdict)
+	}
 	deps.Logger.Info("grounding evaluator: verdict",
 		"task_id", task.ID,
 		"met", verdict.Met,
@@ -250,7 +254,15 @@ func selectGroundingDocs(report string, docs []ToolOutput) ([]groundingDoc, grou
 	stats.Unique = len(order)
 
 	cited := reportCitedURLs(report)
-	var head, tail []groundingDoc // cited first, then the rest
+	bareReferences := reportURLRE.ReplaceAllString(report, " ")
+	linkedHosts := map[string]bool{}
+	for _, raw := range reportURLRE.FindAllString(report, -1) {
+		linkedHosts[groundingDocHost(raw)] = true
+	}
+	mentionsUnlinkedHost := func(raw string) bool {
+		return !linkedHosts[groundingDocHost(raw)] && reportMentionsDocHost(bareReferences, raw)
+	}
+	var head, mentioned, tail []groundingDoc // exact citations, named hosts, then the rest
 	for _, url := range order {
 		d := latest[url]
 		g := groundingDoc{
@@ -266,6 +278,8 @@ func selectGroundingDocs(report string, docs []ToolOutput) ([]groundingDoc, grou
 		if g.Cited {
 			stats.Cited++
 			head = append(head, g)
+		} else if mentionsUnlinkedHost(url) || mentionsUnlinkedHost(metaString(d.Metadata, "requested_url")) {
+			mentioned = append(mentioned, g)
 		} else {
 			tail = append(tail, g)
 		}
@@ -278,18 +292,30 @@ func selectGroundingDocs(report string, docs []ToolOutput) ([]groundingDoc, grou
 
 	budget := groundingTotalBudget
 	var out []groundingDoc
-	admit := func(g groundingDoc) bool {
-		if budget < groundingMinWindow {
+	admit := func(g groundingDoc, cap int) bool {
+		if budget < min(groundingMinWindow, len(g.Doc.Output)) {
 			stats.Omitted++
 			return false
 		}
-		g.Window = min(min(len(g.Doc.Output), groundingPerDocCap), budget)
+		g.Window = min(min(len(g.Doc.Output), cap), budget)
 		budget -= g.Window
 		out = append(out, g)
 		return true
 	}
+	// Reserve a first window for named-host evidence as well as exact links.
+	// Hosts already represented by explicit links keep page-level selection;
+	// a catalog name must not pull all unrelated products into the audit.
+	// Otherwise a report explaining an unavailable domain loses its evidence
+	// when long linked product pages consume their second helping.
+	firstCap := groundingPerDocCap
+	if n := len(head) + len(mentioned); n > 0 {
+		firstCap = min(firstCap, max(groundingMinWindow, budget/n))
+	}
 	for _, g := range head {
-		admit(g)
+		admit(g, firstCap)
+	}
+	for _, g := range mentioned {
+		admit(g, firstCap)
 	}
 	// Cited documents get a second helping before any uncited one is let in.
 	//
@@ -311,7 +337,7 @@ func selectGroundingDocs(report string, docs []ToolOutput) ([]groundingDoc, grou
 		}
 	}
 	for _, g := range tail {
-		admit(g)
+		admit(g, groundingPerDocCap)
 	}
 
 	stats.Included = len(out)
@@ -355,6 +381,25 @@ func groundingDocURL(d ToolOutput) string {
 
 var reportURLRE = regexp.MustCompile(`https?://[^\s)\]}<>"'` + "`" + `]+`)
 
+// Only bare host mentions count here. Explicit links are removed first so a
+// citation to one page does not implicitly prioritize every page on its host.
+func reportMentionsDocHost(report, rawURL string) bool {
+	host := groundingDocHost(rawURL)
+	if host == "" {
+		return false
+	}
+	pattern := `(?i)(^|[^a-z0-9_.@/\-])(?:www\.)?` + regexp.QuoteMeta(host) + `($|[^a-z0-9_.\-]|\.(?:$|[^a-z0-9_\-]))`
+	return regexp.MustCompile(pattern).MatchString(report)
+}
+
+func groundingDocHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
+}
+
 // reportCitedURLs is the set of documents the report points at, normalized.
 func reportCitedURLs(report string) map[string]bool {
 	cited := map[string]bool{}
@@ -378,17 +423,31 @@ func normalizeDocURL(raw string) string { return core.NormalizeDocURL(raw) }
 // documents are declared rather than silently dropped — an auditor that
 // believes it has everything reports absence as fabrication.
 func buildGroundingUserMessage(report string, docs []ToolOutput) (string, groundingDocStats) {
+	sources, stats := buildGroundingSourceMessage(report, docs)
+	return "[report]\n" + report + "\n\n" + sources, stats
+}
+
+// Source selection still uses the complete report, including its citations.
+// Keeping the rendered corpus separate gives v2 a stable provider cache boundary
+// without changing evidence, qualifiers or the scope of any audit.
+func buildGroundingSourceMessage(report string, docs []ToolOutput) (string, groundingDocStats) {
 	selected, stats := selectGroundingDocs(report, docs)
 
 	var b strings.Builder
-	b.WriteString("[report]\n")
-	b.WriteString(report)
-	b.WriteString("\n\n[fetched_documents]\n")
+	b.WriteString("[fetched_documents]\n")
 	for i, g := range selected {
 		fmt.Fprintf(&b, "=== Doc %d: %s (%s)\n", i+1, g.Title, g.URL)
+		// This field is saved by browser_fetch, not extracted from page text.
+		// Cached windows keep the original observation timestamp. Never use
+		// audit time (or a cache-hit persistence time) to invent freshness.
+		if g.Doc.ToolName == "browser_fetch" {
+			if observed, err := time.Parse(time.RFC3339Nano, metaString(g.Doc.Metadata, "observed_at")); err == nil {
+				fmt.Fprintf(&b, "[runtime_observation] observed_at=%s\n", observed.UTC().Format(time.RFC3339Nano))
+			}
+		}
 		text := g.Doc.Output
 		if len(text) > g.Window {
-			text = text[:g.Window] + "\n[...truncated...]"
+			text = groundingDocumentWindow(g.Doc, g.Window)
 		}
 		b.WriteString(text)
 		b.WriteString("\n\n")
@@ -401,12 +460,98 @@ func buildGroundingUserMessage(report string, docs []ToolOutput) (string, ground
 	return b.String(), stats
 }
 
+// Preserve every persisted multi-query window when a long source must be
+// shortened for audit. Otherwise dedup could hide all but the first attribute.
+func groundingDocumentWindow(doc ToolOutput, budget int) string {
+	values, _ := doc.Metadata["read_offsets_chars"].([]any)
+	var offsets []int
+	seen := map[int]bool{}
+	for _, value := range values {
+		n, ok := value.(float64)
+		if !ok || n < 0 || n > float64(len(doc.Output)) || n != float64(int(n)) {
+			continue
+		}
+		offset := int(n)
+		if !seen[offset] {
+			offsets = append(offsets, offset)
+			seen[offset] = true
+		}
+		if len(offsets) == 7 {
+			break
+		}
+	}
+	if len(offsets) == 0 {
+		offset, _ := doc.Metadata["read_offset_chars"].(float64)
+		return groundingReadWindow(doc.Output, budget, int(offset))
+	}
+	var passages []string
+	for i, offset := range offsets {
+		share := budget / len(offsets)
+		if i < budget%len(offsets) {
+			share++
+		}
+		passages = append(passages, groundingReadWindow(doc.Output, share, offset))
+	}
+	return strings.Join(passages, "\n[...next recorded query window...]\n")
+}
+
+// Prefer the passage actually read by the researcher over an unrelated page
+// header. Budget remains in bytes; recorded browser offsets count characters.
+func groundingReadWindow(text string, budget, readOffset int) string {
+	if len(text) <= budget {
+		return text
+	}
+	byteOffset, chars := len(text), 0
+	for index := range text {
+		if chars >= readOffset {
+			byteOffset = index
+			break
+		}
+		chars++
+	}
+	start := max(0, min(byteOffset-budget/4, len(text)-budget))
+	for start > 0 && text[start]&0xc0 == 0x80 {
+		start--
+	}
+	end := min(len(text), start+budget)
+	for end < len(text) && end > start && text[end]&0xc0 == 0x80 {
+		end--
+	}
+	prefix := ""
+	if start > 0 {
+		prefix = fmt.Sprintf("[...excerpt begins at byte %d...]\n", start)
+	}
+	suffix := ""
+	if end < len(text) {
+		suffix = "\n[...truncated...]"
+	}
+	return prefix + text[start:end] + suffix
+}
+
 // parseGroundingResponse strips any leading/trailing prose, finds the
 // outer JSON object, and unmarshals into a GroundingVerdict's Claims
 // field. The scoring step fills in totals + Met + Reason after parse.
 func parseGroundingResponse(raw string) (GroundingVerdict, error) {
 	body := strings.TrimSpace(raw)
 	start := strings.Index(body, "{")
+	// A finished response may omit only the outer object's final brace while
+	// retaining the complete claims array. Recover that single delimiter only;
+	// never complete an array, claim, string, or truncated provider response.
+	// The caller rejects max_tokens before reaching this parser.
+	if start >= 0 && strings.HasSuffix(body, "]") {
+		candidate := body[start:] + "}"
+		if json.Valid([]byte(candidate)) {
+			var object map[string]json.RawMessage
+			var claims []ClaimGrounding
+			if json.Unmarshal([]byte(candidate), &object) == nil && len(object) == 1 {
+				// Claim decoding matches the normal path: descriptive extra
+				// fields do not change claim status or evidence.
+				if json.Unmarshal(object["claims"], &claims) == nil && len(claims) > 0 {
+					return GroundingVerdict{Claims: claims}, nil
+				}
+			}
+		}
+	}
 	end := strings.LastIndex(body, "}")
 	if start < 0 || end <= start {
 		return GroundingVerdict{}, fmt.Errorf("no JSON object found in response")

@@ -48,8 +48,10 @@ const (
 )
 
 type registeredTool struct {
-	Definition ToolDefinition
-	Handler    ToolHandler
+	ReadOnly       bool
+	Definition     ToolDefinition
+	Handler        ToolHandler
+	EvidenceReader ToolHandler // local persisted evidence only; no external work
 
 	// A2A metadata — only populated for tools that opt into exposure.
 	Mode    ToolMode
@@ -380,3 +382,47 @@ func (r *ToolRegistry) Clone() *ToolRegistry {
 // helpers, which read these from a `tools` DB table, are gone — code is
 // the source of truth now. Use Register / Expose at the call site to
 // fully describe each tool.)
+
+// MarkReadOnly is an explicit host/framework declaration, never model input.
+// Unknown tools remain effectful. Register all tools before serving requests.
+func (r *ToolRegistry) MarkReadOnly(names ...string) error {
+	for _, name := range names {
+		if _, ok := r.tools[name]; !ok {
+			return fmt.Errorf("unknown read-only tool %q", name)
+		}
+	}
+	for _, name := range names {
+		tool := r.tools[name]
+		tool.ReadOnly = true
+		r.tools[name] = tool
+	}
+	return nil
+}
+func (r *ToolRegistry) IsReadOnly(name string) bool {
+	tool, ok := r.tools[name]
+	return ok && tool.ReadOnly
+}
+
+// RegisterEvidenceReader supplies a restricted implementation for use after
+// external research closes. It must never fall back to external reads or effects.
+func (r *ToolRegistry) RegisterEvidenceReader(name string, handler ToolHandler) error {
+	tool, ok := r.tools[name]
+	if !ok || !tool.ReadOnly || tool.Remote || handler == nil {
+		return fmt.Errorf("evidence reader requires a local read-only tool: %q", name)
+	}
+	tool.EvidenceReader = handler
+	r.tools[name] = tool
+	return nil
+}
+
+// EvidenceOnlySubset cannot expose an ordinary handler or expand the allowlist.
+func (r *ToolRegistry) EvidenceOnlySubset() *ToolRegistry {
+	sub := NewToolRegistry()
+	for name, tool := range r.tools {
+		if tool.ReadOnly && !tool.Remote && tool.EvidenceReader != nil {
+			tool.Handler = tool.EvidenceReader
+			sub.tools[name] = tool
+		}
+	}
+	return sub
+}

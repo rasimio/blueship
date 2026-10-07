@@ -29,6 +29,7 @@ import (
 // covers the fresh-install shape that this fixture cannot.
 const preMigration022AgentTasks = `
 CREATE TABLE agent_tasks (
+    executor_version      INTEGER NOT NULL DEFAULT 1,
     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id               UUID NOT NULL,
     title                 TEXT NOT NULL,

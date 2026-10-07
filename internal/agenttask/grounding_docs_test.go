@@ -202,3 +202,43 @@ func TestGroundingStatsDistinguishShortDocsFromStarvedOnes(t *testing.T) {
 		t.Error("no document counted as truncated, though the budget forces it")
 	}
 }
+
+func TestGroundingPreservesNamedHostObservationUnderBudget(t *testing.T) {
+	const errorPage = "Connection timed out Error code 522"
+	failure := fetchRow("https://www.unavailable.test/products", "Unavailable", errorPage, 0, 900)
+	failure.Metadata["observed_at"] = "2026-09-22T20:16:10Z"
+	docs := []ToolOutput{failure}
+	report := "The domain `unavailable.test` returned 522. Used catalog.test instead. Sources: "
+	for i := range 10 {
+		u := fmt.Sprintf("https://catalog.test/product/%d", i)
+		docs = append(docs, fetchRow(u, "Product", "product specification", 5000, groundingCitedDocCap))
+		report += u + " "
+	}
+	docs = append(docs, fetchRow("https://catalog.test/unrelated", "Irrelevant", "not cited", 0, groundingCitedDocCap))
+	message, stats := buildGroundingUserMessage(report, docs)
+	if !strings.Contains(message, errorPage) || !strings.Contains(message, "observed_at=2026-09-22T20:16:10Z") {
+		t.Fatal("named-domain observation lost to linked pages", stats)
+	}
+	selected, _ := selectGroundingDocs(report, docs)
+	used := 0
+	for _, doc := range selected {
+		used += doc.Window
+	}
+	if used > groundingTotalBudget || stats.Cited != 10 || stats.Included != 11 {
+		t.Fatal("coverage fix exceeded budget or omitted referenced evidence", used, stats)
+	}
+}
+
+func TestGroundingBareHostMatchingDoesNotExpandExplicitCitations(t *testing.T) {
+	for _, report := range []string{"`example.test` unavailable", "www.example.test returned 522", "See example.test.", "EXAMPLE.TEST: offline"} {
+		if !reportMentionsDocHost(report, "https://www.example.test/path") {
+			t.Fatal("bare host not recognized", report)
+		}
+	}
+	for _, report := range []string{"notexample.test", "example.test.evil", "other.example.test", "someone@example.test", "https://example.test/one"} {
+		bare := reportURLRE.ReplaceAllString(report, " ")
+		if reportMentionsDocHost(bare, "https://example.test/two") {
+			t.Fatal("unrelated reference promoted", report)
+		}
+	}
+}

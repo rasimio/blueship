@@ -21,10 +21,12 @@ type reviewerStub struct {
 	verdict string
 	prompts []string
 	systems []string
+	budgets []int
 }
 
 func (s *reviewerStub) Complete(_ context.Context, req core.CompletionRequest) (*core.CompletionResponse, error) {
 	s.systems = append(s.systems, req.System)
+	s.budgets = append(s.budgets, req.MaxTokens)
 	for _, m := range req.Messages {
 		if text, ok := m.Content.(string); ok {
 			s.prompts = append(s.prompts, text)
@@ -71,7 +73,7 @@ func criteriaTask(criteria string) core.AgentTask {
 // one unreadable record looked exactly like an empty one, and the model was
 // told to go do the thing it had already done 259 times. Three of its twenty
 // iterations went to a rejection it could not act on.
-func TestAcceptanceSkipsCitationGatesWhenFetchRecordUnreadable(t *testing.T) {
+func TestAcceptanceDefersVerificationWhenFetchRecordUnreadable(t *testing.T) {
 	llm := &reviewerStub{verdict: `{"met": true, "reason": "report is complete and cited"}`}
 	deps := evaluatorTestDeps(llm, func(string) (*sqlx.DB, error) {
 		return nil, errors.New("context deadline exceeded")
@@ -87,11 +89,11 @@ func TestAcceptanceSkipsCitationGatesWhenFetchRecordUnreadable(t *testing.T) {
 	if strings.Contains(v.Reason, "hard gate") {
 		t.Fatalf("an unreadable fetch record must not be reported as fabricated citations: %q", v.Reason)
 	}
-	if !v.Met {
-		t.Fatalf("with the gates skipped the reviewer's verdict stands, got met=false: %q", v.Reason)
+	if v.Met || !v.Unavailable {
+		t.Fatalf("unreadable evidence must defer verification, got %+v", v)
 	}
-	if len(llm.prompts) == 0 {
-		t.Fatal("the reviewer was never asked")
+	if len(llm.prompts) != 0 {
+		t.Fatal("reviewer was called without readable evidence")
 	}
 	if strings.Contains(strings.Join(llm.prompts, "\n"), "FETCH RECORD") {
 		t.Fatal("a record that could not be read must not be handed to the reviewer as machine-verified ground truth")

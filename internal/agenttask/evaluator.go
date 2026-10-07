@@ -265,7 +265,7 @@ func loadFetchedURLs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID)
 	// missing (older tasks).
 	rows, err := db.QueryContext(ctx, `
 		SELECT tc->>'input' AS input
-		FROM blueship.agent_task_iterations,
+		FROM agent_task_iterations,
 		     jsonb_array_elements(tool_calls) AS tc
 		WHERE task_id = $1 AND tc->>'name' = 'browser_fetch'`, taskID)
 	if err != nil {
@@ -291,7 +291,7 @@ func loadFetchedURLs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID)
 	// rewrite from /abs/ to /pdf/ doesn't break the cross-reference.
 	docRows, err := db.QueryContext(ctx, `
 		SELECT metadata->>'requested_url', metadata->>'final_url'
-		FROM blueship.agent_task_tool_outputs
+		FROM agent_task_tool_outputs
 		WHERE task_id = $1 AND tool_name = 'browser_fetch'`, taskID)
 	if err != nil {
 		return out, fmt.Errorf("fetch record: tool_outputs query: %w", err)
@@ -426,14 +426,14 @@ func loadToolOutputs(ctx context.Context, deps core.AgentDeps, taskID uuid.UUID,
 		rows, err = db.QueryContext(ctx, `
 			SELECT tool_name, tool_input::text, output, output_format,
 			       COALESCE(metadata::text, '{}'), iteration
-			FROM blueship.agent_task_tool_outputs
+			FROM agent_task_tool_outputs
 			WHERE task_id = $1
 			ORDER BY created_at`, taskID)
 	} else {
 		rows, err = db.QueryContext(ctx, `
 			SELECT tool_name, tool_input::text, output, output_format,
 			       COALESCE(metadata::text, '{}'), iteration
-			FROM blueship.agent_task_tool_outputs
+			FROM agent_task_tool_outputs
 			WHERE task_id = $1 AND tool_name = ANY($2)
 			ORDER BY created_at`, taskID, pq.Array(toolNames))
 	}
@@ -483,8 +483,12 @@ func metaString(meta map[string]any, key string) string {
 // same return value so the scheduler can persist both in one audit
 // row.
 type AcceptanceVerdict struct {
-	Met    bool   `json:"met"`
-	Reason string `json:"reason"`
+	RetryDelay time.Duration `json:"retry_delay_ns,omitempty"`
+	Met        bool          `json:"met"`
+	Reason     string        `json:"reason"`
+	// Unavailable is an infrastructure failure, not a defect to repair by
+	// repeating research. The scheduler must retry verification of the draft.
+	Unavailable bool `json:"unavailable,omitempty"`
 
 	// Grounding carries the per-claim audit from Gate C. Nil when
 	// Gate C didn't run this iteration (no criteria, no fetched docs,
@@ -492,7 +496,8 @@ type AcceptanceVerdict struct {
 	// evaluator made the LLM call regardless of Met — the scheduler
 	// records the verdict in agent_task_iterations.grounding_verdict
 	// for forensics on both pass and reject paths.
-	Grounding *GroundingVerdict `json:"grounding,omitempty"`
+	Grounding          *GroundingVerdict `json:"grounding,omitempty"`
+	GroundingInputHash string            `json:"grounding_input_hash,omitempty"`
 }
 
 // ClaimGrounding is the auditor's verdict on one claim from the report.
@@ -533,25 +538,30 @@ type ClaimGrounding struct {
 // recheck rule forces it to re-read the page that's the source of
 // truth before submitting again.
 type GroundingVerdict struct {
-	Met             bool             `json:"met"`
-	Reason          string           `json:"reason"`
-	Claims          []ClaimGrounding `json:"claims"`
-	TotalCount      int              `json:"total_count"`
-	GroundedCount   int              `json:"grounded_count"`
-	PartialCount    int              `json:"partial_count"`
-	UngroundedCount int              `json:"ungrounded_count"`
-	RecheckURLs     []string         `json:"recheck_urls,omitempty"`
+	AuditedParts    []GroundingPartAudit `json:"audited_parts,omitempty"`
+	RetryDelay      time.Duration        `json:"retry_delay_ns,omitempty"`
+	Met             bool                 `json:"met"`
+	Unavailable     bool                 `json:"unavailable,omitempty"`
+	Reason          string               `json:"reason"`
+	Claims          []ClaimGrounding     `json:"claims"`
+	TotalCount      int                  `json:"total_count"`
+	GroundedCount   int                  `json:"grounded_count"`
+	PartialCount    int                  `json:"partial_count"`
+	UngroundedCount int                  `json:"ungrounded_count"`
+	RecheckURLs     []string             `json:"recheck_urls,omitempty"`
+}
+
+// Completed partition evidence rides in the existing persisted verdict. The
+// enclosing input hash must match before any entry may be reused.
+type GroundingPartAudit struct {
+	TargetHash string           `json:"target_hash"`
+	Claims     []ClaimGrounding `json:"claims"`
 }
 
 // evaluateAcceptance asks the configured LLM whether a task result
 // satisfies the task's acceptance_criteria. Tasks without criteria
-// always pass. The evaluator returns Met=true on any error so a
-// transient LLM failure does not block a handler-claimed completion;
-// the failure is logged for the operator to review.
-//
-// Prompt is intentionally tight: ask for JSON, parse it, treat anything
-// non-parseable as a met=true fallback. The agent_task scheduler is
-// not the right place to argue with the LLM about format.
+// always pass. Infrastructure failures return Unavailable, never a fabricated
+// passing verdict or a request to redo evidence gathering.
 //
 // iterationToolCalls is the tool-trace blob the handler produced for THIS
 // iteration. Used only by Gate B' (recheck enforcement): when the prior
@@ -604,12 +614,57 @@ func acceptanceReviewPrompt(title, desc, criteria, result, extraHint, fetchRecor
 	)
 }
 
+// Graph evidence spans all confirmed branches, not a final legacy iteration.
+// Instructions belong to the host prompt; the reviewer input is task data.
+func graphAcceptanceInput(task core.AgentTask, result string, traces json.RawMessage, cited, fetched map[string]struct{}) string {
+	keys := func(set map[string]struct{}) []string {
+		out := make([]string, 0, len(set))
+		for key := range set {
+			out = append(out, key)
+		}
+		sort.Strings(out)
+		return out
+	}
+	receipts, err := graphReviewReceipts(traces)
+	if err != nil {
+		return ""
+	}
+	input, err := json.Marshal(map[string]any{
+		"task": task.Title, "description": task.Description, "acceptance_criteria": task.AcceptanceCriteria,
+		"reviewed_at": time.Now().UTC().Format(time.RFC3339Nano),
+		"result":      result, "evidence_scope": "all_confirmed_graph_steps",
+		"confirmed_step_tool_traces": receipts,
+		"cited_url_keys":             keys(cited), "fetched_url_keys": keys(fetched),
+	})
+	if err != nil {
+		return ""
+	}
+	return string(input)
+}
+
 func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.AgentTask, result string, iterationToolCalls json.RawMessage) AcceptanceVerdict {
+	return evaluateAcceptanceWithPrior(ctx, deps, task, result, iterationToolCalls, nil)
+}
+
+func evaluateAcceptanceWithPrior(ctx context.Context, deps core.AgentDeps, task core.AgentTask, result string, iterationToolCalls json.RawMessage, prior *AcceptanceVerdict) (verdict AcceptanceVerdict) {
+	var groundingInputHash string
+	defer func() { verdict.GroundingInputHash = groundingInputHash }()
 	if task.AcceptanceCriteria == nil || strings.TrimSpace(*task.AcceptanceCriteria) == "" {
 		return AcceptanceVerdict{Met: true}
 	}
 	if deps.LLM == nil {
-		return AcceptanceVerdict{Met: true}
+		return unavailableAcceptance("acceptance provider is not configured", nil)
+	}
+	graphSystem := ""
+	if task.ExecutorVersion == 2 {
+		if deps.Prompts == nil {
+			return unavailableAcceptance("graph acceptance prompt store is not configured", nil)
+		}
+		var err error
+		graphSystem, err = deps.Prompts.Get(ctx, "background-graph-acceptance")
+		if err != nil || strings.TrimSpace(graphSystem) == "" {
+			return unavailableAcceptance("graph acceptance prompt is unavailable", nil)
+		}
 	}
 
 	// Gate B' — recheck enforcement. Runs before any LLM call: if the
@@ -677,9 +732,9 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 		var fetchErr error
 		fetchedURLs, fetchErr = loadFetchedURLs(ctx, deps, task.ID)
 		if fetchErr != nil {
-			fetchRecordReadable = false
-			deps.Logger.ErrorContext(ctx, "acceptance evaluator: fetch record unreadable, citation gates skipped",
+			deps.Logger.ErrorContext(ctx, "acceptance evaluator: fetch record unreadable",
 				"task_id", task.ID, "urls_in_result", urlCount, "error", fetchErr)
+			return unavailableAcceptance("source evidence could not be read", nil)
 		}
 		for u := range resultURLs {
 			if _, ok := fetchedURLs[u]; ok {
@@ -755,7 +810,7 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 		// once there are enough URLs (≥4) for diversity to be meaningful.
 		// Smaller reports (1-3 URLs) skip the gate — a focused brief on
 		// one paper is allowed to cite only that paper's family.
-		if urlCount >= 4 {
+		if urlCount >= 4 && taskRequiresSourceDiversity(task) {
 			// Diversity buckets: multi-author platforms (arxiv,
 			// openreview, conference proceedings, etc.) get a separate
 			// bucket per URL because each preprint represents an
@@ -817,12 +872,16 @@ func evaluateAcceptance(ctx context.Context, deps core.AgentDeps, task core.Agen
 	var groundingVerdict *GroundingVerdict
 	docs, docsErr := loadToolOutputs(ctx, deps, task.ID, []string{"browser_fetch"})
 	if docsErr != nil {
-		deps.Logger.ErrorContext(ctx, "acceptance evaluator: tool outputs unreadable, grounding audit skipped",
+		deps.Logger.ErrorContext(ctx, "acceptance evaluator: tool outputs unreadable",
 			"task_id", task.ID, "error", docsErr)
+		return unavailableAcceptance("source documents could not be read", nil)
 	}
-	if len(docs) > 0 {
+	if len(docs) > 0 && task.ExecutorVersion != 2 {
 		v := evaluateGrounding(ctx, deps, task, result, docs)
 		groundingVerdict = &v
+		if v.Unavailable {
+			return unavailableAcceptance(v.Reason, &v)
+		}
 	}
 
 	system := `You are a strict acceptance-criteria reviewer. Given a task description, an acceptance_criteria string, and a result, decide whether the result demonstrably meets every part of the criteria.
@@ -854,10 +913,17 @@ One exception, and only one. A criterion asking for a fact the sources do not pu
 	}
 	user := acceptanceReviewPrompt(task.Title, desc, *task.AcceptanceCriteria, result, extraHint,
 		fetchRecord, actions)
+	if task.ExecutorVersion == 2 {
+		system = graphSystem
+		user = graphAcceptanceInput(task, result, iterationToolCalls, resultURLs, fetchedURLs)
+		if user == "" {
+			return unavailableAcceptance("graph acceptance evidence is invalid", groundingVerdict)
+		}
+	}
 
 	model := deps.Config.Models.Primary.ForRouter()
 	if model == "" {
-		return AcceptanceVerdict{Met: true, Grounding: groundingVerdict}
+		return unavailableAcceptance("acceptance model is not configured", groundingVerdict)
 	}
 
 	// Near-zero temperature is load-bearing. Without it the evaluator flips
@@ -869,33 +935,52 @@ One exception, and only one. A criterion asking for a fact the sources do not pu
 	// CompletionRequest treats Temperature=0 as "provider default" (~1.0),
 	// so we pass a small positive epsilon to mean "deterministic" without
 	// breaking the sentinel contract for the rest of the codebase.
-	resp, err := deps.LLM.Complete(ctx, core.CompletionRequest{
+	request := core.CompletionRequest{
 		Model:        model,
 		System:       system,
 		Messages:     []core.Message{{Role: "user", Content: core.NormalizeContent(user)}},
-		MaxTokens:    256,
+		MaxTokens:    4096,
 		Temperature:  0.01,
 		Effort:       deps.Config.Models.Primary.Effort,
 		ThinkingMode: deps.Config.Models.Primary.ThinkingMode,
-	})
+	}
+	var resp *core.CompletionResponse
+	var err error
+	if task.ExecutorVersion == 2 {
+		request.MaxTokens = graphAcceptanceMaxTokens
+		resp, groundingVerdict, groundingInputHash, err = completeGraphReviews(ctx, deps, task, result, docs, request, prior)
+	} else {
+		resp, err = deps.LLM.Complete(ctx, request)
+	}
 	if err != nil {
 		deps.Logger.Warn("acceptance evaluator: llm call failed", "task_id", task.ID, "error", err)
-		return AcceptanceVerdict{Met: true, Grounding: groundingVerdict}
+		return unavailableAcceptance("acceptance provider failed", groundingVerdict, err)
 	}
 
-	raw := contentToText(resp.Content)
-	body := strings.TrimSpace(raw)
-	if start := strings.Index(body, "{"); start >= 0 {
-		if end := strings.LastIndex(body, "}"); end > start {
-			body = body[start : end+1]
+	// A complete negative review already proves the candidate needs repair.
+	// A cancelled/unavailable parallel audit must not turn that actionable
+	// rejection into an infrastructure retry of the same rejected report.
+	if task.ExecutorVersion == 2 {
+		if rejected, ok := parseAcceptanceResponse(resp); ok && !rejected.Met {
+			if groundingVerdict != nil && !groundingVerdict.Unavailable {
+				rejected.Grounding = groundingVerdict
+			}
+			return rejected
 		}
 	}
+	if groundingVerdict != nil && groundingVerdict.Unavailable {
+		return unavailableAcceptance(groundingVerdict.Reason, groundingVerdict)
+	}
 
-	var v AcceptanceVerdict
-	if err := json.Unmarshal([]byte(body), &v); err != nil {
+	if resp == nil || resp.StopReason == "max_tokens" {
+		return unavailableAcceptance("acceptance returned an incomplete verdict", groundingVerdict)
+	}
+
+	v, valid := parseAcceptanceResponse(resp)
+	if !valid {
 		deps.Logger.Warn("acceptance evaluator: malformed verdict",
-			"task_id", task.ID, "raw", raw)
-		return AcceptanceVerdict{Met: true, Grounding: groundingVerdict}
+			"task_id", task.ID, "raw", contentToText(resp.Content))
+		return unavailableAcceptance("acceptance returned an invalid verdict", groundingVerdict)
 	}
 	v.Grounding = groundingVerdict
 	// Gate C veto: even when the qualitative reviewer is satisfied with
@@ -918,6 +1003,51 @@ One exception, and only one. A criterion asking for a fact the sources do not pu
 		"task_id", task.ID, "met", v.Met, "reason", v.Reason,
 		"grounding_present", groundingVerdict != nil)
 	return v
+}
+
+func parseAcceptanceResponse(resp *core.CompletionResponse) (AcceptanceVerdict, bool) {
+	if resp == nil || resp.StopReason == "max_tokens" {
+		return AcceptanceVerdict{}, false
+	}
+	body := strings.TrimSpace(contentToText(resp.Content))
+	if start := strings.Index(body, "{"); start >= 0 {
+		if end := strings.LastIndex(body, "}"); end > start {
+			body = body[start : end+1]
+		}
+	}
+	var parsed struct {
+		Met    *bool  `json:"met"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil || parsed.Met == nil {
+		return AcceptanceVerdict{}, false
+	}
+	return AcceptanceVerdict{Met: *parsed.Met, Reason: parsed.Reason}, true
+}
+
+func unavailableAcceptance(reason string, grounding *GroundingVerdict, causes ...error) AcceptanceVerdict {
+	var delay time.Duration
+	if grounding != nil {
+		delay = grounding.RetryDelay
+	}
+	for _, err := range causes {
+		_, wait := core.TaskRetryPolicy(err)
+		delay = max(delay, wait)
+	}
+	return AcceptanceVerdict{Unavailable: true, Reason: "verification_unavailable: " + reason, Grounding: grounding, RetryDelay: delay}
+}
+
+// Independent-source quotas are an explicit task contract. Ordinary tasks
+// (including a comparison restricted to one catalogue) must not inherit a
+// scientific-literature review's three-domain quota.
+func taskRequiresSourceDiversity(task core.AgentTask) bool {
+	var cfg struct {
+		ResultContract struct {
+			RequireIndependentSources bool `json:"require_independent_sources"`
+		} `json:"result_contract"`
+	}
+	_ = json.Unmarshal(task.Config, &cfg)
+	return cfg.ResultContract.RequireIndependentSources
 }
 
 func contentToText(blocks []core.ContentBlock) string {

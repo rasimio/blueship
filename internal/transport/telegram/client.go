@@ -759,6 +759,19 @@ func (c *Client) sendFile(ctx context.Context, chatID, method, field, filename, 
 
 const maxTelegramMessageLength = 4096
 
+// MaxMessageLength and MaxRichMessageLength are the per-message character
+// limits of an ordinary and a Rich Message.
+const (
+	MaxMessageLength     = maxTelegramMessageLength
+	MaxRichMessageLength = maxTelegramRichChunkLength
+)
+
+// SplitMessage cuts text into ordinary-message parts at paragraph or line
+// breaks.
+func SplitMessage(text string) []string {
+	return splitMessage(text, maxTelegramMessageLength)
+}
+
 // SendLong sends a long text message, splitting into chunks if needed.
 func (c *Client) SendLong(ctx context.Context, chatID int64, text string) error {
 	if len([]rune(text)) <= maxTelegramMessageLength {

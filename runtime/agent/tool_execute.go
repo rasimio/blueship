@@ -44,7 +44,23 @@ func resolveToolExecutionTimeout(override time.Duration, name string) time.Durat
 }
 
 func executeToolWithTimeout(ctx context.Context, registry *bs.ToolRegistry, name string, input json.RawMessage, timeout time.Duration) (string, bool, bool) {
+	return executeToolWithTimeoutObserved(ctx, registry, name, input, timeout, nil)
+}
+
+// finished tracks the actual handler lifetime, including cancellation cleanup
+// after the timeout wrapper has already returned a result.
+func executeToolWithTimeoutObserved(ctx context.Context, registry *bs.ToolRegistry, name string, input json.RawMessage, timeout time.Duration, finished func()) (string, bool, bool) {
+	complete := func() {
+		if finished != nil {
+			finished()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		complete()
+		return err.Error(), true, true
+	}
 	if timeout <= 0 {
+		defer complete()
 		output, isError := registry.Execute(ctx, name, input)
 		return output, isError, false
 	}
@@ -54,6 +70,7 @@ func executeToolWithTimeout(ctx context.Context, registry *bs.ToolRegistry, name
 
 	done := make(chan toolExecutionResult, 1)
 	go func() {
+		defer complete()
 		output, isError := registry.Execute(toolCtx, name, input)
 		done <- toolExecutionResult{output: output, isError: isError}
 	}()

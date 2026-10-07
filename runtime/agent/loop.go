@@ -36,6 +36,8 @@ type RunConfig struct {
 	MaxTokens          int
 	ContextWindow      int
 	MaxTurns           int
+	// ToolsDeadline stops external work while leaving the parent budget for synthesis.
+	ToolsDeadline time.Time
 	// ReplyToMessageID, when non-empty, is stamped on the user
 	// message row at append time so the cabinet's history endpoint
 	// can render a relational reply-quote chip pointing at the
@@ -95,6 +97,8 @@ type RunConfig struct {
 	// StrictTools prevents dispatch of any tool outside the concrete tool
 	// definitions sent for this turn. It also disables toolbox expansion.
 	StrictTools bool
+	// ParallelReadTools opts into bounded all-read tool batches. Mutations stay sequential.
+	ParallelReadTools int
 	// TurnPolicyActive bypasses any optional interaction-tier answer pass so
 	// mandatory evidence and the resolved Cortex tool contract cannot be
 	// silently skipped by a faster model.
@@ -163,6 +167,10 @@ type RunConfig struct {
 	// OnTiming receives per-component latency spans for observability. It must
 	// not affect loop behavior; callers may leave it nil.
 	OnTiming func(bs.TimingSpan)
+	// OnCheckpoint persists a recoverable snapshot before and after tool
+	// execution. An error stops the run before another external action. The
+	// callback runs synchronously on a bounded context that survives cancellation.
+	OnCheckpoint func(context.Context, RunCheckpoint) error
 	// ToolTimeout caps a single tool execution. Zero uses per-tool defaults.
 	ToolTimeout time.Duration
 	// MaxToolTurns bounds tool-using rounds before one final text-only round.
@@ -199,12 +207,17 @@ func (a *Loop) SetCompactor(c *Compactor) {
 
 // ToolTrace records a single tool invocation during the agent loop.
 type ToolTrace struct {
-	Name    string                  `json:"name"`
-	BlockID string                  `json:"block_id,omitempty"`
-	Input   string                  `json:"input"`
-	Output  string                  `json:"output,omitempty"`
-	Error   bool                    `json:"error,omitempty"`
-	Receipt *bs.ToolExecutionResult `json:"-"`
+	// Attempt timing excludes queue admission and model/checkpoint processing.
+	// A timeout measures when observation stopped, not a late handler's lifetime.
+	StartedAt  *time.Time              `json:"started_at,omitempty"`
+	DurationMs int                     `json:"duration_ms,omitempty"`
+	TimedOut   bool                    `json:"timed_out,omitempty"`
+	Name       string                  `json:"name"`
+	BlockID    string                  `json:"block_id,omitempty"`
+	Input      string                  `json:"input"`
+	Output     string                  `json:"output,omitempty"`
+	Error      bool                    `json:"error,omitempty"`
+	Receipt    *bs.ToolExecutionResult `json:"-"`
 }
 
 // RunResult extends the text response with tool execution trace.
@@ -212,6 +225,17 @@ type RunResult struct {
 	Text       string
 	ToolTraces []ToolTrace
 	Outcome    RunOutcome
+}
+
+// RunCheckpoint distinguishes a proposed action from a completed receipt.
+// PendingTool is set before dispatch and cleared after its receipt is saved;
+// recovery must reconcile an unresolved action instead of blindly replaying it.
+type RunCheckpoint struct {
+	SessionID   string
+	Phase       string
+	Text        string
+	ToolTraces  []ToolTrace
+	PendingTool *bs.ContentBlock
 }
 
 // durableUserContent returns the transport-visible envelope written to

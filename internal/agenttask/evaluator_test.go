@@ -476,6 +476,11 @@ func TestParseGroundingResponse(t *testing.T) {
 		wantClaims int
 		wantErr    bool
 	}{
+		{name: "only outer brace omitted", raw: `{"claims":[{"claim":"x","claim_type":"numerical","status":"ungrounded","issue":"wrong value","claim_type_note":""}]`, wantClaims: 1},
+		{name: "claim incomplete", raw: `{"claims":[{"claim":"x","status":"grounded"`, wantErr: true},
+		{name: "array incomplete", raw: `{"claims":[{"claim":"x","status":"grounded"}`, wantErr: true},
+		{name: "string incomplete", raw: `{"claims":[{"claim":"x]`, wantErr: true},
+		{name: "unknown recovered field", raw: `{"extra":true,"claims":[{"claim":"x"}]`, wantErr: true},
 		{
 			name: "clean json",
 			raw: `{"claims": [

@@ -806,19 +806,39 @@ func (g *Gateway) runHostCommand(ctx context.Context, bi *botInstance, tgChatID,
 		}
 	}
 
+	g.renderHostCommand(ctx, bi, tgChatID, 0, name, result)
+}
+
+func (g *Gateway) renderHostCommand(ctx context.Context, bi *botInstance, tgChatID int64, editID int, name string, result bs.BotCommandResult) {
+	if result.Document != nil {
+		doc := result.Document
+		if _, err := bi.client.SendDocument(ctx, fmt.Sprintf("%d", tgChatID), doc.Name, doc.MIME, doc.Data); err != nil {
+			g.logger.Warn("gateway: host command document failed", "command", name, "error", err)
+			return
+		}
+	}
+
 	if strings.TrimSpace(result.Text) == "" {
 		return
 	}
-	if len(result.Buttons) == 0 && (result.ButtonURL == "" || result.ButtonLabel == "") {
+	if editID == 0 && len(result.Buttons) == 0 && (result.ButtonURL == "" || result.ButtonLabel == "") {
 		g.sendOnboardingText(ctx, bi, tgChatID, result.Text)
 		return
 	}
-	rows := [][]telegram.InlineKeyboardButton{{
-		{Text: result.ButtonLabel, URL: result.ButtonURL},
-	}}
+	var rows [][]telegram.InlineKeyboardButton
+	if result.ButtonLabel != "" && result.ButtonURL != "" {
+		rows = append(rows, []telegram.InlineKeyboardButton{{Text: result.ButtonLabel, URL: result.ButtonURL}})
+	}
 	if len(result.Buttons) > 0 {
 		rows = rows[:0]
 		for _, b := range result.Buttons {
+			if b.Command != "" {
+				data := hostCallbackPrefix + b.Command + ":" + b.Args
+				if len(data) <= 64 && b.Label != "" && g.isHostCallbackCommand(b.Command) {
+					rows = append(rows, []telegram.InlineKeyboardButton{{Text: b.Label, CallbackData: data}})
+				}
+				continue
+			}
 			url := b.URL
 			if b.Invoice != nil {
 				link, err := bi.client.CreateInvoiceLink(ctx, telegram.InvoiceRequest{
@@ -848,6 +868,12 @@ func (g *Gateway) runHostCommand(ctx context.Context, bi *botInstance, tgChatID,
 		// Every button failed to build. The text alone still says
 		// something useful; a keyboard-less message beats none.
 		g.sendOnboardingText(ctx, bi, tgChatID, result.Text)
+		return
+	}
+	if editID != 0 {
+		if err := bi.client.EditMessageText(ctx, tgChatID, editID, result.Text, rows); err != nil && !strings.Contains(err.Error(), "message is not modified") {
+			g.logger.Warn("gateway: host command refresh failed", "command", name, "error", err)
+		}
 		return
 	}
 	res, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, result.Text, rows)
@@ -1144,6 +1170,9 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 			return
 		}
 		bi.client.AnswerCallbackQuery(ctx, cq.ID)
+		if g.maybeHandleHostCallback(ctx, bi, cq) {
+			return
+		}
 		// Menu taps first: they are pure navigation and must not fall
 		// through to a flow that reads them as an answer to a question.
 		if g.maybeHandleMenuCallback(ctx, bi, cq) {

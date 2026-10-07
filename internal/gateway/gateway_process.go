@@ -772,6 +772,9 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	// requester directly when status changes, instead of broadcasting
 	// through fleet peers).
 	ctx = bs.ContextWithChatID(ctx, us.ChatID)
+	if us.bot != nil && strings.HasPrefix(us.ChatID, "telegram:") {
+		ctx = bs.ContextWithTaskOrigin(ctx, bs.TaskOrigin{Transport: "telegram", BotID: us.bot.id, ChatID: strings.TrimPrefix(us.ChatID, "telegram:")})
+	}
 
 	// Re-attach the soul. The Telegram path reaches here via a debouncer
 	// goroutine whose ctx was captured at debouncer-creation time —

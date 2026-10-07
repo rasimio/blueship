@@ -3,10 +3,8 @@
 // Search — run a query through Google with a DuckDuckGo fallback when
 // Google serves a CAPTCHA.
 //
-// Both helpers spin up a fresh browser process per call. Cold start is
-// ~1-2s; we accept the cost in exchange for a simpler model — no shared
-// browser state between unrelated turns, no cookie carryover that could
-// poison the next search.
+// Fetch first tries bounded direct HTTP extraction for substantial static
+// articles; dynamic pages and search use isolated browser contexts.
 //
 // Network: Chrome runs direct by default. A caller may pass an explicit
 // per-call Proxy override, but ambient HTTP_PROXY / HTTPS_PROXY env vars
@@ -30,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 )
 
@@ -80,7 +79,17 @@ type FetchOptions struct {
 }
 
 // FetchResult is the structured return value for Fetch.
+type PageLink struct {
+	URL  string `json:"url"`
+	Text string `json:"text"`
+}
+
 type FetchResult struct {
+	// ObservedAt records source retrieval, not a later read of a cached window.
+	ObservedAt        *time.Time `json:"observed_at,omitempty"`
+	LinksLimitReached bool       `json:"links_limit_reached,omitempty"`
+	Links             []PageLink `json:"links,omitempty"`
+	SourceTruncated   bool       `json:"source_truncated,omitempty"`
 	// RequestedURL is exactly what the caller passed in — preserved
 	// separately from URL because we rewrite preprint /abs/ URLs to
 	// /pdf/ before fetch (so the PDF decoder gets the full paper instead
@@ -282,14 +291,21 @@ func Fetch(ctx context.Context, opts FetchOptions) (*FetchResult, error) {
 		// HTML at .pdf, chromedp will handle).
 	}
 
+	if opts.WaitMS <= 0 && (proxy == "" || proxy == "-") {
+		if result, ok := fetchStaticHTML(ctx, opts.URL, staticHTMLClient); ok {
+			result.RequestedURL = requestedURL
+			return result, nil
+		}
+	}
+
 	wait := opts.WaitMS
 	if wait <= 0 {
 		wait = 3000
 	}
-	allocCtx, allocCancel := allocator(ctx, proxy)
-	defer allocCancel()
-
-	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
+	browserCtx, browserCancel, err := browserContext(ctx, proxy)
+	if err != nil {
+		return nil, err
+	}
 	defer browserCancel()
 
 	// Hard cap on the whole fetch — browser quirks shouldn't hang the
@@ -310,12 +326,17 @@ func Fetch(ctx context.Context, opts FetchOptions) (*FetchResult, error) {
 	}
 
 	tasks := chromedp.Tasks{
-		chromedp.Navigate(opts.URL),
+		navigateDocument(opts.URL),
 		chromedp.Sleep(time.Duration(wait) * time.Millisecond),
 		chromedp.Title(&out.Title),
-		chromedp.Evaluate(`document.body ? document.body.innerText.slice(0, 10000) : ""`, &out.Text),
+		chromedp.Location(&out.URL),
+		chromedp.Evaluate(pageLinksJS, &out.Links),
+		chromedp.Evaluate(`document.body ? document.body.innerText.slice(0, 500000) : ""`, &out.Text),
+		chromedp.Evaluate(`document.body ? document.body.innerText.length > 500000 : false`, &out.SourceTruncated),
 	}
-	if err := chromedp.Run(browserCtx, tasks); err != nil {
+	err = chromedp.Run(browserCtx, tasks)
+	out.LinksLimitReached = len(out.Links) >= 1000
+	if err != nil {
 		// Partial failure — surface what we got but flag the error so
 		// cortex can decide whether to retry.
 		out.PartialError = err.Error()
@@ -353,13 +374,17 @@ func Search(ctx context.Context, opts SearchOptions) (*SearchResult, error) {
 		return nil, fmt.Errorf("unknown engine %q", engine)
 	}
 
-	allocCtx, allocCancel := allocator(ctx, proxy)
-	defer allocCancel()
-
 	var attempts []EngineAttempt
 	for _, eng := range order {
-		bctx, bcancel := chromedp.NewContext(allocCtx)
-		hctx, hcancel := context.WithTimeout(bctx, 30*time.Second)
+		bctx, bcancel, contextErr := browserContext(ctx, proxy)
+		if contextErr != nil {
+			return nil, contextErr
+		}
+		attemptBudget := 30 * time.Second
+		if len(order) > 1 {
+			attemptBudget = 15 * time.Second
+		}
+		hctx, hcancel := context.WithTimeout(bctx, attemptBudget)
 
 		var (
 			items []SearchResultItem
@@ -415,7 +440,7 @@ func runGoogle(ctx context.Context, query string, limit int) ([]SearchResultItem
 		raw      json.RawMessage
 	)
 	tasks := chromedp.Tasks{
-		chromedp.Navigate(target),
+		navigateDocument(target),
 		chromedp.Sleep(900 * time.Millisecond),
 		chromedp.Location(&curURL),
 		chromedp.Evaluate(`document.body ? document.body.innerText.slice(0, 4000) : ""`, &bodyText),
@@ -533,7 +558,7 @@ func runDDG(ctx context.Context, query string, limit int) ([]SearchResultItem, e
 	target := "https://html.duckduckgo.com/html/?q=" + url.QueryEscape(query)
 	var raw json.RawMessage
 	tasks := chromedp.Tasks{
-		chromedp.Navigate(target),
+		navigateDocument(target),
 		chromedp.Sleep(400 * time.Millisecond),
 		chromedp.Evaluate(ddgExtractJS(limit), &raw),
 	}
@@ -689,4 +714,40 @@ func RewriteAbstractToPDF(rawURL string) string {
 		return u.String()
 	}
 	return rawURL
+}
+
+// Navigate waits for DOM readiness rather than the load event, which can be
+// held indefinitely by advertising, analytics or an unrelated slow image.
+// The caller retains its configured render wait for client-side content.
+func navigateDocument(target string) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		listenerCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		ready := make(chan struct{}, 1)
+		chromedp.ListenTarget(listenerCtx, func(event any) {
+			if _, ok := event.(*page.EventDomContentEventFired); ok {
+				select {
+				case ready <- struct{}{}:
+				default:
+				}
+			}
+		})
+		_, loader, failure, _, err := page.Navigate(target).Do(ctx)
+		if err != nil {
+			return err
+		}
+		if failure != "" {
+			return fmt.Errorf("navigation failed: %s", failure)
+		}
+		// Same-document navigation has no new DOMContentLoaded event.
+		if loader == "" {
+			return nil
+		}
+		select {
+		case <-ready:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
 }

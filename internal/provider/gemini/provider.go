@@ -118,6 +118,9 @@ type generateResponse struct {
 
 // Complete sends a completion request to Gemini with retry on 429/503.
 func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
+	if bs.DeferredProviderRetries(ctx) {
+		return p.sendOnce(ctx, req)
+	}
 	var lastErr error
 	for attempt := 0; attempt <= len(p.backoffs); attempt++ {
 		resp, err := p.sendOnce(ctx, req)
@@ -196,12 +199,15 @@ func (p *CompletionProvider) sendOnce(ctx context.Context, req bs.CompletionRequ
 	if err != nil {
 		// Strip API key from error messages
 		errStr := strings.ReplaceAll(err.Error(), p.apiKey, "***")
-		return nil, fmt.Errorf("gemini request: %s", errStr)
+		return nil, fmt.Errorf("gemini request: %w", &redactedTransportError{message: errStr, cause: err})
 	}
 	defer resp.Body.Close()
 
 	var result generateResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		if resp.StatusCode != http.StatusOK {
+			return nil, bs.NewHTTPFailure(resp.StatusCode, resp.Header.Get("Retry-After"), fmt.Errorf("gemini API returned %d: decode response: %w", resp.StatusCode, err))
+		}
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -209,7 +215,7 @@ func (p *CompletionProvider) sendOnce(ctx context.Context, req bs.CompletionRequ
 		if result.Error != nil {
 			msg += ": " + result.Error.Message
 		}
-		return nil, fmt.Errorf("%s", msg)
+		return nil, bs.NewHTTPFailure(resp.StatusCode, resp.Header.Get("Retry-After"), fmt.Errorf("%s", msg))
 	}
 	if len(result.Candidates) == 0 {
 		return nil, fmt.Errorf("gemini returned empty candidates")
@@ -288,7 +294,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 	resp, err := streamClient.Do(httpReq)
 	if err != nil {
 		errStr := strings.ReplaceAll(err.Error(), p.apiKey, "***")
-		return nil, fmt.Errorf("gemini stream request: %s", errStr)
+		return nil, fmt.Errorf("gemini stream request: %w", &redactedTransportError{message: errStr, cause: err})
 	}
 	defer resp.Body.Close()
 
@@ -299,7 +305,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		if errResp.Error != nil {
 			msg += ": " + errResp.Error.Message
 		}
-		return nil, fmt.Errorf("%s", msg)
+		return nil, bs.NewHTTPFailure(resp.StatusCode, resp.Header.Get("Retry-After"), fmt.Errorf("%s", msg))
 	}
 
 	// Parse SSE stream
@@ -647,3 +653,13 @@ func mapStopReason(reason string) string {
 		return "end_turn"
 	}
 }
+
+// Preserve transport classification while keeping credentials out of displayed
+// errors. Scheduler retry policy must still recognize timeouts and cancellation.
+type redactedTransportError struct {
+	message string
+	cause   error
+}
+
+func (e *redactedTransportError) Error() string { return e.message }
+func (e *redactedTransportError) Unwrap() error { return e.cause }

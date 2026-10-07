@@ -19,6 +19,17 @@ type UIStrings struct {
 	TaskProgressQueuedFmt  string
 	TaskProgressRunningFmt string
 	TaskDeadlineFmt        string
+	TaskPartialFmt         string
+	// TaskReadyFmt heads the report notification (title as %s); the report
+	// itself opens from TaskReportButton under it.
+	TaskReadyFmt     string
+	TaskReportButton string
+	// UnverifiedDraftFmt takes step goal, saved draft and review feedback.
+	UnverifiedDraftFmt    string
+	TaskStoppedEmptyFmt   string
+	TaskEmptyResultFmt    string
+	TaskFailureEmptyFmt   string
+	TaskCancelledEmptyFmt string
 	// ModelRefused is shown to the user when the model declines to answer
 	// and produced no text (so the turn isn't silent).
 	ModelRefused string
@@ -81,6 +92,9 @@ type UIStrings struct {
 }
 
 func (u *UIStrings) applyDefaults() {
+	if u.UnverifiedDraftFmt == "" {
+		u.UnverifiedDraftFmt = "Unverified research draft — %s\n%s\nUnresolved review: %s"
+	}
 	if u.TaskProgressQueuedFmt == "" {
 		u.TaskProgressQueuedFmt = "Task %s is still waiting to run. There is no completed result yet."
 	}
@@ -89,6 +103,28 @@ func (u *UIStrings) applyDefaults() {
 	}
 	if u.TaskDeadlineFmt == "" {
 		u.TaskDeadlineFmt = "Task %s reached its time limit and has stopped. A completed result is not available."
+	}
+	if u.TaskPartialFmt == "" {
+		u.TaskPartialFmt = "Task %s has stopped. The collected draft is saved; it is partial and has not passed final verification. Open /status %s to read it."
+	}
+	if u.TaskReadyFmt == "" {
+		u.TaskReadyFmt = "Done: %s"
+	}
+	if u.TaskReportButton == "" {
+		u.TaskReportButton = "Open report"
+	}
+	if u.TaskCancelledEmptyFmt == "" {
+		u.TaskCancelledEmptyFmt = "Task %s was cancelled before a result was available."
+	}
+	if u.TaskFailureEmptyFmt == "" {
+		u.TaskFailureEmptyFmt = "Task %s stopped before producing a usable result. The failure is recorded in its status."
+	}
+	if u.TaskEmptyResultFmt == "" {
+		u.TaskEmptyResultFmt = "Task %s stopped because the executor returned no usable result."
+	}
+
+	if u.TaskStoppedEmptyFmt == "" {
+		u.TaskStoppedEmptyFmt = "Task %s stopped before producing a usable result. The execution budget was exhausted."
 	}
 	if u.ModelRefused == "" {
 		u.ModelRefused = "(the model declined to answer this request — rephrase / simplify the context)"
@@ -208,7 +244,14 @@ type BotCommandRequest struct {
 // BotCommandResult is what the host wants said back. Text is required;
 // ButtonURL adds a single link button under it, which is how a host
 // hands over something the chat cannot render itself.
+type BotCommandDocument struct {
+	Name string
+	MIME string
+	Data []byte
+}
+
 type BotCommandResult struct {
+	Document    *BotCommandDocument
 	Text        string
 	ButtonLabel string
 	ButtonURL   string
@@ -234,8 +277,11 @@ type BotCommandResult struct {
 
 // BotCommandButton is one link under a host command's reply.
 type BotCommandButton struct {
-	Label string
-	URL   string
+	// Command and Args invoke a registered host command in the tapping user scope.
+	Command string
+	Args    string
+	Label   string
+	URL     string
 
 	// Invoice, when set, makes this a payment button: the transport
 	// creates the invoice with its own credentials and uses the
@@ -620,4 +666,11 @@ func (m *OnboardingMessages) applyDefaults() {
 	d(&m.OfferLater, "No problem. Send /persona whenever you feel like it.")
 	d(&m.ErrPersonaFail, "Something went wrong saving that. Nothing was changed — try again.")
 	d(&m.ErrNoPersona, "Personalising isn't available here yet.")
+}
+
+// TaskCancellationExplanation also supports tool registries constructed without
+// a runtime Config, where the normal startup defaults have not run.
+func (u UIStrings) TaskCancellationExplanation(title string) string {
+	u.applyDefaults()
+	return fmt.Sprintf(u.TaskCancelledEmptyFmt, title)
 }

@@ -11,10 +11,29 @@ import (
 const DefaultTaskWallTimeout = 30 * time.Minute
 const TaskDeadlineExceeded = "wall_clock_deadline_exceeded"
 
+// TaskRunsToCompletion reports graph (v2) one-shot tasks. They have no
+// wall-clock stop: plan size, step attempts and repair rounds bound their
+// work, and /status shows an estimate instead of a limit.
+func TaskRunsToCompletion(task AgentTask) bool {
+	return task.ExecutorVersion == 2 && task.Schedule == nil && task.Cadence == nil && task.Strategy != StrategyRecurring
+}
+
+// TaskStopDeadline is the enforced wall-clock stop, nil for tasks that run to
+// completion even when an older host stored a deadline for them.
+func TaskStopDeadline(task AgentTask) *time.Time {
+	if TaskRunsToCompletion(task) {
+		return nil
+	}
+	return task.Deadline
+}
+
 // TaskWallDeadline is an absolute budget, including queueing and pauses. A
 // deliberate start_at moves the start of the budget, but retries and restarts
 // never do. Periodic monitors and recurring jobs keep their own lifecycle.
 func TaskWallDeadline(task AgentTask, now time.Time, limit time.Duration) *time.Time {
+	if TaskRunsToCompletion(task) {
+		return nil
+	}
 	if task.Schedule != nil || task.Cadence != nil || task.Strategy == StrategyRecurring {
 		return task.Deadline
 	}
@@ -50,18 +69,18 @@ func (s *AgentTaskStore) DeadlineTasks(ctx context.Context) ([]AgentTask, error)
 	var tasks []AgentTask
 	err := s.db.SelectContext(ctx, &tasks, `
 		SELECT t.* FROM agent_tasks t
-		WHERE (t.status IN ('pending', 'running', 'paused') AND
+		WHERE t.executor_version = 1 AND ((t.status IN ('pending', 'running', 'paused') AND
 		       (t.deadline IS NOT NULL OR (t.schedule IS NULL AND t.cadence IS NULL AND t.strategy <> 'recurring')))
 		   OR (t.status = 'failed' AND t.error_message = $1 AND NOT EXISTS (
 		       SELECT 1 FROM agent_task_notification_attempt_items n
-		       WHERE n.task_id = t.id AND n.input_id = 'task_lifecycle' AND n.item_key = 'deadline'))
+		       WHERE n.task_id = t.id AND ((n.input_id = 'task_lifecycle' AND n.item_key = 'deadline') OR n.input_id = 'task_result'))))
 		ORDER BY t.created_at`, TaskDeadlineExceeded)
 	return tasks, err
 }
 
 func (s *AgentTaskStore) SetTaskDeadline(ctx context.Context, id uuid.UUID, deadline time.Time) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE agent_tasks SET deadline = $2
-		WHERE id = $1 AND status IN ('pending', 'running', 'paused')
+		WHERE executor_version = 1 AND id = $1 AND status IN ('pending', 'running', 'paused')
 		  AND (deadline IS NULL OR deadline > $2)`, id, deadline)
 	return err
 }
@@ -70,7 +89,7 @@ func (s *AgentTaskStore) SetTaskDeadline(ctx context.Context, id uuid.UUID, dead
 func (s *AgentTaskStore) ExpireTask(ctx context.Context, id uuid.UUID, now time.Time) (bool, error) {
 	result, err := s.db.ExecContext(ctx, `UPDATE agent_tasks
 		SET status = 'failed', error_message = $3, completed_at = $2
-		WHERE id = $1 AND status IN ('pending', 'running', 'paused') AND deadline <= $2`, id, now, TaskDeadlineExceeded)
+		WHERE executor_version = 1 AND id = $1 AND status IN ('pending', 'running', 'paused') AND deadline <= $2`, id, now, TaskDeadlineExceeded)
 	if err != nil {
 		return false, err
 	}

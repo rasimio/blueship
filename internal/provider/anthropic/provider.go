@@ -118,6 +118,9 @@ func (p *Provider) retireRejectedToken(err error) bool {
 }
 
 func (p *Provider) complete(ctx context.Context, req bs.CompletionRequest) (*bs.CompletionResponse, error) {
+	if bs.DeferredProviderRetries(ctx) {
+		return p.sendOnce(ctx, req)
+	}
 	var lastErr error
 	for attempt := 0; attempt <= len(p.backoffs); attempt++ {
 		resp, err := p.sendOnce(ctx, req)
@@ -359,7 +362,7 @@ func (p *Provider) sendOnce(ctx context.Context, req bs.CompletionRequest) (*bs.
 		return nil, fmt.Errorf("%w: anthropic API status %d: %s", errUnauthorized, resp.StatusCode, respBody)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("anthropic API status %d: %s", resp.StatusCode, respBody)
+		return nil, bs.NewHTTPFailure(resp.StatusCode, resp.Header.Get("Retry-After"), fmt.Errorf("anthropic API status %d: %s", resp.StatusCode, respBody))
 	}
 
 	var apiResp apiResponse

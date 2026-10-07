@@ -52,3 +52,39 @@ func TestTaskWallDeadlineDelayedExplicitAndRecurring(t *testing.T) {
 		t.Fatal("heartbeat was capped")
 	}
 }
+
+func TestGraphOneShotTasksRunToCompletion(t *testing.T) {
+	now := time.Now()
+	stored := now.Add(-time.Minute)
+	oneShot := AgentTask{ExecutorVersion: 2, Strategy: StrategyDirect, CreatedAt: now.Add(-time.Hour), Deadline: &stored}
+	if !TaskRunsToCompletion(oneShot) || TaskStopDeadline(oneShot) != nil || TaskWallDeadline(oneShot, now, time.Minute) != nil || TaskResearchDeadline(oneShot, time.Minute) != nil {
+		t.Fatal("one-shot graph task still has a wall-clock stop")
+	}
+	legacy := oneShot
+	legacy.ExecutorVersion = 1
+	if TaskRunsToCompletion(legacy) || TaskStopDeadline(legacy) == nil || TaskWallDeadline(legacy, now, time.Minute) == nil {
+		t.Fatal("legacy task lost its limit")
+	}
+	recurring := oneShot
+	recurring.Strategy = StrategyRecurring
+	if TaskRunsToCompletion(recurring) || TaskStopDeadline(recurring) == nil {
+		t.Fatal("recurring task lost its limit")
+	}
+}
+
+func TestGraphReportIsDoneEvenWithLimitations(t *testing.T) {
+	oneShot := AgentTask{ExecutorVersion: 2, Strategy: StrategyDirect}
+	legacy := AgentTask{ExecutorVersion: 1, Strategy: StrategyDirect}
+	for _, tc := range []struct {
+		task    AgentTask
+		outcome string
+		want    string
+	}{
+		{oneShot, "completed", "done"}, {oneShot, "partial", "done"}, {oneShot, "blocked", "failed"}, {oneShot, "cancelled", "canceled"},
+		{legacy, "partial", "failed"}, {legacy, "completed", "done"},
+	} {
+		if got := TaskTerminalStatus(tc.task, tc.outcome); got != tc.want {
+			t.Fatalf("v%d %s: %s", tc.task.ExecutorVersion, tc.outcome, got)
+		}
+	}
+}

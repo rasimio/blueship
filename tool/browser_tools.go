@@ -85,21 +85,51 @@ func RegisterBrowserTools(r *bs.ToolRegistry, deps *bs.Deps) error {
 			"type":"object",
 			"properties":{
 				"url":{"type":"string","description":"Absolute URL to fetch (HTML or PDF)"},
-				"wait_ms":{"type":"integer","default":3000,"description":"HTML render wait after navigation, ms (ignored for PDFs)"}
+				"wait_ms":{"type":"integer","default":3000,"description":"HTML render wait after navigation, ms (ignored for PDFs)"},
+				"links_query":{"type":"string","description":"Filter observed page links by case-insensitive URL or label text before paging, without a new search or download"},
+				"links_offset":{"type":"integer","minimum":0,"description":"Read observed page links starting at this index; use next_links_offset for more links from the cached source"},
+				"offset_chars":{"type":"integer","minimum":0,"description":"Read from this character offset; use next_offset_chars to continue a long source"},
+				"limit_chars":{"type":"integer","minimum":1,"maximum":20000,"description":"Maximum characters returned; default 4000 for background tasks, 10000 in chat"},
+				"query":{"type":"string","description":"Find this exact case-insensitive phrase at or after offset_chars and return its surrounding passage"},
+				"queries":{"type":"array","maxItems":6,"items":{"type":"string","maxLength":160},"description":"Find up to six distinct exact phrases in the same source in one call; query_excerpts share limit_chars. Mutually exclusive with query. Use for multiple required attributes before opening another source."}
 			},
 			"required":["url"]
 		}`),
 		func(ctx context.Context, input json.RawMessage) (any, error) {
 			var p struct {
-				URL    string `json:"url"`
-				WaitMS int    `json:"wait_ms"`
+				LinksQuery  string   `json:"links_query"`
+				LinksOffset int      `json:"links_offset"`
+				URL         string   `json:"url"`
+				WaitMS      int      `json:"wait_ms"`
+				Offset      int      `json:"offset_chars"`
+				Limit       int      `json:"limit_chars"`
+				Query       string   `json:"query"`
+				Queries     []string `json:"queries"`
 			}
 			if err := json.Unmarshal(input, &p); err != nil {
 				return nil, err
 			}
+			if err := validateBrowserQueries(p.Query, p.Queries); err != nil {
+				return nil, err
+			}
+			if len(p.Queries) > 0 && p.Limit > 0 && p.Limit < len(p.Queries) {
+				return nil, fmt.Errorf("limit_chars must allow at least one character per query")
+			}
+			// Keep multi-source research turns small; the complete document
+			// remains saved and query/offset can retrieve any later passage.
+			if taskID, ok := bs.TaskIDFromContext(ctx); ok && taskID != uuid.Nil && p.Limit <= 0 {
+				p.Limit = 4000
+			}
+			release, err := backgroundFetchGate.acquire(ctx, p.URL)
+			if err != nil {
+				return nil, err
+			}
+			defer release()
 			if res := replayTaskFetch(ctx, deps, p.URL); res != nil {
-				persistBrowserFetchOutput(ctx, deps, input, res)
-				return res, nil
+				excerpt := excerptBrowserFetchQueries(res, p.Offset, p.Limit, p.Query, p.Queries)
+				excerptBrowserLinks(&excerpt, filterBrowserLinks(res.Links, p.LinksQuery), p.LinksOffset)
+				persistBrowserFetchWindow(ctx, deps, input, res, excerpt.Offset, browserQueryReadOffsets(excerpt)...)
+				return excerpt, nil
 			}
 			res, err := browser.Fetch(ctx, browser.FetchOptions{
 				URL:    p.URL,
@@ -108,12 +138,49 @@ func RegisterBrowserTools(r *bs.ToolRegistry, deps *bs.Deps) error {
 			if err != nil {
 				return nil, fmt.Errorf("browser_fetch: %w", err)
 			}
-			persistBrowserFetchOutput(ctx, deps, input, res)
-			return res, nil
+			observedAt := time.Now().UTC()
+			res.ObservedAt = &observedAt
+			excerpt := excerptBrowserFetchQueries(res, p.Offset, p.Limit, p.Query, p.Queries)
+			excerptBrowserLinks(&excerpt, filterBrowserLinks(res.Links, p.LinksQuery), p.LinksOffset)
+			persistBrowserFetchWindow(ctx, deps, input, res, excerpt.Offset, browserQueryReadOffsets(excerpt)...)
+			return excerpt, nil
 		},
 	)
 
-	return nil
+	if err := r.MarkReadOnly(ToolBrowserSearch, ToolBrowserFetch); err != nil {
+		return err
+	}
+	return r.RegisterEvidenceReader(ToolBrowserFetch, func(ctx context.Context, input json.RawMessage) (any, error) {
+		var p struct {
+			URL         string   `json:"url"`
+			Offset      int      `json:"offset_chars"`
+			Limit       int      `json:"limit_chars"`
+			Query       string   `json:"query"`
+			Queries     []string `json:"queries"`
+			LinksQuery  string   `json:"links_query"`
+			LinksOffset int      `json:"links_offset"`
+		}
+		if err := json.Unmarshal(input, &p); err != nil {
+			return nil, err
+		}
+		if err := validateBrowserQueries(p.Query, p.Queries); err != nil {
+			return nil, err
+		}
+		if len(p.Queries) > 0 && p.Limit > 0 && p.Limit < len(p.Queries) {
+			return nil, fmt.Errorf("limit_chars must allow at least one character per query")
+		}
+		res := replayTaskFetch(ctx, deps, p.URL)
+		if res == nil {
+			return nil, fmt.Errorf("saved source unavailable; external research is closed")
+		}
+		if p.Limit <= 0 {
+			p.Limit = 4000
+		}
+		excerpt := excerptBrowserFetchQueries(res, p.Offset, p.Limit, p.Query, p.Queries)
+		excerptBrowserLinks(&excerpt, filterBrowserLinks(res.Links, p.LinksQuery), p.LinksOffset)
+		persistBrowserFetchWindow(ctx, deps, input, res, excerpt.Offset, browserQueryReadOffsets(excerpt)...)
+		return excerpt, nil
+	})
 }
 
 // taskFetchCacheTTL bounds how old a stored body may be and still answer a
@@ -158,6 +225,10 @@ func replayTaskFetch(ctx context.Context, deps *bs.Deps, url string) *browser.Fe
 		s, _ := cached.Metadata[key].(string)
 		return s
 	}
+	// Keep partial reads in the audit, but allow the next fetch to recover.
+	if metaStr("partial_error") != "" {
+		return nil
+	}
 	pageCount := 0
 	if n, okNum := cached.Metadata["page_count"].(float64); okNum {
 		pageCount = int(n)
@@ -177,14 +248,28 @@ func replayTaskFetch(ctx context.Context, deps *bs.Deps, url string) *browser.Fe
 			"age_sec", int(time.Since(cached.FetchedAt).Seconds()),
 			"chars", len(cached.Output))
 	}
+	var links []browser.PageLink
+	if raw, err := json.Marshal(cached.Metadata["links"]); err == nil {
+		_ = json.Unmarshal(raw, &links)
+	}
+	// Older source rows have only the original persistence timestamp. Never
+	// replace this with the time of a cache hit: that would invent freshness.
+	observedAt := cached.FetchedAt.UTC()
+	if recorded, err := time.Parse(time.RFC3339Nano, metaStr("observed_at")); err == nil {
+		observedAt = recorded.UTC()
+	}
 	return &browser.FetchResult{
-		RequestedURL: requested,
-		URL:          finalURL,
-		Title:        metaStr("title"),
-		Text:         cached.Output,
-		PageCount:    pageCount,
-		SourceKind:   cached.OutputFormat,
-		FromCache:    true,
+		ObservedAt:        &observedAt,
+		Links:             links,
+		LinksLimitReached: cached.Metadata["links_limit_reached"] == true,
+		SourceTruncated:   cached.Metadata["source_truncated"] == true,
+		RequestedURL:      requested,
+		URL:               finalURL,
+		Title:             metaStr("title"),
+		Text:              cached.Output,
+		PageCount:         pageCount,
+		SourceKind:        cached.OutputFormat,
+		FromCache:         true,
 	}
 }
 
@@ -194,6 +279,10 @@ func replayTaskFetch(ctx context.Context, deps *bs.Deps, url string) *browser.Fe
 // auditing, page_count for PDFs, etc.) ride in the Metadata jsonb so
 // the generic store doesn't grow typed columns per tool.
 func persistBrowserFetchOutput(ctx context.Context, deps *bs.Deps, rawInput json.RawMessage, res *browser.FetchResult) {
+	persistBrowserFetchWindow(ctx, deps, rawInput, res, 0)
+}
+
+func persistBrowserFetchWindow(ctx context.Context, deps *bs.Deps, rawInput json.RawMessage, res *browser.FetchResult, offset int, readOffsets ...int) {
 	if res == nil {
 		return
 	}
@@ -202,10 +291,17 @@ func persistBrowserFetchOutput(ctx context.Context, deps *bs.Deps, rawInput json
 		requested = res.URL
 	}
 	meta, err := json.Marshal(map[string]any{
-		"requested_url": requested,
-		"final_url":     res.URL,
-		"title":         res.Title,
-		"page_count":    res.PageCount,
+		"observed_at":         res.ObservedAt,
+		"read_offset_chars":   offset,
+		"read_offsets_chars":  readOffsets,
+		"partial_error":       res.PartialError,
+		"links":               res.Links,
+		"links_limit_reached": res.LinksLimitReached,
+		"source_truncated":    res.SourceTruncated,
+		"requested_url":       requested,
+		"final_url":           res.URL,
+		"title":               res.Title,
+		"page_count":          res.PageCount,
 		// Marks a row the cache produced. Kept out of the cache's own
 		// source query so a replay can never renew a document's age.
 		"from_cache": res.FromCache,
@@ -252,7 +348,12 @@ func persistToolOutput(ctx context.Context, deps *bs.Deps, rec bs.ToolOutputReco
 		return
 	}
 	store := bs.NewAgentTaskStore(db)
-	if err := store.RecordToolOutput(ctx, rec); err != nil && deps.Logger != nil {
+	// A fetched document is already an observed result. Preserve it even if
+	// the task deadline fired between reading the source and writing its audit.
+	// WithoutCancel retains task/owner context; the write still has a hard cap.
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	if err := store.RecordToolOutput(persistCtx, rec); err != nil && deps.Logger != nil {
 		deps.Logger.Warn("tool output persist failed",
 			"tool", rec.ToolName, "task_id", taskID,
 			"iteration", rec.Iteration, "error", err)

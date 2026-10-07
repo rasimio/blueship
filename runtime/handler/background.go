@@ -234,6 +234,16 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// a targeted repair from the preserved session + reviewer feedback.
 	isSynthesisDeadline := isLast ||
 		(reserveAcceptanceRepair && task.Iteration+2 >= task.MaxIterations)
+	researchTask := task.Schedule == nil && task.Cadence == nil && task.Strategy != core.StrategyRecurring &&
+		instructionKey == "background-task" && inputMode == "prompt_key" && !hasTaskProgram
+	var researchUntil *time.Time
+	if researchTask {
+		researchUntil = researchDeadline(task, deps.Config.Timeouts.TaskFinalizeReserve)
+		if progress.Phase == "finalizing" || (progress.Plan != nil && progress.Plan.pendingCount() == 0) ||
+			(researchUntil != nil && !time.Now().Before(*researchUntil)) {
+			isSynthesisDeadline = true
+		}
+	}
 
 	// planActive: a multi-iteration research-style task (default background-task
 	// flow, ≥4 iterations so plan + execution + finalization fits) with the
@@ -529,6 +539,33 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		defer deps.Store.ArchiveSession(context.Background(), sessID)
 	}
 
+	saveCheckpoint := func(cpCtx context.Context, cp agent.RunCheckpoint) error {
+		if deps.SaveCheckpoint == nil {
+			return nil
+		}
+		progressJSON, _ := json.Marshal(progress)
+		tracesJSON, _ := json.Marshal(cp.ToolTraces)
+		receipts := make([]core.ToolExecutionResult, 0, len(cp.ToolTraces))
+		for _, trace := range cp.ToolTraces {
+			if trace.Receipt != nil {
+				receipts = append(receipts, *trace.Receipt)
+			}
+		}
+		receiptsJSON, _ := json.Marshal(receipts)
+		var pending json.RawMessage
+		if cp.PendingTool != nil {
+			pending, _ = json.Marshal(cp.PendingTool)
+		}
+		return deps.SaveCheckpoint(cpCtx, core.TaskCheckpoint{
+			SessionID: sessID, Phase: cp.Phase, Progress: progressJSON,
+			Output:    stripEvidenceMarkers(stripPlanMarkers(scratchpadRE.ReplaceAllString(cp.Text, ""))),
+			ToolCalls: tracesJSON, Receipts: receiptsJSON, PendingTool: pending,
+		})
+	}
+	if err := saveCheckpoint(ctx, agent.RunCheckpoint{SessionID: sessID, Phase: "session_ready"}); err != nil {
+		return core.IterationResult{}, fmt.Errorf("checkpoint session: %w", err)
+	}
+
 	// 5. Build user message based on iteration phase
 	desc := ""
 	if task.Description != nil {
@@ -753,7 +790,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 	// next reflection. With skip_reflex the agent gets a clean prompt and
 	// tools; any context it needs it must pull through the tools itself.
 	var injectedCtx string
-	if !skipReflex {
+	if researchTask && progress.ContextPrepared {
+		injectedCtx = progress.ContextSnapshot
+	} else if !skipReflex {
 		reflex := runReflexPipeline(ctx, deps, b.tz, sessID, msg)
 		injectedCtx = reflex.InjectedCtx
 		if reflex.Guidance != "" {
@@ -762,6 +801,9 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 			} else {
 				injectedCtx = reflex.Guidance
 			}
+		}
+		if researchTask {
+			progress.ContextSnapshot, progress.ContextPrepared = injectedCtx, true
 		}
 	}
 
@@ -780,13 +822,26 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		toolOverride = []string{}
 		maxTurns = 1
 	}
+	if researchTask && isSynthesisDeadline {
+		// The finalization reserve is for producing the deliverable. Do not
+		// let the model start another search/fetch loop in that window.
+		toolOverride = []string{}
+	}
+	runCtx := ctx
+	if researchTask && !isSynthesisDeadline && researchUntil != nil {
+		var stopResearch context.CancelFunc
+		runCtx, stopResearch = context.WithDeadline(ctx, *researchUntil)
+		defer stopResearch()
+	}
 	var initialReceipts []core.ToolExecutionResult
 	for _, trace := range preloadedTraces {
 		if trace.Receipt != nil {
 			initialReceipts = append(initialReceipts, *trace.Receipt)
 		}
 	}
-	result, err := loop.RunTracked(ctx, agent.RunConfig{
+	result, err := loop.RunTracked(runCtx, agent.RunConfig{
+		StrictTools:         researchTask && isSynthesisDeadline,
+		OnCheckpoint:        saveCheckpoint,
 		InitialToolResults:  initialReceipts,
 		TurnNow:             now,
 		SessionID:           sessID,
@@ -805,7 +860,22 @@ func (b *Background) Run(ctx context.Context, task core.AgentTask, deps core.Age
 		ThinkingMode:        roleThinkingMode,
 	}, msg)
 	if err != nil {
-		return core.IterationResult{}, fmt.Errorf("agent loop: %w", err)
+		// A failed later model call does not undo completed external actions.
+		// Keep their receipts and the session identity available to recovery.
+		softDeadline := researchTask && !isSynthesisDeadline && runCtx.Err() != nil && ctx.Err() == nil && researchUntil != nil && !time.Now().Before(*researchUntil)
+		if softDeadline {
+			progress.Phase = "finalizing"
+		}
+		progressJSON, _ := json.Marshal(progress)
+		partial := core.IterationResult{Progress: progressJSON}
+		if result != nil {
+			partial.Output = stripEvidenceMarkers(stripPlanMarkers(scratchpadRE.ReplaceAllString(result.Text, "")))
+			partial.ToolCallsJSON, _ = json.Marshal(result.ToolTraces)
+		}
+		if softDeadline {
+			return partial, nil
+		}
+		return partial, fmt.Errorf("agent loop: %w", err)
 	}
 	validationRequest.SessionID, validationRequest.UserText = sessID, msg
 	validationRequest.Tools = append(validationRequest.Tools, initialReceipts...)
@@ -1147,10 +1217,12 @@ func consumeTaskProgramDeliveryAck(text string, refs map[string]core.TaskDeliver
 // bgProgress extends TaskProgress with session management and pause state.
 type bgProgress struct {
 	core.TaskProgress
-	SessionID     string         `json:"session_id"`               // shared session across iterations
-	PeerTaskID    string         `json:"peer_task_id,omitempty"`   // async peer task being awaited
-	RevisionCount int            `json:"revision_count,omitempty"` // consecutive revisions for same peer task
-	DelegatedFrom map[string]any `json:"delegated_from,omitempty"` // preserved across iterations so the
+	ContextPrepared bool           `json:"context_prepared,omitempty"`
+	ContextSnapshot string         `json:"context_snapshot,omitempty"`
+	SessionID       string         `json:"session_id"`               // shared session across iterations
+	PeerTaskID      string         `json:"peer_task_id,omitempty"`   // async peer task being awaited
+	RevisionCount   int            `json:"revision_count,omitempty"` // consecutive revisions for same peer task
+	DelegatedFrom   map[string]any `json:"delegated_from,omitempty"` // preserved across iterations so the
 	// scheduler's terminal-status callback can route
 	// back to the originating agent.
 	Plan *RolePlan `json:"plan,omitempty"` // S2 role-assigned step plan (nil until the planner builds it)

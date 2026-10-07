@@ -10,6 +10,7 @@ import (
 // Config controls BlueShip runtime behavior.
 // All fields have sensible defaults; only LLM, Transport, and DB are required.
 type Config struct {
+	BackgroundTasks BackgroundTaskConfig
 	// --- Required ---
 	LLM        CompletionProvider // e.g. blueship.Anthropic(apiKey)
 	Transport  TransportConfig    // e.g. blueship.Telegram(botToken)
@@ -243,13 +244,14 @@ type LimitsConfig struct {
 
 // TimeoutsConfig defines timeouts for external calls.
 type TimeoutsConfig struct {
-	TaskWall       time.Duration // total one-shot lifetime, including queueing/pauses (default: 30m)
-	LLM            time.Duration // main Claude call (default: 120s)
-	Compact        time.Duration // Haiku compaction (default: 30s)
-	Embedding      time.Duration // embedding API (default: 15s)
-	Transcription  time.Duration // whisper (default: 30s)
-	TelegramClient time.Duration // telegram sends (default: 10s)
-	TelegramPoll   time.Duration // telegram long-poll (default: 35s)
+	TaskWall            time.Duration // total one-shot lifetime, including queueing/pauses (default: 30m)
+	TaskFinalizeReserve time.Duration // time reserved for a result, before the hard task deadline
+	LLM                 time.Duration // main Claude call (default: 120s)
+	Compact             time.Duration // Haiku compaction (default: 30s)
+	Embedding           time.Duration // embedding API (default: 15s)
+	Transcription       time.Duration // whisper (default: 30s)
+	TelegramClient      time.Duration // telegram sends (default: 10s)
+	TelegramPoll        time.Duration // telegram long-poll (default: 35s)
 }
 
 // RetryConfig defines retry behavior for LLM calls.

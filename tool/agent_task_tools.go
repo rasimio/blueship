@@ -83,6 +83,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 		return fmt.Errorf("agent_task tools: ship DB: %w", err)
 	}
 	store := bs.NewAgentTaskStore(db)
+	control := bs.NewTaskController(db)
 
 	// -------------------------------------------------------------------
 	// agent_task_create
@@ -242,6 +243,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 			var wallTimeout time.Duration
 			if d.Config != nil {
 				wallTimeout = d.Config.Timeouts.TaskWall
+				task.ExecutorVersion = d.Config.BackgroundTasks.ExecutorVersion(task)
 			}
 			task.Deadline = bs.TaskWallDeadline(task, time.Now(), wallTimeout)
 			created, err := store.Create(ctx, task)
@@ -249,12 +251,13 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 				return nil, fmt.Errorf("create agent_task: %w", err)
 			}
 			return map[string]any{
-				"id":             created.ID.String(),
-				"title":          created.Title,
-				"status":         created.Status,
-				"strategy":       created.Strategy,
-				"max_iterations": created.MaxIterations,
-				"deadline":       created.Deadline,
+				"executor_version": created.ExecutorVersion,
+				"id":               created.ID.String(),
+				"title":            created.Title,
+				"status":           created.Status,
+				"strategy":         created.Strategy,
+				"max_iterations":   created.MaxIterations,
+				"deadline":         created.Deadline,
 			}, nil
 		},
 	)
@@ -359,14 +362,23 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 			if raw == "" {
 				raw = p.ID
 			}
-			t, err := store.Resolve(ctx, raw)
+			t, err := store.ResolveOwned(ctx, d.UserID, bs.SoulIDFromContext(ctx), raw)
 			if err != nil {
 				return nil, fmt.Errorf("resolve task: %w", err)
 			}
-			if err := store.Cancel(ctx, t.ID); err != nil {
+			ui := bs.UIStrings{}
+			if d.Config != nil {
+				ui = d.Config.UI
+			}
+			changed, err := control.Cancel(ctx, d.UserID, bs.SoulIDFromContext(ctx), t.ID, ui.TaskCancellationExplanation(t.Title))
+			if err != nil {
 				return nil, fmt.Errorf("cancel task: %w", err)
 			}
-			return map[string]any{"id": t.ID.String(), "status": "canceled"}, nil
+			current, err := store.ResolveOwned(ctx, d.UserID, bs.SoulIDFromContext(ctx), t.ID.String())
+			if err != nil {
+				return nil, fmt.Errorf("read task after cancellation: %w", err)
+			}
+			return map[string]any{"id": t.ID.String(), "status": current.Status, "changed": changed}, nil
 		},
 	)
 

@@ -22,12 +22,33 @@ func persistCtx(parent context.Context) (context.Context, context.CancelFunc) {
 
 func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (result *RunResult, runErr error) {
 	outcome := RunOutcome{Reason: RunStopProviderStop}
+	var accumulated strings.Builder
+	var traces []ToolTrace
 	defer func() {
+		// A provider or persistence error after a successful tool call must
+		// preserve that call's receipt and the text already produced.
+		if result == nil && (accumulated.Len() > 0 || len(traces) > 0) {
+			result = &RunResult{Text: accumulated.String(), ToolTraces: traces}
+		}
 		outcome = finishRunOutcome(ctx, cfg, outcome, runErr)
 		if result != nil {
 			result.Outcome = outcome
 		}
 	}()
+	checkpoint := func(phase string, pending *bs.ContentBlock) error {
+		if cfg.OnCheckpoint == nil {
+			return nil
+		}
+		pctx, cancel := persistCtx(ctx)
+		defer cancel()
+		if err := cfg.OnCheckpoint(pctx, RunCheckpoint{
+			SessionID: cfg.SessionID, Phase: phase, Text: accumulated.String(),
+			ToolTraces: append([]ToolTrace(nil), traces...), PendingTool: pending,
+		}); err != nil {
+			return fmt.Errorf("checkpoint %s: %w", phase, err)
+		}
+		return nil
+	}
 	if cfg.MaxTurns <= 0 {
 		cfg.MaxTurns = a.cfg.Gateway.MaxTurns
 	}
@@ -38,6 +59,12 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		cfg.Model = a.cfg.Models.Primary.Name
 	}
 	ctx = bs.WithDeniedTools(ctx, cfg.DeniedTools)
+	toolBudgetCtx := ctx
+	if !cfg.ToolsDeadline.IsZero() {
+		var endTools context.CancelFunc
+		toolBudgetCtx, endTools = context.WithDeadline(ctx, cfg.ToolsDeadline)
+		defer endTools()
+	}
 
 	// 1. Append user message (unless the caller already persisted it or it is
 	// prompt-only).
@@ -135,11 +162,10 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 	ctxAnchor := turnContextAnchor(convo)
 
 	// Accumulate text and tool traces across all turns.
-	var accumulated strings.Builder
-	var traces []ToolTrace
 	receipts := append([]bs.ToolExecutionResult(nil), cfg.InitialToolResults...)
 	toolTurns := 0
 	forceFinal := false
+	deadlineFinalRecoveryUsed := false
 	maxTokenContinuations := 0
 	truncatedToolRecoveries := 0
 	var pendingMaxTokenText strings.Builder
@@ -147,6 +173,9 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 
 	for turn := 0; turn < cfg.MaxTurns; turn++ {
 		outcome.Turns = turn + 1
+		if !cfg.ToolsDeadline.IsZero() && !time.Now().Before(cfg.ToolsDeadline) {
+			forceFinal = true
+		}
 		baseSystem := effectiveSystemPrompt(cfg.SystemPrompt, compactSummary)
 		messages := cloneMessages(convo)
 		turnTools := tools
@@ -311,6 +340,9 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		appendTurnText(&accumulated, currentTurnText)
 		pendingMaxTokenText.Reset()
 		pendingMaxTokenOutputTokens = 0
+		if err := checkpoint("model_completed", nil); err != nil {
+			return nil, err
+		}
 
 		// A max_tokens stop that landed inside a tool call: the tool_use
 		// block is a stump, not a call (see shouldRecoverTruncatedToolUse).
@@ -386,11 +418,24 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			return &RunResult{Text: text, ToolTraces: traces}, nil
 
 		case "tool_use":
+			if !cfg.ToolsDeadline.IsZero() && !time.Now().Before(cfg.ToolsDeadline) {
+				forceFinal = true
+			}
 			toolTurns++
 			outcome.ToolTurns = toolTurns
 			var toolResults []bs.ContentBlock
 			var promptToolResults []bs.ContentBlock
-			for _, block := range resp.Content {
+			var batch map[int]<-chan readToolResult
+			if !forceFinal && a.canBatchReads(cfg, resp.Content, turnTools) {
+				if err := checkpoint("read_batch_started", nil); err != nil {
+					return nil, err
+				}
+				batchCtx := bs.WithResponseValidationContext(toolBudgetCtx, responseValidationRequest(cfg, userMessage, receipts))
+				var stop func()
+				batch, stop = a.startReadBatch(batchCtx, cfg, resp.Content)
+				defer stop()
+			}
+			for blockIndex, block := range resp.Content {
 				if block.Type != "tool_use" {
 					continue
 				}
@@ -440,12 +485,28 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 					"tool_use_id", block.ID,
 				)
 
+				if err := checkpoint("tool_started", &block); err != nil {
+					return nil, err
+				}
 				toolStarted := time.Now()
 				toolTimeout := resolveToolExecutionTimeout(cfg.ToolTimeout, block.Name)
-				toolCtx := bs.WithResponseValidationContext(ctx, responseValidationRequest(cfg, userMessage, receipts))
-				result, isError, timedOut := executeToolWithTimeout(toolCtx, a.registry, block.Name, block.Input, toolTimeout)
-				latencyMs := int(time.Since(toolStarted) / time.Millisecond)
-				emitTiming(cfg, "tool.execute", toolStarted, toolTimingDetail(cfg, turn+1, block.Name, isError))
+				toolCtx := bs.WithResponseValidationContext(toolBudgetCtx, responseValidationRequest(cfg, userMessage, receipts))
+				var result string
+				var isError, timedOut bool
+				var toolElapsed time.Duration
+				if ch, ok := batch[blockIndex]; ok {
+					ready := <-ch
+					result, isError, timedOut = ready.output, ready.isError, ready.timedOut
+					toolStarted = ready.started
+					toolElapsed = ready.elapsed
+				} else {
+					result, isError, timedOut = executeToolWithTimeout(toolCtx, a.registry, block.Name, block.Input, toolTimeout)
+					toolElapsed = time.Since(toolStarted)
+				}
+				latencyMs := durationMs(toolElapsed)
+				if cfg.OnTiming != nil {
+					cfg.OnTiming(bs.TimingSpan{Name: "tool.execute", DurationMs: latencyMs, Detail: toolTimingDetail(cfg, turn+1, block.Name, isError)})
+				}
 				a.logger.Info("tool result",
 					"tool", block.Name,
 					"tool_use_id", block.ID,
@@ -475,7 +536,10 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 					outputStr = outputStr[:500] + "..."
 				}
 				receipt := receipts[len(receipts)-1]
-				traces = append(traces, ToolTrace{Name: block.Name, Input: inputStr, Output: outputStr, Error: isError, Receipt: &receipt})
+				traces = append(traces, ToolTrace{Name: block.Name, BlockID: block.ID, Input: inputStr, Output: outputStr, Error: isError, Receipt: &receipt, StartedAt: &toolStarted, DurationMs: latencyMs, TimedOut: timedOut})
+				if err := checkpoint("tool_completed", nil); err != nil {
+					return nil, err
+				}
 			}
 
 			// Defensive: stop_reason was "tool_use" but no tool_use blocks
@@ -511,6 +575,15 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 			}
 			convo = append(convo, promptToolResultMsg)
 			if forceFinal {
+				// A response can request tools just as the research window closes.
+				// Deliver the denied receipts and allow one synthesis-only turn.
+				if !deadlineFinalRecoveryUsed && !cfg.ToolsDeadline.IsZero() && !time.Now().Before(cfg.ToolsDeadline) {
+					deadlineFinalRecoveryUsed = true
+					if turn+1 >= cfg.MaxTurns {
+						cfg.MaxTurns = turn + 2
+					}
+					continue
+				}
 				if outcome.Reason != RunStopToolBudget {
 					outcome.Reason = RunStopOutputLimit
 				}

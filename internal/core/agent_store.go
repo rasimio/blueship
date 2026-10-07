@@ -824,7 +824,7 @@ func (s *AgentTaskStore) PendingTasks(ctx context.Context) ([]AgentTask, error) 
 	var tasks []AgentTask
 	err := s.db.SelectContext(ctx, &tasks, `
 		SELECT * FROM agent_tasks
-		WHERE status = 'pending'
+		WHERE executor_version = 1 AND status = 'pending'
 		  AND (max_iterations = 0 OR iteration < max_iterations)
 		  AND (deadline IS NULL OR deadline > NOW())
 		ORDER BY last_run_at NULLS FIRST, created_at`)
@@ -838,7 +838,7 @@ func (s *AgentTaskStore) SetRunning(ctx context.Context, id uuid.UUID) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks
 		SET status = 'running', last_run_at = NOW()
-		WHERE id = $1`, id)
+		WHERE executor_version = 1 AND id = $1`, id)
 	return err
 }
 
@@ -850,7 +850,7 @@ func (s *AgentTaskStore) TrySetRunning(ctx context.Context, id uuid.UUID) (bool,
 	err := s.db.GetContext(ctx, &claimed, `
 		UPDATE agent_tasks
 		SET status = 'running', last_run_at = NOW()
-		WHERE id = $1 AND status = 'pending'
+		WHERE executor_version = 1 AND id = $1 AND status = 'pending'
 		  AND (deadline IS NULL OR deadline > NOW())
 		RETURNING id`, id)
 	if err == nil {
@@ -998,7 +998,7 @@ func (s *AgentTaskStore) CompleteExhausted(ctx context.Context) []ExhaustedTask 
 		      ),
 		      'max_iterations reached without satisfying acceptance criteria'
 		    )
-		WHERE t.status = 'pending'
+		WHERE t.executor_version = 1 AND t.status = 'pending'
 		  AND t.schedule IS NULL
 		  AND t.max_iterations > 0
 		  AND t.iteration >= t.max_iterations
@@ -1054,6 +1054,8 @@ func (s *AgentTaskStore) Fail(ctx context.Context, id uuid.UUID, errMsg string) 
 }
 
 // Cancel marks a pending or running task as done with cancellation message.
+// Deprecated: host/tool cancellation must use TaskController.Cancel to scope
+// ownership and preserve an immutable result. Retained for legacy store callers.
 func (s *AgentTaskStore) Cancel(ctx context.Context, id uuid.UUID) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks
@@ -1067,7 +1069,7 @@ func (s *AgentTaskStore) ResetStale(ctx context.Context, staleAfter time.Duratio
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks
 		SET status = 'pending'
-		WHERE status = 'running' AND last_run_at < $1`,
+		WHERE executor_version = 1 AND status = 'running' AND last_run_at < $1`,
 		time.Now().Add(-staleAfter))
 	if err != nil {
 		return 0, err
@@ -1092,10 +1094,25 @@ func (s *AgentTaskStore) ResetForNextRun(ctx context.Context, id uuid.UUID) erro
 // Strategy to one of {direct, structured, delegate} along with the
 // matching fields (Plan / AcceptanceCriteria / DelegateTo / UseAgents).
 func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask, error) {
+	if task.ExecutorVersion == 0 {
+		task.ExecutorVersion = 1
+	}
+	if task.ExecutorVersion != 1 && task.ExecutorVersion != 2 {
+		return AgentTask{}, fmt.Errorf("unsupported executor version %d", task.ExecutorVersion)
+	}
+	if task.ExecutorVersion == 2 && !graphTaskEligible(task) {
+		return AgentTask{}, fmt.Errorf("executor v2 requires a direct one-shot background task")
+	}
+
 	if task.ID == uuid.Nil {
 		task.ID = uuid.New()
 	}
 	task.Config = jsonbObject(task.Config)
+	var originErr error
+	task.Config, originErr = captureTaskOrigin(ctx, task.Config)
+	if originErr != nil {
+		return AgentTask{}, fmt.Errorf("capture task origin: %w", originErr)
+	}
 	task.Progress = jsonbObject(task.Progress)
 	task.Plan = jsonbObject(task.Plan)
 	if task.Status == "" {
@@ -1126,15 +1143,15 @@ func (s *AgentTaskStore) Create(ctx context.Context, task AgentTask) (AgentTask,
 		INSERT INTO agent_tasks (soul_id, id, user_id, title, description, handler, config, tools,
 		                         schedule, deadline, status, progress, max_iterations,
 		                         strategy, delegate_to, plan, use_agents,
-		                         acceptance_criteria, session_id, cadence)
-		VALUES ($20::uuid,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+		                         acceptance_criteria, session_id, cadence, executor_version)
+		VALUES ($20::uuid,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$21)`,
 		task.ID, task.UserID, task.Title, task.Description,
 		task.Handler, task.Config, task.Tools,
 		task.Schedule, task.Deadline,
 		task.Status, task.Progress, task.MaxIterations,
 		task.Strategy, task.DelegateTo, task.Plan, task.UseAgents,
 		task.AcceptanceCriteria, task.SessionID, task.Cadence,
-		SoulIDFromContext(ctx))
+		SoulIDFromContext(ctx), task.ExecutorVersion)
 	if err != nil {
 		return AgentTask{}, fmt.Errorf("create agent task: %w", err)
 	}
@@ -1461,7 +1478,7 @@ func (s *AgentTaskStore) WakePausedByPeerTask(ctx context.Context, peerTaskID st
 	err := s.db.GetContext(ctx, &id, `
 		UPDATE agent_tasks
 		SET status = 'pending'
-		WHERE status = 'paused'
+		WHERE executor_version = 1 AND status = 'paused'
 		  AND progress->>'peer_task_id' = $1
 		RETURNING id`, peerTaskID)
 	return id, err
@@ -1473,7 +1490,7 @@ func (s *AgentTaskStore) WakeStalePaused(ctx context.Context, staleAfter time.Du
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE agent_tasks
 		SET status = 'pending'
-		WHERE status = 'paused' AND last_run_at < $1`,
+		WHERE executor_version = 1 AND status = 'paused' AND last_run_at < $1`,
 		time.Now().Add(-staleAfter))
 	if err != nil {
 		return 0, err

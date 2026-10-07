@@ -40,11 +40,12 @@ type AgentHandler interface {
 // Iteration >= MaxIterations to mark a task done. MaxIterations remains
 // only as a runaway-safety cap.
 type AgentTask struct {
-	ID          uuid.UUID `db:"id" json:"id"`
-	SoulID      uuid.UUID `db:"soul_id" json:"soul_id"`
-	UserID      uuid.UUID `db:"user_id" json:"user_id"`
-	Title       string    `db:"title" json:"title"`
-	Description *string   `db:"description" json:"description,omitempty"`
+	ExecutorVersion int       `db:"executor_version" json:"executor_version"`
+	ID              uuid.UUID `db:"id" json:"id"`
+	SoulID          uuid.UUID `db:"soul_id" json:"soul_id"`
+	UserID          uuid.UUID `db:"user_id" json:"user_id"`
+	Title           string    `db:"title" json:"title"`
+	Description     *string   `db:"description" json:"description,omitempty"`
 
 	// AcceptanceCriteria is plain-language describing what "done" means.
 	// Each iteration's output is checked against this; an explicit Done
@@ -314,20 +315,28 @@ type TaskProgress struct {
 
 // AgentDeps is a focused dependency bundle for agent handlers.
 type AgentDeps struct {
-	LLM        CompletionProvider
-	Embedder   EmbeddingProvider // nil = embedding disabled
-	Registry   *ToolRegistry
-	RoleTools  RoleToolQuerier
-	ModelStore ModelConfigQuerier // model role → provider:model (nil = use Config.Models)
-	Store      MessageStore       // session/message persistence for agent loops
-	Prompts    PromptStore
-	Users      UserStore      // nil = user lookup disabled
-	Sessions   SessionQuerier // nil = session query disabled
-	Logger     *slog.Logger
-	DB         func(module string) (*sqlx.DB, error)
-	UserID     uuid.UUID
-	Config     *Config
-	Deliveries TaskDeliveryLedger
+	// FinalAcceptanceOwned means the graph scheduler will run mandatory task
+	// acceptance before publishing a pure report, including after resume.
+	FinalAcceptanceOwned bool
+	// TaskStepGoals is a read-only task-local plan snapshot supplied to graph handlers.
+	TaskStepGoals map[string]string
+	LLM           CompletionProvider
+	Embedder      EmbeddingProvider // nil = embedding disabled
+	Registry      *ToolRegistry
+	RoleTools     RoleToolQuerier
+	ModelStore    ModelConfigQuerier // model role → provider:model (nil = use Config.Models)
+	Store         MessageStore       // session/message persistence for agent loops
+	Prompts       PromptStore
+	Users         UserStore      // nil = user lookup disabled
+	Sessions      SessionQuerier // nil = session query disabled
+	Logger        *slog.Logger
+	DB            func(module string) (*sqlx.DB, error)
+	UserID        uuid.UUID
+	Config        *Config
+	Deliveries    TaskDeliveryLedger
+	// SaveCheckpoint persists in-flight work under the scheduler's current
+	// claim. Nil supports handlers run outside a persistent scheduler.
+	SaveCheckpoint func(context.Context, TaskCheckpoint) error
 
 	// DraftAutonomousTurn is late-copied from the live gateway on every
 	// scheduler iteration. Nil means no interactive gateway is running.

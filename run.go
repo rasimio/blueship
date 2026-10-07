@@ -20,6 +20,7 @@ import (
 	"github.com/rasimio/blueship/internal/store/user"
 	"github.com/rasimio/blueship/internal/transport/httpchat"
 	"github.com/rasimio/blueship/internal/transport/ws"
+	"github.com/rasimio/blueship/internal/webaccess/browser"
 	"github.com/rasimio/blueship/runtime/session"
 	"github.com/rasimio/blueship/tool"
 )
@@ -29,6 +30,7 @@ type coordinatedTaskNotificationContextKey struct{}
 // Run starts BlueShip: connects to DB, initializes providers, starts transport, runs jobs.
 // Blocks until ctx is done.
 func (s *Ship) Run(ctx context.Context) error {
+	defer browser.ClosePool()
 	s.logger.Info("starting blueship")
 
 	// Refuse a chat-native signup flow that cannot run, before anything is
@@ -322,7 +324,7 @@ func (s *Ship) Run(ctx context.Context) error {
 						s.logger.WarnContext(historyCtx, "agent-tasks: notification history lookup failed",
 							"user_id", userID, "soul_id", soulID, "error", historyErr)
 					}
-					if sessID != "" && strings.TrimSpace(text) != "" {
+					if clean, _, _ := core.SplitTaskReportMarker(text); sessID != "" && strings.TrimSpace(clean) != "" {
 						var tgMessageID int64
 						if receipt.Transport == "telegram" && receipt.MessageID != "" {
 							if parsed, parseErr := strconv.ParseInt(receipt.MessageID, 10, 64); parseErr == nil {
@@ -338,7 +340,7 @@ func (s *Ship) Run(ctx context.Context) error {
 						}
 						if historyErr := msgStore.Append(historyCtx, sessID, core.Message{
 							Role:         "assistant",
-							Content:      core.NormalizeContent(text),
+							Content:      core.NormalizeContent(clean),
 							TGMessageIDs: tgMessageIDs,
 						}); historyErr != nil {
 							s.logger.WarnContext(historyCtx, "agent-tasks: notification history append failed",
@@ -348,6 +350,8 @@ func (s *Ship) Run(ctx context.Context) error {
 					return receipt, nil
 				}
 
+				// Only the single-attempt transport renders the report button.
+				text, _, _ = core.SplitTaskReportMarker(text)
 				profile, err := deps.Users.GetByID(ctx, userID.String())
 				if err != nil {
 					return receipt, fmt.Errorf("user lookup for notify: %w", err)
@@ -441,6 +445,11 @@ func (s *Ship) Run(ctx context.Context) error {
 		}
 
 		agentSched = agenttask.NewScheduler(taskStore, s.handlers, s.strategyHandlers, globalRegistry, msgStore, deps, notifyFn, s.logger)
+		if graphHandler, ok := s.strategyHandlers[core.StrategyDirect].(agenttask.GraphHandler); ok {
+			agentSched.SetGraphHandler(graphHandler)
+		} else if s.cfg.BackgroundTasks.ExecutorV2 {
+			return fmt.Errorf("background executor v2 enabled without a graph-capable direct handler")
+		}
 
 		// Per-task tool registry: a fresh registry bound to each task's
 		// owner_user_id so per-tool closures capture d.UserID =
@@ -539,10 +548,21 @@ func (s *Ship) Run(ctx context.Context) error {
 	// gateway used to race deps.SendToUserOnce assignment and could reserve a
 	// due occurrence as uncertain without making any Telegram request.
 	if agentSched != nil {
+		wake := make(chan struct{}, 1)
+		signal := func() {
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+		}
+		agentSched.SetWakeup(signal)
+		wg.Add(1)
+		go func() { defer wg.Done(); agenttask.ListenQueue(ctx, s.cfg.DB, s.cfg.ShipSchema, signal, s.logger) }()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			looprunner.RunLoopWithTrigger(ctx, s.logger, "agent-tasks", 1*time.Minute, agentSched.Run, agentTaskTrigger, agentSched.WakeFromCallback)
+			defer agentSched.StopWakeups()
+			looprunner.RunLoopWithWakeup(ctx, s.logger, "agent-tasks", time.Minute, agentSched.Run, agentTaskTrigger, agentSched.WakeFromCallback, wake)
 		}()
 	}
 

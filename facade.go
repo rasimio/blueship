@@ -73,6 +73,8 @@ type (
 	Usage                         = core.Usage
 	AgentHandler                  = core.AgentHandler
 	AgentTask                     = core.AgentTask
+	TaskStatus                    = core.TaskStatus
+	TaskStatusReader              = core.TaskStatusReader
 	AgentDeps                     = core.AgentDeps
 	IterationResult               = core.IterationResult
 	TaskProgram                   = core.TaskProgram
@@ -133,6 +135,7 @@ type (
 	BotCommand           = core.BotCommand
 	BotCommandRequest    = core.BotCommandRequest
 	BotCommandResult     = core.BotCommandResult
+	BotCommandDocument   = core.BotCommandDocument
 	BotCommandHandler    = core.BotCommandHandler
 	BotCommandButton     = core.BotCommandButton
 	InvoiceOffer         = core.InvoiceOffer
@@ -305,3 +308,14 @@ var (
 	ErrExecutionDenied          = core.ErrExecutionDenied
 	ErrPaymentUnavailable       = core.ErrPaymentUnavailable
 )
+
+var NewTaskStatusReader = core.NewTaskStatusReader
+var NewTaskStatusReaderInSchema = core.NewTaskStatusReaderInSchema
+
+type TaskController = core.TaskController
+
+var NewTaskController = core.NewTaskController
+var NewTaskControllerInSchema = core.NewTaskControllerInSchema
+var ErrTaskActive = core.ErrTaskActive
+
+type BackgroundTaskConfig = core.BackgroundTaskConfig

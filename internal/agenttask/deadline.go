@@ -67,6 +67,38 @@ func (s *Scheduler) expireTask(ctx context.Context, task core.AgentTask, now tim
 	// Persist that terminal state on a fresh, bounded DB/notification context.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), notificationAttemptTimeout)
 	defer cancel()
+	if finalizer, ok := store.(interface {
+		FinalizeTask(context.Context, uuid.UUID, core.TaskFinalization) (core.TaskArtifact, bool, error)
+	}); ok {
+		cfg := core.Config{}
+		if s.deps != nil && s.deps.Config != nil {
+			cfg = *s.deps.Config
+		}
+		cfg.ApplyDefaults()
+		artifact, changed, err := finalizer.FinalizeTask(ctx, task.ID, core.TaskFinalization{
+			Outcome: "partial", Reason: core.TaskDeadlineExceeded, ExpiredAt: &now,
+			EmptyBody:   fmt.Sprintf(cfg.UI.TaskStoppedEmptyFmt, task.Title),
+			Notify:      fmt.Sprintf(cfg.UI.TaskPartialFmt, task.Title, task.ID.String()[:8]),
+			EmptyNotify: fmt.Sprintf(cfg.UI.TaskStoppedEmptyFmt, task.Title),
+		})
+		if err != nil || !changed {
+			return changed, err
+		}
+		task.Status, task.CompletedAt, task.Result = "failed", &now, &artifact.Body
+		reason := core.TaskDeadlineExceeded
+		task.ErrorMessage = &reason
+		if s.deps != nil && s.deps.AgentIterationCompletedHook != nil {
+			go s.deps.AgentIterationCompletedHook(core.WithSoulID(context.WithoutCancel(ctx), task.SoulID), task,
+				core.IterationResult{Output: artifact.Body, IsFinal: true, Partial: true})
+		}
+		if s.store != nil {
+			s.archiveTaskSession(ctx, task.ID, task.SoulID, sessionIDFromProgress(task.Progress))
+		}
+		if s.onStatusChange != nil {
+			go s.onStatusChange(context.WithoutCancel(ctx), task)
+		}
+		return true, nil
+	}
 	changed, err := store.ExpireTask(ctx, task.ID, now)
 	if err != nil || !changed {
 		return changed, err

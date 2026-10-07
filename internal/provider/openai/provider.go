@@ -197,6 +197,9 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 
 	var result chatCompletionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		if resp.StatusCode != http.StatusOK {
+			return nil, bs.NewHTTPFailure(resp.StatusCode, resp.Header.Get("Retry-After"), fmt.Errorf("openai API returned %d: decode response: %w", resp.StatusCode, err))
+		}
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -204,7 +207,7 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 		if result.Error != nil {
 			msg += ": " + result.Error.Message
 		}
-		return nil, fmt.Errorf("%s", msg)
+		return nil, bs.NewHTTPFailure(resp.StatusCode, resp.Header.Get("Retry-After"), fmt.Errorf("%s", msg))
 	}
 	if len(result.Choices) == 0 {
 		return nil, fmt.Errorf("openai returned empty choices")
@@ -336,7 +339,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 		if errResp.Error != nil {
 			msg += ": " + errResp.Error.Message
 		}
-		return nil, fmt.Errorf("%s", msg)
+		return nil, bs.NewHTTPFailure(resp.StatusCode, resp.Header.Get("Retry-After"), fmt.Errorf("%s", msg))
 	}
 
 	// Parse SSE stream.

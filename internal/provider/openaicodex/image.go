@@ -53,9 +53,10 @@ func (p *CompletionProvider) GenerateImage(ctx context.Context, prompt string) (
 			Role:    "user",
 			Content: []any{inputTextContent{Type: "input_text", Text: prompt}},
 		}},
-		Stream: true,
-		Store:  false,
-		Tools:  []responseTool{{Type: imageToolType}},
+		Stream:    true,
+		Store:     false,
+		Reasoning: &reasoningConfig{Effort: "high"},
+		Tools:     []responseTool{{Type: imageToolType}},
 	})
 	if err != nil {
 		return bs.ImageResult{}, fmt.Errorf("openai-codex: marshal image request: %w", err)
@@ -112,7 +113,7 @@ func (p *CompletionProvider) GenerateImage(ctx context.Context, prompt string) (
 // hook so a future model split (a cheaper drawing model than the chat one)
 // is a one-line change rather than a rewrite of the request builder.
 func (p *CompletionProvider) imageModel() string {
-	return "gpt-5.5"
+	return "gpt-5.6-sol"
 }
 
 // readImagePayload walks the SSE stream and keeps the largest base64 blob it
