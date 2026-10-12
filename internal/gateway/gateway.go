@@ -9,9 +9,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -797,21 +799,27 @@ func (g *Gateway) sendDenial(ctx context.Context, bi *botInstance, tgChatID int6
 // identically. editID is the message a tapped button lives on, which the
 // answer replaces; zero sends a new one.
 func (g *Gateway) runHostCommand(ctx context.Context, bi *botInstance, caller bs.TelegramCaller, us *UserState, name, args string, editID int) {
-	if g.isExclusiveCommand(name) {
-		// Quieting the conversation can mean waiting for an answer to
-		// wind down, and this is the loop every chat's updates go through.
-		go g.execHostCommand(ctx, bi, caller, us, name, args, editID)
-		return
-	}
-	g.execHostCommand(ctx, bi, caller, us, name, args, editID)
+	g.runHostRequest(ctx, bi, us, bs.BotCommandRequest{Name: name, Args: args, Caller: caller}, editID)
 }
 
-func (g *Gateway) execHostCommand(ctx context.Context, bi *botInstance, caller bs.TelegramCaller, us *UserState, name, args string, editID int) {
-	g.maybeRetractPrivateCommands(ctx, bi, name, caller)
-	req := bs.BotCommandRequest{
-		Name: name, Args: args, UserID: us.UserID, SoulID: us.SoulID,
-		BotID: bi.id, BotKind: bi.kind, Caller: caller,
+// runHostRequest is runHostCommand for a request that carries more than a
+// name and arguments: an awaited answer comes with its AwaitState. The
+// identity fields are filled in here, from us and bi, never by the caller.
+func (g *Gateway) runHostRequest(ctx context.Context, bi *botInstance, us *UserState, req bs.BotCommandRequest, editID int) {
+	if g.isExclusiveCommand(req.Name) {
+		// Quieting the conversation can mean waiting for an answer to
+		// wind down, and this is the loop every chat's updates go through.
+		go g.execHostCommand(ctx, bi, us, req, editID)
+		return
 	}
+	g.execHostCommand(ctx, bi, us, req, editID)
+}
+
+func (g *Gateway) execHostCommand(ctx context.Context, bi *botInstance, us *UserState, req bs.BotCommandRequest, editID int) {
+	name, caller := req.Name, req.Caller
+	g.maybeRetractPrivateCommands(ctx, bi, name, caller)
+	req.UserID, req.SoulID = us.UserID, us.SoulID
+	req.BotID, req.BotKind = bi.id, bi.kind
 	// The handler quiets the conversation itself, once it has decided to
 	// act; the gateway only releases it, after the handler is done.
 	var release func()
@@ -854,21 +862,74 @@ func (g *Gateway) execHostCommand(ctx context.Context, bi *botInstance, caller b
 	}
 
 	// Claim the next message BEFORE answering, so a fast reply cannot
-	// arrive while there is nothing recorded to route it to. Typed
-	// commands only: a tapped button never parked the chat.
-	if editID == 0 && result.AwaitReply != "" && g.deps.BotOnboarding != nil && bi.id != uuid.Nil {
-		if err := g.deps.BotOnboarding.AdvanceStep(ctx, caller.UserID, bi.id,
-			onbStepAwaitPrefix+result.AwaitReply, nil); err != nil {
-			g.logger.Warn("gateway: could not park the chat for a reply",
-				"command", name, "error", err)
-		}
-	}
+	// arrive while there is nothing recorded to route it to.
+	g.settleAwaitedReply(ctx, bi, caller, name, result)
 
 	g.renderHostCommand(ctx, bi, caller.ChatID, editID, name, result)
 	if result.Restart {
 		g.greetAsNew(ctx, bi, caller)
 	}
 }
+
+// settleAwaitedReply records the question a host command's answer asks,
+// or, when it asks none, ends the one still open from before. A person who
+// tapped some other button instead of answering has moved on, and the next
+// thing they type is meant for the assistant, not for that question.
+func (g *Gateway) settleAwaitedReply(ctx context.Context, bi *botInstance, caller bs.TelegramCaller, name string, result bs.BotCommandResult) {
+	if g.deps.BotOnboarding == nil || bi == nil || bi.id == uuid.Nil {
+		return
+	}
+	if result.AwaitReply == "" {
+		g.endAwaitedReply(ctx, bi, caller.ChatID, caller.UserID)
+		return
+	}
+	// A keyboard question still open in this chat would compose the answer
+	// into its own request first. Two open questions race for the same
+	// next message; the one asked last is the one being answered.
+	g.clearKeyboardAsk(bi.id, tgCanonical(caller.ChatID))
+	data := map[string]any{onbDataAwaitChat: strconv.FormatInt(caller.ChatID, 10)}
+	if result.AwaitState != "" {
+		data[onbDataAwaitState] = result.AwaitState
+	}
+	if err := g.deps.BotOnboarding.AdvanceStep(ctx, caller.UserID, bi.id,
+		onbStepAwaitPrefix+result.AwaitReply, data); err != nil {
+		g.logger.Warn("gateway: could not park the chat for a reply",
+			"command", name, "error", err)
+	}
+}
+
+// endAwaitedReply drops a host command's open question, if there is one
+// and it was asked in this chat. Whatever else the state row may hold — a
+// wizard half done, a pending persona offer — is left alone.
+func (g *Gateway) endAwaitedReply(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64) {
+	if g.deps.BotOnboarding == nil || bi == nil || bi.id == uuid.Nil || tgUserID == 0 {
+		return
+	}
+	step, data, err := g.deps.BotOnboarding.GetState(ctx, tgUserID, bi.id)
+	if err != nil {
+		g.logger.Warn("gateway: could not read an open question", "tg_user", tgUserID, "error", err)
+		return
+	}
+	if !strings.HasPrefix(step, onbStepAwaitPrefix) || !awaitAskedIn(data, tgChatID) {
+		return
+	}
+	if err := g.deps.BotOnboarding.ClearState(ctx, tgUserID, bi.id); err != nil {
+		g.logger.Warn("gateway: could not end an open question",
+			"command", strings.TrimPrefix(step, onbStepAwaitPrefix), "error", err)
+	}
+}
+
+// awaitAskedIn reports whether an open question was asked in this chat.
+// One recorded before questions kept their chat answers to any.
+func awaitAskedIn(data map[string]any, tgChatID int64) bool {
+	asked, _ := data[onbDataAwaitChat].(string)
+	return asked == "" || asked == strconv.FormatInt(tgChatID, 10)
+}
+
+// hostTextLimit is where a host command's Text is split into several
+// messages. Below Telegram's 4096 because Telegram counts UTF-16 units and
+// this counts runes: an emoji is one rune and two units.
+const hostTextLimit = 3800
 
 func (g *Gateway) renderHostCommand(ctx context.Context, bi *botInstance, tgChatID int64, editID int, name string, result bs.BotCommandResult) {
 	if result.Document != nil {
@@ -882,69 +943,124 @@ func (g *Gateway) renderHostCommand(ctx context.Context, bi *botInstance, tgChat
 	if strings.TrimSpace(result.Text) == "" {
 		return
 	}
-	if editID == 0 && len(result.Buttons) == 0 && (result.ButtonURL == "" || result.ButtonLabel == "") {
-		g.sendOnboardingText(ctx, bi, tgChatID, result.Text)
-		return
-	}
-	var rows [][]telegram.InlineKeyboardButton
-	if result.ButtonLabel != "" && result.ButtonURL != "" {
-		rows = append(rows, []telegram.InlineKeyboardButton{{Text: result.ButtonLabel, URL: result.ButtonURL}})
-	}
-	if len(result.Buttons) > 0 {
-		rows = rows[:0]
-		for _, b := range result.Buttons {
-			if b.Command != "" {
-				data := hostCallbackPrefix + b.Command + ":" + b.Args
-				if len(data) <= 64 && b.Label != "" && g.isHostCallbackCommand(b.Command) {
-					rows = append(rows, []telegram.InlineKeyboardButton{{Text: b.Label, CallbackData: data}})
-				}
-				continue
-			}
-			url := b.URL
-			if b.Invoice != nil {
-				link, err := bi.client.CreateInvoiceLink(ctx, telegram.InvoiceRequest{
-					Title:              b.Invoice.Title,
-					Description:        b.Invoice.Description,
-					Payload:            b.Invoice.Payload,
-					Stars:              b.Invoice.Stars,
-					SubscriptionPeriod: b.Invoice.SubscriptionPeriod,
-				})
-				if err != nil {
-					// Drop this button, keep the rest. The other ways to
-					// pay still work, and offering a dead one is worse
-					// than offering one fewer.
-					g.logger.Error("payments: could not create an invoice link",
-						"command", name, "payload", b.Invoice.Payload, "error", err)
-					continue
-				}
-				url = link
-			}
-			if url == "" || b.Label == "" {
-				continue
-			}
-			rows = append(rows, []telegram.InlineKeyboardButton{{Text: b.Label, URL: url}})
-		}
-	}
+	rows := g.hostCommandRows(ctx, bi, name, result)
 	if len(result.Buttons) > 0 && len(rows) == 0 {
 		// Every button failed to build. The text alone still says
 		// something useful; a keyboard-less message beats none.
-		g.sendOnboardingText(ctx, bi, tgChatID, result.Text)
-		return
+		editID = 0
 	}
-	if editID != 0 {
-		if err := bi.client.EditMessageText(ctx, tgChatID, editID, result.Text, rows); err != nil && !strings.Contains(err.Error(), "message is not modified") {
-			g.logger.Warn("gateway: host command refresh failed", "command", name, "error", err)
+
+	parts := []string{result.Text}
+	if utf8.RuneCountInString(result.Text) > hostTextLimit {
+		parts = telegram.SplitMessageAt(result.Text, hostTextLimit)
+	}
+	// The first part replaces the tapped message, the rest follow it, and
+	// the buttons go under the last: they act on the whole text, and
+	// under its end is where a reader arrives.
+	last := len(parts) - 1
+	for i, part := range parts {
+		var keys [][]telegram.InlineKeyboardButton
+		if i == last {
+			keys = rows
 		}
-		return
+		if i == 0 && editID != 0 {
+			err := g.editHostText(ctx, bi, tgChatID, editID, part, keys, result.Plain)
+			if err == nil || strings.Contains(err.Error(), "message is not modified") {
+				continue
+			}
+			// Deleted, too old to edit, or otherwise out of reach. The
+			// answer still has to arrive, and as a new message its
+			// buttons work exactly as the old ones would have.
+			g.logger.Warn("gateway: host command refresh failed, sending it anew",
+				"command", name, "error", err)
+		}
+		res, err := g.sendHostText(ctx, bi, tgChatID, part, keys, result.Plain)
+		if err != nil {
+			g.logger.Warn("gateway: host command reply failed", "command", name, "error", err)
+			return
+		}
+		if len(keys) > 0 {
+			seen := bs.DeliverySeen{TGChatID: tgChatID, Kind: bs.DeliveryHostCommand, Name: name, MessageID: sentID(res, nil)}
+			countButtons(keys, &seen)
+			g.observeDelivery(ctx, bi, seen)
+		}
 	}
-	res, err := bi.client.SendMessageWithKeyboard(ctx, tgChatID, result.Text, rows)
-	if err != nil {
-		g.logger.Warn("gateway: host command reply failed", "command", name, "error", err)
-		return
+}
+
+// hostCommandRows builds the inline keyboard of a host command's answer.
+// A button that cannot be built is dropped and the rest are kept.
+func (g *Gateway) hostCommandRows(ctx context.Context, bi *botInstance, name string, result bs.BotCommandResult) [][]telegram.InlineKeyboardButton {
+	if len(result.Buttons) == 0 {
+		if result.ButtonLabel != "" && result.ButtonURL != "" {
+			return [][]telegram.InlineKeyboardButton{{{Text: result.ButtonLabel, URL: result.ButtonURL}}}
+		}
+		return nil
 	}
-	seen := bs.DeliverySeen{TGChatID: tgChatID, Kind: bs.DeliveryHostCommand, Name: name, MessageID: sentID(res, nil)}
-	countButtons(rows, &seen)
-	g.observeDelivery(ctx, bi, seen)
+	var rows [][]telegram.InlineKeyboardButton
+	add := func(b bs.BotCommandButton, key telegram.InlineKeyboardButton) {
+		if n := len(rows); b.SameRow && n > 0 && len(rows[n-1]) < 8 {
+			rows[n-1] = append(rows[n-1], key)
+			return
+		}
+		rows = append(rows, []telegram.InlineKeyboardButton{key})
+	}
+	for _, b := range result.Buttons {
+		if b.Command != "" {
+			data := hostCallbackPrefix + b.Command + ":" + b.Args
+			if len(data) <= 64 && b.Label != "" && g.isHostCallbackCommand(b.Command) {
+				add(b, telegram.InlineKeyboardButton{Text: b.Label, CallbackData: data})
+			} else {
+				g.logger.Warn("gateway: host command button dropped",
+					"command", name, "target", b.Command, "data_bytes", len(data))
+			}
+			continue
+		}
+		url := b.URL
+		if b.Invoice != nil {
+			link, err := bi.client.CreateInvoiceLink(ctx, telegram.InvoiceRequest{
+				Title:              b.Invoice.Title,
+				Description:        b.Invoice.Description,
+				Payload:            b.Invoice.Payload,
+				Stars:              b.Invoice.Stars,
+				SubscriptionPeriod: b.Invoice.SubscriptionPeriod,
+			})
+			if err != nil {
+				// Drop this button, keep the rest. The other ways to
+				// pay still work, and offering a dead one is worse
+				// than offering one fewer.
+				g.logger.Error("payments: could not create an invoice link",
+					"command", name, "payload", b.Invoice.Payload, "error", err)
+				continue
+			}
+			url = link
+		}
+		if url == "" || b.Label == "" {
+			continue
+		}
+		add(b, telegram.InlineKeyboardButton{Text: b.Label, URL: url})
+	}
+	return rows
+}
+
+// sendHostText posts one message of a host command's answer.
+func (g *Gateway) sendHostText(ctx context.Context, bi *botInstance, tgChatID int64, text string, keys [][]telegram.InlineKeyboardButton, plain bool) (*telegram.SendMessageResult, error) {
+	switch {
+	case plain:
+		return bi.client.SendPlainMessage(ctx, tgChatID, text, keys)
+	case len(keys) > 0:
+		return bi.client.SendMessageWithKeyboard(ctx, tgChatID, text, keys)
+	default:
+		return bi.client.SendMessage(ctx, fmt.Sprintf("%d", tgChatID), text)
+	}
+}
+
+// editHostText replaces the tapped message with one message of a host
+// command's answer. nil keys take its keyboard away.
+func (g *Gateway) editHostText(ctx context.Context, bi *botInstance, tgChatID int64, editID int, text string, keys [][]telegram.InlineKeyboardButton, plain bool) error {
+	if plain {
+		return bi.client.EditPlainMessageText(ctx, tgChatID, editID, text, keys)
+	}
+	return bi.client.EditMessageText(ctx, tgChatID, editID, text, keys)
 }
 
 // maybeRunHostCommand dispatches a command the host answers itself.
@@ -1273,6 +1389,15 @@ func (g *Gateway) handleUpdate(ctx context.Context, bi *botInstance, update tele
 	// command it stands for here, first, so every dispatcher below sees
 	// what the person meant rather than a stray word — and so the
 	// rewrite is one place rather than a check in each of them.
+	//
+	// Pressing a key or typing a command is doing something other than
+	// answering a host command's open question, so that question ends
+	// first — before the key turns into words, or a shortcut into a
+	// sentence, that would otherwise be taken for the answer.
+	_, isKey := g.keyboard().Action(text)
+	if cmd, forUs := g.parseCommand(bi, text); isKey || (forUs && cmd != "") {
+		g.endAwaitedReply(ctx, bi, msg.Chat.ID, msg.From.ID)
+	}
 	if rewritten, handled := g.handleKeyboardTap(ctx, bi, msg.Chat.ID, text); handled {
 		return
 	} else {
