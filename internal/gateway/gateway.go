@@ -1065,6 +1065,7 @@ func (g *Gateway) prepareTelegramInbound(
 			"chat_id", chatID, "bot_id", bi.id.String(), "error", err)
 		return nil, 0, false
 	}
+	g.touchTelegramChat(ctx, bi, rawChatID)
 
 	// Host-handled commands run before the execution policy, deliberately.
 	// The case they exist for is somebody the policy has just refused who
@@ -1580,6 +1581,20 @@ func (g *Gateway) buildUserState(chatID string, userID, soulID uuid.UUID, isOwne
 		Deps:     userDeps,
 		bot:      bi,
 		tgChatID: tgChatID,
+	}
+}
+
+// touchTelegramChat tells the host this person just wrote to bi. It runs
+// on every inbound message, cached UserState or not: recording use inside
+// the resolver meant a long-running gateway recorded it once per process,
+// so a single guest summons on another bot outweighed days of talk here.
+func (g *Gateway) touchTelegramChat(ctx context.Context, bi *botInstance, tgChatID int64) {
+	if g.deps.TouchTelegramChat == nil || bi == nil || bi.id == uuid.Nil {
+		return
+	}
+	if err := g.deps.TouchTelegramChat(ctx, bi.id, tgChatID); err != nil {
+		g.logger.Warn("gateway: could not record bot use",
+			"chat_id", tgChatID, "bot_id", bi.id.String(), "error", err)
 	}
 }
 

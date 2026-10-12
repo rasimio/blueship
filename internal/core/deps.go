@@ -123,6 +123,11 @@ type Deps struct {
 	// Config.Gateway; ship.go copies it across at InitDeps time.
 	ResolveTelegramChat func(ctx context.Context, botID uuid.UUID, tgChatID int64) (userID, soulID uuid.UUID, err error)
 
+	// TouchTelegramChat mirrors Config.Gateway.TouchTelegramChat: called
+	// once per inbound message admitted to a conversation, never on
+	// lookups. Nil records nothing.
+	TouchTelegramChat func(ctx context.Context, botID uuid.UUID, tgChatID int64) error
+
 	// SendToUser is a per-user Telegram sender that picks the right
 	// bot from vaelum.bot_links (multi-bot host pattern). Wired by
 	// ship.go after the Gateway is built so the agent-task scheduler
@@ -233,6 +238,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		AgentIterationCompletedHook:    d.AgentIterationCompletedHook,
 		ResolveSoul:                    d.ResolveSoul,
 		ResolveTelegramChat:            d.ResolveTelegramChat,
+		TouchTelegramChat:              d.TouchTelegramChat,
 		SendToUser:                     d.SendToUser,
 		SendToUserOnce:                 d.SendToUserOnce,
 		SendConversationMessage:        d.SendConversationMessage,

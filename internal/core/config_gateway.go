@@ -107,6 +107,15 @@ type GatewayConfig struct {
 	// warning log.
 	ResolveTelegramChat func(ctx context.Context, botID uuid.UUID, tgChatID int64) (userID, soulID uuid.UUID, err error) `yaml:"-" json:"-"`
 
+	// TouchTelegramChat records that a person just wrote to this bot in
+	// this chat. The gateway calls it on every inbound message that
+	// reaches a conversation — and only then: a guest summons, an
+	// ownership check before a notification and onboarding lookups go
+	// through ResolveTelegramChat and must not count as "the bot this
+	// person talks to". Hosts that route proactive messages by recent use
+	// keep that state here; nil means nothing is recorded.
+	TouchTelegramChat func(ctx context.Context, botID uuid.UUID, tgChatID int64) error `yaml:"-" json:"-"`
+
 	// AttachmentSink, when set, receives every photo / document a
 	// transport produces (Telegram, web cabinet uploads via the
 	// gateway path, …). Ship.Run propagates this into deps so the

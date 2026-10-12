@@ -78,6 +78,7 @@ func (s *Ship) Run(ctx context.Context) error {
 	deps.AgentIterationCompletedHook = s.cfg.Gateway.AgentIterationCompletedHook
 	deps.ResolveSoul = s.cfg.Gateway.ResolveSoul
 	deps.ResolveTelegramChat = s.cfg.Gateway.ResolveTelegramChat
+	deps.TouchTelegramChat = s.cfg.Gateway.TouchTelegramChat
 	deps.AttachmentSink = s.cfg.Gateway.AttachmentSink
 	deps.BotOnboarding = s.cfg.Gateway.BotOnboarding
 	deps.PersonaEditor = s.cfg.Gateway.PersonaEditor
