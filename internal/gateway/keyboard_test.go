@@ -89,7 +89,7 @@ func TestMenuCommandIsAnsweredByAKeyboardAlone(t *testing.T) {
 		client: telegram.NewClientWithAPIURL("t", f.srv.URL, 5*time.Second)}
 	us := &UserState{UserID: uuid.New(), SoulID: uuid.New()}
 
-	if !g.maybeRunHostCommand(context.Background(), bi, 42, 777, us, "/menu") {
+	if !g.maybeRunHostCommand(context.Background(), bi, bs.TelegramCaller{ChatID: 42, UserID: 777}, us, "/menu") {
 		t.Fatal("/menu fell through; the model would be asked to explain a command it does not have")
 	}
 	sent := f.last("sendMessage")

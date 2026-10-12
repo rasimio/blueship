@@ -704,6 +704,14 @@ func (g *Gateway) processMessages(ctx context.Context, us *UserState, msgs []pen
 	turnMu := g.turnMutex(us.UserID, us.SoulID)
 	turnMu.Lock()
 	defer turnMu.Unlock()
+	if g.conversationRetired(us.UserID, us.SoulID) {
+		// Queued for an account that was reset while it waited. Running it
+		// would answer from an assistant that no longer exists.
+		g.logger.Info("gateway: dropping a turn queued for a reset account",
+			"user_id", us.UserID, "soul_id", us.SoulID, "messages", len(msgs))
+		g.completeInboundActivity(us, msgs, false)
+		return
+	}
 	ctx = contextWithConversationTurn(ctx)
 
 	// Register the turn so a stop arriving on any transport can reach this

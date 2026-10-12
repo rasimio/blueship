@@ -89,6 +89,11 @@ type UIStrings struct {
 	VoiceOn          string
 	VoiceOff         string
 	VoiceUnavailable string
+
+	// CommandBusy answers an Exclusive command that could not get its
+	// conversation quiet in time: the answer being written would not stop.
+	// Nothing was done, so the person can simply try again.
+	CommandBusy string
 }
 
 func (u *UIStrings) applyDefaults() {
@@ -183,6 +188,9 @@ func (u *UIStrings) applyDefaults() {
 	if u.VoiceUnavailable == "" {
 		u.VoiceUnavailable = "Voice replies are not available right now."
 	}
+	if u.CommandBusy == "" {
+		u.CommandBusy = "Still finishing the previous answer. Nothing was changed — try again in a moment."
+	}
 }
 
 // BotCommand is one entry in the Telegram command menu.
@@ -222,7 +230,51 @@ type BotCommand struct {
 	// it. Routing "let me pay" through the same gate that just said no
 	// would be a closed loop.
 	Host bool
+
+	// Private keeps the command out of the menu everyone is shown. It is
+	// listed only in the private chats of the people
+	// Config.Gateway.CommandAudience admits, through Telegram's per-chat
+	// command scope, so nobody else learns it exists.
+	//
+	// Listing is not permission. A command can be typed whether or not it
+	// is listed, so the handler still decides who may run it — on every
+	// call, from the Caller Telegram reported.
+	Private bool
+
+	// Exclusive lets the command quiet its conversation: its request
+	// carries Quiet, which stops the answer being written and keeps every
+	// turn out until the handler has returned. For commands that replace
+	// what turns read and write — one running beside a turn would let the
+	// turn write into state the command has just thrown away.
+	//
+	// It runs off the update loop, because waiting for a turn to wind down
+	// must not stall every other chat.
+	Exclusive bool
 }
+
+// ErrConversationBusy is what BotCommandRequest.Quiet returns when the
+// answer in flight would not stop in time. A handler returns it as its
+// error, and the transport tells the person to try again.
+var ErrConversationBusy = errors.New("blueship: conversation did not quiet down in time")
+
+// TelegramCaller is who invoked a command, as Telegram reported them on
+// the update. The transport fills it from the update itself and never
+// from anything a button carries, so a handler can trust it for access
+// decisions.
+type TelegramCaller struct {
+	UserID int64 // from.id — permanent for the account
+	ChatID int64 // the chat the command came from; equals UserID in a private chat
+	// Username is from.username without the "@". Empty is normal, and its
+	// owner can change it at any time — a check on it is a check on a
+	// name, not on a person.
+	Username     string
+	FirstName    string
+	LanguageCode string
+}
+
+// Private reports whether the command came from the caller's own private
+// chat with the bot rather than from a group.
+func (c TelegramCaller) Private() bool { return c.UserID != 0 && c.ChatID == c.UserID }
 
 // BotCommandRequest is one host-handled command invocation.
 type BotCommandRequest struct {
@@ -239,6 +291,17 @@ type BotCommandRequest struct {
 	// whether this one is its own.
 	BotID   uuid.UUID
 	BotKind string
+
+	// Caller is the Telegram account that typed or tapped the command.
+	Caller TelegramCaller
+
+	// Quiet is set for Exclusive commands. It stops the conversation's
+	// answer in flight and keeps every turn out until the handler returns.
+	// The handler calls it once it has decided to act — after checking who
+	// is asking and whether the request still applies — so a refused or
+	// out-of-date request leaves a running answer alone. Calling it again
+	// is a no-op. ErrConversationBusy means the answer would not stop.
+	Quiet func(context.Context) error
 }
 
 // BotCommandResult is what the host wants said back. Text is required;
@@ -273,6 +336,13 @@ type BotCommandResult struct {
 	// per-(user, bot) state for onboarding and reuses it here rather than
 	// asking every host to build the same thing.
 	AwaitReply string
+
+	// Restart says the command detached the chat from the account it was
+	// talking to: the account was reset to its first day. The transport
+	// drops whatever it cached about the person, delivers Text, and then
+	// opens the chat the way its first /start would — so the next thing the
+	// person sees is what a newcomer sees.
+	Restart bool
 }
 
 // BotCommandButton is one link under a host command's reply.

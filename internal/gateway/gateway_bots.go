@@ -247,9 +247,28 @@ func (g *Gateway) publishCommands(ctx context.Context, bi *botInstance) {
 // Dropping rather than failing, because Telegram rejects the whole
 // setMyCommands call on one bad entry: a single typo would otherwise cost
 // the entire menu, and no menu is much worse than a menu missing one row.
+//
+// Private commands are left out: this is the menu everyone sees. The menu
+// of a chat whose owner may see them is privateTelegramCommands.
 func telegramCommands(configured []bs.BotCommand) (commands []telegram.BotCommand, skipped []string) {
+	return listedTelegramCommands(configured, false)
+}
+
+// privateTelegramCommands is the whole menu of a chat admitted to the
+// Private commands: everyone's menu with them added. Telegram does not
+// merge scopes, so a chat-scoped list that held only the Private entries
+// would take the ordinary ones away from the very chat it is meant for.
+func privateTelegramCommands(configured []bs.BotCommand) []telegram.BotCommand {
+	commands, _ := listedTelegramCommands(configured, true)
+	return commands
+}
+
+func listedTelegramCommands(configured []bs.BotCommand, withPrivate bool) (commands []telegram.BotCommand, skipped []string) {
 	commands = make([]telegram.BotCommand, 0, len(configured))
 	for _, c := range configured {
+		if c.Private && !withPrivate {
+			continue
+		}
 		name := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(c.Name), "/"))
 		// A host command with no description is deliberately unlisted: it
 		// exists to receive an answer the product asked for, and offering

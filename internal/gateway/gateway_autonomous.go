@@ -47,6 +47,9 @@ func (g *Gateway) CoordinateTaskNotification(
 	turnMu := g.turnMutex(userID, soulID)
 	turnMu.Lock()
 	defer turnMu.Unlock()
+	if g.conversationRetired(userID, soulID) {
+		return receipt, bs.PermanentlyNotSent(errConversationRetired)
+	}
 
 	ctx = bs.WithUserID(ctx, userID)
 	ctx = bs.WithSoulID(ctx, soulID)
@@ -154,6 +157,9 @@ func (g *Gateway) DraftAutonomousTurn(ctx context.Context, req bs.AutonomousTurn
 	turnMu := g.turnMutex(req.UserID, req.SoulID)
 	turnMu.Lock()
 	defer turnMu.Unlock()
+	if g.conversationRetired(req.UserID, req.SoulID) {
+		return bs.AutonomousTurnDraft{}, errConversationRetired
+	}
 
 	ctx = bs.ContextWithAutonomousTurn(ctx)
 	ctx = bs.WithUserID(ctx, req.UserID)
@@ -404,6 +410,9 @@ func (g *Gateway) CommitAutonomousTurn(ctx context.Context, commit bs.Autonomous
 	turnMu := g.turnMutex(commit.UserID, commit.SoulID)
 	turnMu.Lock()
 	defer turnMu.Unlock()
+	if g.conversationRetired(commit.UserID, commit.SoulID) {
+		return receipt, bs.PermanentlyNotSent(errConversationRetired)
+	}
 
 	ctx = bs.ContextWithAutonomousTurn(ctx)
 	ctx = bs.WithUserID(ctx, commit.UserID)

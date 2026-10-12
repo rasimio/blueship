@@ -138,6 +138,7 @@ type (
 	BotCommandDocument   = core.BotCommandDocument
 	BotCommandHandler    = core.BotCommandHandler
 	BotCommandButton     = core.BotCommandButton
+	TelegramCaller       = core.TelegramCaller
 	InvoiceOffer         = core.InvoiceOffer
 	BotMenu              = core.BotMenu
 	BotMenuNode          = core.BotMenuNode
@@ -307,6 +308,7 @@ var (
 	ErrBotPersonaNoSoul         = core.ErrBotPersonaNoSoul
 	ErrExecutionDenied          = core.ErrExecutionDenied
 	ErrPaymentUnavailable       = core.ErrPaymentUnavailable
+	ErrConversationBusy         = core.ErrConversationBusy
 )
 
 var NewTaskStatusReader = core.NewTaskStatusReader

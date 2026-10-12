@@ -95,6 +95,15 @@ type Gateway struct {
 	// key stood for. Guarded by mu, like kbScreen.
 	kbAsk map[string]kbAskEntry
 
+	// privateMenus records the chats whose per-chat command menu (the one
+	// carrying Private commands) this process has already published, keyed
+	// like users. Telegram keeps the menu, so once per process is enough.
+	privateMenus sync.Map // map[string]struct{}
+
+	// retired holds the conversations whose account was reset, keyed like
+	// turnLocks. See retireConversation.
+	retired sync.Map // map[string]struct{}
+
 	// turnLocks serializes every chat turn for one (user, soul), regardless
 	// of transport. A web message, a Telegram message, and an autonomous
 	// draft/commit must never observe or mutate the same live session
@@ -783,13 +792,61 @@ func (g *Gateway) sendDenial(ctx context.Context, bi *botInstance, tgChatID int6
 }
 
 // runHostCommand invokes a host command by name and delivers its answer.
-// Shared by the typed-command path, the refusal buttons, and the reply a
-// command asked to wait for, so all three behave identically.
-func (g *Gateway) runHostCommand(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, us *UserState, name, args string) {
-	result, err := g.deps.CommandHandler(ctx, bs.BotCommandRequest{
+// Shared by the typed-command path, the refusal buttons, the reply a
+// command asked to wait for, and inline buttons, so all of them behave
+// identically. editID is the message a tapped button lives on, which the
+// answer replaces; zero sends a new one.
+func (g *Gateway) runHostCommand(ctx context.Context, bi *botInstance, caller bs.TelegramCaller, us *UserState, name, args string, editID int) {
+	if g.isExclusiveCommand(name) {
+		// Quieting the conversation can mean waiting for an answer to
+		// wind down, and this is the loop every chat's updates go through.
+		go g.execHostCommand(ctx, bi, caller, us, name, args, editID)
+		return
+	}
+	g.execHostCommand(ctx, bi, caller, us, name, args, editID)
+}
+
+func (g *Gateway) execHostCommand(ctx context.Context, bi *botInstance, caller bs.TelegramCaller, us *UserState, name, args string, editID int) {
+	g.maybeRetractPrivateCommands(ctx, bi, name, caller)
+	req := bs.BotCommandRequest{
 		Name: name, Args: args, UserID: us.UserID, SoulID: us.SoulID,
-		BotID: bi.id, BotKind: bi.kind,
-	})
+		BotID: bi.id, BotKind: bi.kind, Caller: caller,
+	}
+	// The handler quiets the conversation itself, once it has decided to
+	// act; the gateway only releases it, after the handler is done.
+	var release func()
+	if g.isExclusiveCommand(name) {
+		req.Quiet = func(qctx context.Context) error {
+			if release != nil {
+				return nil
+			}
+			r, err := g.quietConversation(qctx, us.UserID, us.SoulID)
+			if err != nil {
+				return err
+			}
+			release = r
+			return nil
+		}
+	}
+	result, err := g.deps.CommandHandler(ctx, req)
+	if err == nil && result.Restart {
+		// Before the conversation is released, so nothing queued for it
+		// runs against the account that is gone, and no chat is rebuilt
+		// from it in between.
+		g.retireConversation(us.UserID, us.SoulID)
+		g.forgetTelegramAccount(us.UserID)
+	}
+	if release != nil {
+		release()
+	}
+	if errors.Is(err, bs.ErrConversationBusy) {
+		g.logger.Warn("gateway: exclusive command found its conversation busy",
+			"command", name, "user_id", us.UserID)
+		// A new message, not an edit: the buttons on the tapped one are
+		// still the way to try again.
+		g.renderHostCommand(ctx, bi, caller.ChatID, 0, name, bs.BotCommandResult{Text: g.deps.Config.UI.CommandBusy})
+		return
+	}
 	if err != nil {
 		g.logger.Error("gateway: host command failed",
 			"command", name, "user_id", us.UserID, "error", err)
@@ -797,16 +854,20 @@ func (g *Gateway) runHostCommand(ctx context.Context, bi *botInstance, tgChatID,
 	}
 
 	// Claim the next message BEFORE answering, so a fast reply cannot
-	// arrive while there is nothing recorded to route it to.
-	if result.AwaitReply != "" && g.deps.BotOnboarding != nil && bi.id != uuid.Nil {
-		if err := g.deps.BotOnboarding.AdvanceStep(ctx, tgUserID, bi.id,
+	// arrive while there is nothing recorded to route it to. Typed
+	// commands only: a tapped button never parked the chat.
+	if editID == 0 && result.AwaitReply != "" && g.deps.BotOnboarding != nil && bi.id != uuid.Nil {
+		if err := g.deps.BotOnboarding.AdvanceStep(ctx, caller.UserID, bi.id,
 			onbStepAwaitPrefix+result.AwaitReply, nil); err != nil {
 			g.logger.Warn("gateway: could not park the chat for a reply",
 				"command", name, "error", err)
 		}
 	}
 
-	g.renderHostCommand(ctx, bi, tgChatID, 0, name, result)
+	g.renderHostCommand(ctx, bi, caller.ChatID, editID, name, result)
+	if result.Restart {
+		g.greetAsNew(ctx, bi, caller)
+	}
 }
 
 func (g *Gateway) renderHostCommand(ctx context.Context, bi *botInstance, tgChatID int64, editID int, name string, result bs.BotCommandResult) {
@@ -892,10 +953,11 @@ func (g *Gateway) renderHostCommand(ctx context.Context, bi *botInstance, tgChat
 // The reply may carry a single link button — the way a host hands over
 // something the chat cannot produce on its own, a payment page being the
 // case this was built for.
-func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, us *UserState, text string) bool {
+func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, caller bs.TelegramCaller, us *UserState, text string) bool {
 	if us == nil {
 		return false
 	}
+	tgChatID := caller.ChatID
 	cmd, forUs := g.parseCommand(bi, text)
 	if !forUs || cmd == "" {
 		return false
@@ -930,7 +992,7 @@ func (g *Gateway) maybeRunHostCommand(ctx context.Context, bi *botInstance, tgCh
 	}
 	// Consumed either way, including on failure: the alternative is
 	// handing "/plus foo@bar" to the model as though it were conversation.
-	g.runHostCommand(ctx, bi, tgChatID, tgUserID, us, name, args)
+	g.runHostCommand(ctx, bi, caller, us, name, args, 0)
 	return true
 }
 
@@ -1034,6 +1096,8 @@ func (g *Gateway) prepareTelegramInbound(
 			"chat_id", chatID)
 		return nil, 0, false
 	}
+	caller := callerFromMessage(msg)
+	g.maybePublishPrivateCommands(ctx, bi, caller)
 	if g.maybeRunDeeplinkLogin(ctx, bi, rawChatID, tgUserID, text) {
 		return nil, 0, false
 	}
@@ -1071,7 +1135,7 @@ func (g *Gateway) prepareTelegramInbound(
 	// The case they exist for is somebody the policy has just refused who
 	// needs a way to do something about it — putting them behind the same
 	// gate that said no would close the loop.
-	if g.maybeRunHostCommand(ctx, bi, rawChatID, tgUserID, us, text) {
+	if g.maybeRunHostCommand(ctx, bi, caller, us, text) {
 		return nil, 0, false
 	}
 

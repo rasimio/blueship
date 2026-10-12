@@ -122,7 +122,7 @@ func TestHostCommandDeliveryIsReportedWithWhatItOffered(t *testing.T) {
 	host := &watchingOnboarding{}
 	g, bi := watchedGateway(t, host)
 	us := &UserState{UserID: uuid.New(), SoulID: uuid.New()}
-	if !g.maybeRunHostCommand(context.Background(), bi, 42, 555, us, "/plus") {
+	if !g.maybeRunHostCommand(context.Background(), bi, bs.TelegramCaller{ChatID: 42, UserID: 555}, us, "/plus") {
 		t.Fatal("not consumed")
 	}
 	if len(host.delivered) != 1 {
