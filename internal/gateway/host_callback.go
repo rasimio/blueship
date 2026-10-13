@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 
-	bs "github.com/rasimio/blueship/internal/core"
 	"github.com/rasimio/blueship/internal/transport/telegram"
 )
 
@@ -39,11 +38,6 @@ func (g *Gateway) maybeHandleHostCallback(ctx context.Context, bi *botInstance, 
 	if us == nil {
 		return true
 	}
-	result, err := g.deps.CommandHandler(ctx, bs.BotCommandRequest{Name: name, Args: args, UserID: us.UserID, SoulID: us.SoulID, BotID: bi.id, BotKind: bi.kind})
-	if err != nil {
-		g.logger.Warn("gateway: host callback failed", "command", name, "error", err)
-		return true
-	}
-	g.renderHostCommand(ctx, bi, cq.Message.Chat.ID, cq.Message.MessageID, name, result)
+	g.runHostCommand(ctx, bi, callerFromCallback(cq), us, name, args, cq.Message.MessageID)
 	return true
 }

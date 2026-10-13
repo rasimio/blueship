@@ -38,7 +38,7 @@ func TestHostCommandPassesNameAndArgs(t *testing.T) {
 	us := &UserState{UserID: uuid.New(), SoulID: uuid.New()}
 	bi := &botInstance{tgUsername: "TestBot"}
 
-	if !g.maybeRunHostCommand(context.Background(), bi, 1, 777, us, "/plus me@example.com") {
+	if !g.maybeRunHostCommand(context.Background(), bi, bs.TelegramCaller{ChatID: 1, UserID: 777}, us, "/plus me@example.com") {
 		t.Fatal("maybeRunHostCommand = false, want the command consumed")
 	}
 	if got.Name != "plus" {
@@ -72,7 +72,7 @@ func TestHostCommandIgnoresEverythingElse(t *testing.T) {
 		"another bot":      "/plus@OtherBot me@example.com",
 		"empty":            "",
 	} {
-		if g.maybeRunHostCommand(context.Background(), bi, 1, 777, us, in) {
+		if g.maybeRunHostCommand(context.Background(), bi, bs.TelegramCaller{ChatID: 1, UserID: 777}, us, in) {
 			t.Errorf("%s: %q was consumed as a host command", name, in)
 		}
 	}
@@ -86,7 +86,7 @@ func TestHostCommandIgnoresEverythingElse(t *testing.T) {
 func TestHostCommandWithoutAHandlerFallsThrough(t *testing.T) {
 	g := hostCommandGateway(payMenu, nil)
 	us := &UserState{UserID: uuid.New()}
-	if g.maybeRunHostCommand(context.Background(), &botInstance{}, 1, 777, us, "/plus me@example.com") {
+	if g.maybeRunHostCommand(context.Background(), &botInstance{}, bs.TelegramCaller{ChatID: 1, UserID: 777}, us, "/plus me@example.com") {
 		t.Error("command consumed with no handler wired")
 	}
 }
@@ -99,7 +99,7 @@ func TestHostCommandConsumesOnHandlerError(t *testing.T) {
 		return bs.BotCommandResult{}, context.DeadlineExceeded
 	})
 	us := &UserState{UserID: uuid.New()}
-	if !g.maybeRunHostCommand(context.Background(), &botInstance{}, 1, 777, us, "/plus me@example.com") {
+	if !g.maybeRunHostCommand(context.Background(), &botInstance{}, bs.TelegramCaller{ChatID: 1, UserID: 777}, us, "/plus me@example.com") {
 		t.Error("a failed host command fell through to the model")
 	}
 }

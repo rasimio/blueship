@@ -377,6 +377,36 @@ func (c *Client) SetMyCommands(ctx context.Context, commands []BotCommand) error
 	return err
 }
 
+// SetChatCommands publishes the command menu one chat sees instead of the
+// bot-wide one. Telegram resolves a chat's menu from the narrowest scope it
+// has, so this list replaces the default for that chat entirely rather than
+// adding to it — pass the whole menu, not the difference.
+func (c *Client) SetChatCommands(ctx context.Context, chatID int64, commands []BotCommand) error {
+	if !c.IsConfigured() {
+		return nil
+	}
+	if commands == nil {
+		commands = []BotCommand{}
+	}
+	_, err := c.postJSON(ctx, "setMyCommands", map[string]any{
+		"commands": commands,
+		"scope":    map[string]any{"type": "chat", "chat_id": chatID},
+	})
+	return err
+}
+
+// DeleteChatCommands drops a chat's own menu, so it falls back to the
+// bot-wide one. Deleting a menu the chat never had is not an error.
+func (c *Client) DeleteChatCommands(ctx context.Context, chatID int64) error {
+	if !c.IsConfigured() {
+		return nil
+	}
+	_, err := c.postJSON(ctx, "deleteMyCommands", map[string]any{
+		"scope": map[string]any{"type": "chat", "chat_id": chatID},
+	})
+	return err
+}
+
 func (c *Client) postJSON(ctx context.Context, method string, payload map[string]any) (*SendMessageResult, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {

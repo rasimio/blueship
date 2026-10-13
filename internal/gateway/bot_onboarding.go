@@ -267,7 +267,7 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 			if us == nil {
 				return false
 			}
-			g.runHostCommand(ctx, bi, tgChatID, tgUserID, us, awaited, strings.TrimSpace(text))
+			g.runHostCommand(ctx, bi, callerFromSender(tgChatID, tgUserID, sender), us, awaited, strings.TrimSpace(text), 0)
 			return true
 		}
 		// The offer is a nudge alongside the conversation, not instead
@@ -424,7 +424,7 @@ func (g *Gateway) maybeRunBotOnboardingCallback(ctx context.Context, bi *botInst
 				"command", name, "tg_user", cq.From.ID)
 			return true
 		}
-		g.runHostCommand(ctx, bi, cq.Message.Chat.ID, cq.From.ID, us, name, "")
+		g.runHostCommand(ctx, bi, callerFromCallback(cq), us, name, "", 0)
 		return true
 	case d == onbCallbackOfferLater:
 		g.stripKeyboard(ctx, bi, cq)
@@ -540,8 +540,8 @@ func (g *Gateway) onboardingInstant(
 		// told they have an account. Run it, now that we know who they
 		// are — this is the whole point of the link they followed.
 		if isErrand && userID != uuid.Nil {
-			g.runHostCommand(ctx, bi, tgChatID, tgUserID,
-				&UserState{UserID: userID, SoulID: soulID}, errand, "")
+			g.runHostCommand(ctx, bi, callerFromSender(tgChatID, tgUserID, sender),
+				&UserState{UserID: userID, SoulID: soulID}, errand, "", 0)
 		}
 		return true
 	case err != nil:
@@ -564,8 +564,8 @@ func (g *Gateway) onboardingInstant(
 	// Deferred to the end so the greeting lands first: arriving mid-task
 	// still starts with being told where you are.
 	if isErrand && userID != uuid.Nil {
-		defer g.runHostCommand(ctx, bi, tgChatID, tgUserID,
-			&UserState{UserID: userID, SoulID: soulID}, errand, "")
+		defer g.runHostCommand(ctx, bi, callerFromSender(tgChatID, tgUserID, sender),
+			&UserState{UserID: userID, SoulID: soulID}, errand, "", 0)
 	}
 
 	// Arm the deferred persona offer. Only instant accounts get one:
