@@ -302,6 +302,11 @@ type BotCommandRequest struct {
 	// out-of-date request leaves a running answer alone. Calling it again
 	// is a no-op. ErrConversationBusy means the answer would not stop.
 	Quiet func(context.Context) error
+
+	// AwaitState is the AwaitState of the result that asked for this
+	// reply, handed back with the answer in Args. Empty on every other
+	// request, including a person typing the awaited command by hand.
+	AwaitState string
 }
 
 // BotCommandResult is what the host wants said back. Text is required;
@@ -324,7 +329,14 @@ type BotCommandResult struct {
 	// the one-link shorthand, kept because most replies need exactly one.
 	//
 	// Rows rather than a grid: these are choices with prices on them, and
-	// side by side they read as one control with two halves.
+	// side by side they read as one control with two halves. A button
+	// marked SameRow joins the row before it, for the controls that are
+	// one control: numbers to pick from, back and forward.
+	//
+	// A tapped button's answer replaces the message it was tapped on; if
+	// that message can no longer be edited, the answer arrives as a new
+	// one. A Text longer than a Telegram message is split, and the buttons
+	// go under its last part.
 	Buttons []BotCommandButton
 
 	// AwaitReply, when set, claims the person's next message and delivers
@@ -335,7 +347,28 @@ type BotCommandResult struct {
 	// remember that it is outstanding. The framework already keeps
 	// per-(user, bot) state for onboarding and reuses it here rather than
 	// asking every host to build the same thing.
+	//
+	// The wait ends when the answer arrives, and also when the person
+	// does something else instead: types a command, taps a key on the
+	// persistent keyboard, or taps a host button whose result does not
+	// ask again. A question left open after the person moved on would
+	// take the next thing they say to the assistant as its answer.
+	//
+	// Only a message from the chat the question was asked in answers it.
 	AwaitReply string
+
+	// AwaitState is kept with the question and handed back with the answer
+	// as BotCommandRequest.AwaitState: what the question was about ("the
+	// entry being edited"), so the answer can be acted on without the host
+	// keeping a table of who was asked what. It survives a restart, like
+	// the wait itself. Ignored without AwaitReply.
+	AwaitState string
+
+	// Plain sends Text exactly as given, without reading Markdown in it.
+	// For text the host did not write — something a person saved, shown
+	// back to them — where a stray asterisk or dollar sign must reach the
+	// screen as itself.
+	Plain bool
 
 	// Restart says the command detached the chat from the account it was
 	// talking to: the account was reset to its first day. The transport
@@ -361,6 +394,10 @@ type BotCommandButton struct {
 	// handing it one would put the transport inside the product for the
 	// sake of a single call.
 	Invoice *InvoiceOffer
+
+	// SameRow puts this button beside the one before it instead of on a
+	// row of its own. Telegram fits up to eight buttons in a row.
+	SameRow bool
 }
 
 // InvoiceOffer is a purchase to put behind a button, priced in Telegram

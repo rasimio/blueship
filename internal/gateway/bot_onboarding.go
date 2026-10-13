@@ -95,6 +95,8 @@ const (
 	onbDataEdit        = "edit"          // true when the run updates an existing soul instead of creating one
 	onbDataTurns       = "turns"         // exchanges counted while step=offer_pending
 	onbDataSource      = "source"        // deep-link payload the /start that opened the flow carried
+	onbDataAwaitChat   = "await_chat"    // the chat a host command's question was asked in, as decimal text
+	onbDataAwaitState  = "await_state"   // BotCommandResult.AwaitState, handed back with the answer
 
 	// onbMaxSourceRunes bounds the recorded deep-link payload. Telegram
 	// caps its own at 64; anything longer was typed by hand and is not a
@@ -229,6 +231,13 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 			"chat_id", chatID, "bot_id", bi.id.String(), "error", err)
 		return false
 	}
+	// A host command's question belongs to the chat it was asked in. The
+	// row is the person's, not the chat's, and something they say in a
+	// group is not a reply to what the bot asked them in private — nor a
+	// leftover for this chat to throw away.
+	if strings.HasPrefix(step, onbStepAwaitPrefix) && !awaitAskedIn(data, tgChatID) {
+		step, data = "", nil
+	}
 
 	if onboarded {
 		// /start on a known chat is a greeting, never a re-signup —
@@ -256,6 +265,7 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 		// fresh row and a failure cannot leave the chat waiting forever.
 		if strings.HasPrefix(step, onbStepAwaitPrefix) {
 			awaited := strings.TrimPrefix(step, onbStepAwaitPrefix)
+			awaitState, _ := data[onbDataAwaitState].(string)
 			if err := g.deps.BotOnboarding.ClearState(ctx, tgUserID, bi.id); err != nil {
 				g.logger.Warn("gateway: clearing an awaited reply failed",
 					"command", awaited, "error", err)
@@ -265,9 +275,22 @@ func (g *Gateway) maybeRunBotOnboarding(ctx context.Context, bi *botInstance, ch
 			}
 			us := g.cachedUserState(bi.id, chatID)
 			if us == nil {
-				return false
+				// Nothing cached since a restart. The answer is still an
+				// answer: falling through would hand it to the assistant
+				// as conversation, which is what the question was for not
+				// doing.
+				resolved, rerr := g.getOrInitTelegramUser(ctx, bi, chatID, tgChatID, tgUserID)
+				if rerr != nil {
+					g.logger.Warn("gateway: awaited reply from an unresolved chat",
+						"command", awaited, "tg_user", tgUserID, "error", rerr)
+					return false
+				}
+				us = resolved
 			}
-			g.runHostCommand(ctx, bi, callerFromSender(tgChatID, tgUserID, sender), us, awaited, strings.TrimSpace(text), 0)
+			g.runHostRequest(ctx, bi, us, bs.BotCommandRequest{
+				Name: awaited, Args: strings.TrimSpace(text), AwaitState: awaitState,
+				Caller: callerFromSender(tgChatID, tgUserID, sender),
+			}, 0)
 			return true
 		}
 		// The offer is a nudge alongside the conversation, not instead

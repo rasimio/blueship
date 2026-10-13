@@ -290,6 +290,44 @@ func (c *Client) EditMessageText(ctx context.Context, chatID int64, messageID in
 	return err
 }
 
+// SendPlainMessage sends text exactly as given: no parse mode, so nothing
+// in it is read as markup, and no link preview. For text a person wrote
+// and is shown back, where Markdown conversion would change what they
+// see. rows may be nil for a message without buttons.
+func (c *Client) SendPlainMessage(ctx context.Context, chatID int64, text string, rows [][]InlineKeyboardButton) (*SendMessageResult, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("telegram bot not configured")
+	}
+	payload := map[string]any{
+		"chat_id":              chatID,
+		"text":                 text,
+		"link_preview_options": map[string]any{"is_disabled": true},
+	}
+	if len(rows) > 0 {
+		payload["reply_markup"] = map[string]any{"inline_keyboard": rows}
+	}
+	return c.postJSON(ctx, "sendMessage", payload)
+}
+
+// EditPlainMessageText is EditMessageText for SendPlainMessage's kind of
+// text. nil rows remove the keyboard.
+func (c *Client) EditPlainMessageText(ctx context.Context, chatID int64, messageID int, text string, rows [][]InlineKeyboardButton) error {
+	if !c.IsConfigured() {
+		return fmt.Errorf("telegram bot not configured")
+	}
+	if rows == nil {
+		rows = [][]InlineKeyboardButton{}
+	}
+	_, err := c.postJSON(ctx, "editMessageText", map[string]any{
+		"chat_id":              chatID,
+		"message_id":           messageID,
+		"text":                 text,
+		"link_preview_options": map[string]any{"is_disabled": true},
+		"reply_markup":         map[string]any{"inline_keyboard": rows},
+	})
+	return err
+}
+
 // EditMessageReplyMarkup replaces only the inline keyboard of an
 // existing message — leaves the text body untouched. Used by the
 // onboarding traits picker so each tap flips one button between
@@ -800,6 +838,12 @@ const (
 // breaks.
 func SplitMessage(text string) []string {
 	return splitMessage(text, maxTelegramMessageLength)
+}
+
+// SplitMessageAt is SplitMessage with a smaller limit, in runes. Telegram
+// counts UTF-16 units, so text full of emoji needs the headroom.
+func SplitMessageAt(text string, maxRunes int) []string {
+	return splitMessage(text, maxRunes)
 }
 
 // SendLong sends a long text message, splitting into chunks if needed.

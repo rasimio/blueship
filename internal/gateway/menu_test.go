@@ -24,6 +24,9 @@ type fakeBotAPI struct {
 	mu    sync.Mutex
 	calls []apiCall
 	srv   *httptest.Server
+	// fail answers these methods with a Bot API error carrying the
+	// description, the way Telegram refuses an edit it cannot make.
+	fail map[string]string
 }
 
 type apiCall struct {
@@ -39,10 +42,17 @@ func newFakeBotAPI(t *testing.T) *fakeBotAPI {
 		var body map[string]any
 		_ = json.Unmarshal(raw, &body)
 		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		method := parts[len(parts)-1]
 		f.mu.Lock()
-		f.calls = append(f.calls, apiCall{method: parts[len(parts)-1], body: body})
+		f.calls = append(f.calls, apiCall{method: method, body: body})
+		refusal, refused := f.fail[method]
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
+		if refused {
+			out, _ := json.Marshal(map[string]any{"ok": false, "error_code": 400, "description": refusal})
+			_, _ = w.Write(out)
+			return
+		}
 		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":501}}`)
 	}))
 	t.Cleanup(f.srv.Close)
