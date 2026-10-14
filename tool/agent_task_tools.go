@@ -122,7 +122,7 @@ func RegisterAgentTaskTools(r *bs.ToolRegistry, d *bs.Deps) error {
 				"max_iterations":{"type":"integer","default":20,"description":"Safety cap on iteration count (1-100). For research with grounding gates, give ≥12 — the auditor needs at least one recovery iteration after rejecting a specific claim, otherwise S-tier work with one fabricated number gets stuck at max-iter as 'failed'."},
 				"cadence":{"type":"string","description":"Min interval between ticks (Go duration: '1h', '30m', '15s'). Rate-limits monitors; omit for fast-iterating tasks."},
 				"deadline":{"type":"string","description":"Optional ISO datetime — task fails if not done by this time"},
-				"start_at":{"type":"string","description":"Optional ISO datetime with timezone — the task will not tick before this moment. THE way to express a delayed one-shot («сделай в 21:14», «напиши через 15 минут» → start_at = now+15m): set start_at, omit cadence, max_iterations small."}
+				"start_at":{"type":"string","description":"Optional ISO datetime with timezone — the task will not tick before this moment. Use it for work the assistant itself must do later (look something up at 21:14, check a status in 15 minutes and report): set start_at, omit cadence, max_iterations small. A reminder that only brings the person's own words back at a time is not a task — use the host's reminder or notes tool when it has one."}
 			},
 			"required":["title","description","acceptance_criteria"]
 		}`),
