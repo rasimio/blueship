@@ -100,6 +100,11 @@ type Deps struct {
 	// no consumer registered.
 	AgentIterationCompletedHook func(ctx context.Context, task AgentTask, result IterationResult)
 
+	// RecurringTaskWake brings a recurring task forward when work it
+	// handles comes due between scheduled runs. Nil = schedules alone
+	// decide when recurring tasks run.
+	RecurringTaskWake RecurringTaskWake
+
 	// SelfAgentID returns the Ship's own Fleet-issued agent id, or "" if
 	// Fleet hasn't bootstrapped yet. Used by delegate-strategy handlers
 	// so the peer can route status callbacks back here.
@@ -236,6 +241,7 @@ func (d *Deps) ForUser(userID uuid.UUID, chatID string, isOwner bool) *Deps {
 		MessageEncoder:                 d.MessageEncoder,
 		TurnCompletedHook:              d.TurnCompletedHook,
 		AgentIterationCompletedHook:    d.AgentIterationCompletedHook,
+		RecurringTaskWake:              d.RecurringTaskWake,
 		ResolveSoul:                    d.ResolveSoul,
 		ResolveTelegramChat:            d.ResolveTelegramChat,
 		TouchTelegramChat:              d.TouchTelegramChat,

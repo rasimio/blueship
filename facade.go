@@ -77,6 +77,7 @@ type (
 	TaskStatusReader              = core.TaskStatusReader
 	AgentDeps                     = core.AgentDeps
 	IterationResult               = core.IterationResult
+	RecurringTaskWake             = core.RecurringTaskWake
 	TaskProgram                   = core.TaskProgram
 	TaskProgramInput              = core.TaskProgramInput
 	TaskProgramActivation         = core.TaskProgramActivation

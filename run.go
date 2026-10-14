@@ -76,6 +76,7 @@ func (s *Ship) Run(ctx context.Context) error {
 	// constructor of stores/clients.
 	deps.TurnCompletedHook = s.cfg.Gateway.TurnCompletedHook
 	deps.AgentIterationCompletedHook = s.cfg.Gateway.AgentIterationCompletedHook
+	deps.RecurringTaskWake = s.cfg.Gateway.RecurringTaskWake
 	deps.ResolveSoul = s.cfg.Gateway.ResolveSoul
 	deps.ResolveTelegramChat = s.cfg.Gateway.ResolveTelegramChat
 	deps.TouchTelegramChat = s.cfg.Gateway.TouchTelegramChat

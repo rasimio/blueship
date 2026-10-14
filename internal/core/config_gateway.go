@@ -85,6 +85,11 @@ type GatewayConfig struct {
 	// Nil = no-op.
 	AgentIterationCompletedHook func(ctx context.Context, task AgentTask, result IterationResult) `yaml:"-" json:"-"`
 
+	// RecurringTaskWake lets the host run a recurring task before its
+	// schedule elapses when work it handles comes due in between (a
+	// reminder under a 5-minute heartbeat). Nil = schedules alone decide.
+	RecurringTaskWake RecurringTaskWake `yaml:"-" json:"-"`
+
 	// ResolveSoul maps an already-resolved user to the soul that should
 	// handle their request. The gateway calls it after user resolution
 	// and threads the result through ctx via WithSoulID so every
