@@ -303,6 +303,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	}
 
 	s.logger.Info("agent-tasks: pending", "count", len(tasks))
+	early := s.recurringDueEarly(ctx, tasks, time.Now())
 
 	for _, task := range tasks {
 		handler, dispatchTag, ok := s.resolveHandler(task)
@@ -319,8 +320,9 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			continue
 		}
 
-		// Check cron schedule for recurring tasks.
-		if task.Schedule != nil && !s.shouldRunNow(task) {
+		// Check cron schedule for recurring tasks. The host may bring one
+		// forward when work it handles came due since its last run.
+		if task.Schedule != nil && !s.shouldRunNow(task) && !early[task.ID] {
 			continue
 		}
 
