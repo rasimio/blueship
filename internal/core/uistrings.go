@@ -370,6 +370,12 @@ type BotCommandResult struct {
 	// screen as itself.
 	Plain bool
 
+	// NewMessage delivers the answer to a tapped button as a message of
+	// its own instead of replacing the one the button is on. For buttons
+	// that ride on content the person should keep — a mailing's
+	// "unsubscribe" must not wipe the mailing it was tapped under.
+	NewMessage bool
+
 	// Restart says the command detached the chat from the account it was
 	// talking to: the account was reset to its first day. The transport
 	// drops whatever it cached about the person, delivers Text, and then

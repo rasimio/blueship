@@ -542,6 +542,9 @@ func (s *Ship) Run(ctx context.Context) error {
 			defer wg.Done()
 			gw.Run(ctx)
 		}()
+		if ready := s.cfg.Gateway.DirectSenderReady; ready != nil {
+			ready(gw.SendDirect)
+		}
 	}
 
 	// Start task execution only after the initial outbound gateway wiring and

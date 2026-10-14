@@ -162,6 +162,12 @@ type GatewayConfig struct {
 	// CommandHandler answers the commands marked Host. Nil disables them.
 	CommandHandler BotCommandHandler `yaml:"-" json:"-"`
 
+	// DirectSenderReady, when set, is handed the gateway's DirectSender
+	// once the gateway is built and its bots are loaded — the moment a
+	// host worker that sends prepared messages (a mailing) can start.
+	// Called at most once per run; never called when no gateway runs.
+	DirectSenderReady func(DirectSender) `yaml:"-" json:"-"`
+
 	// CommandAudience reports whether a person is shown the commands marked
 	// Private. It decides what the menu lists, not what may run: that stays
 	// with CommandHandler. Nil lists Private commands to nobody.
