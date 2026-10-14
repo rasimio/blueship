@@ -95,6 +95,10 @@ func classifyDirectFailure(err error) *bs.DirectSendError {
 		case code == http.StatusTooManyRequests:
 			out.Outcome = bs.DirectRateLimited
 			out.RetryAfter = time.Duration(apiErr.Parameters.RetryAfter) * time.Second
+		case code == http.StatusUnauthorized || code == http.StatusNotFound:
+			// Telegram's answer to a revoked or unknown token: the bot is
+			// gone, which says nothing about the message or the chat.
+			out.Outcome = bs.DirectBotUnavailable
 		case code == http.StatusRequestTimeout:
 			// An intermediary may have timed out after Telegram took it.
 			out.Outcome = bs.DirectUnknown

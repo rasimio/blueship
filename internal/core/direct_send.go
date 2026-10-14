@@ -62,7 +62,8 @@ type DirectOutcome string
 
 const (
 	// DirectBotUnavailable: the bot is not running in this process (not
-	// loaded yet, or removed). Nothing was sent, and nothing about the
+	// loaded yet, or removed), or Telegram no longer knows its token
+	// (401/404). Nothing was sent, and nothing about the
 	// recipient is known — it says no more about them than about anyone
 	// else that bot would have reached.
 	DirectBotUnavailable DirectOutcome = "bot_unavailable"

@@ -108,6 +108,8 @@ func TestClassifyDirectFailure(t *testing.T) {
 		{"flood", &telegram.APIError{StatusCode: 429, ErrorCode: 429, Parameters: telegram.ResponseParameters{RetryAfter: 4}}, bs.DirectRateLimited, 4 * time.Second},
 		{"blocked", &telegram.APIError{StatusCode: 403, ErrorCode: 403, Description: "Forbidden: bot was blocked by the user"}, bs.DirectRejected, 0},
 		{"chat gone", &telegram.APIError{StatusCode: 400, ErrorCode: 400, Description: "Bad Request: chat not found"}, bs.DirectRejected, 0},
+		{"revoked token", &telegram.APIError{StatusCode: 401, ErrorCode: 401, Description: "Unauthorized"}, bs.DirectBotUnavailable, 0},
+		{"unknown token", &telegram.APIError{StatusCode: 404, ErrorCode: 404, Description: "Not Found"}, bs.DirectBotUnavailable, 0},
 		{"proxy timeout", &telegram.APIError{StatusCode: 408}, bs.DirectUnknown, 0},
 		{"server error", &telegram.APIError{StatusCode: 502}, bs.DirectUnknown, 0},
 		{"never left", &telegram.TransportError{Method: "sendMessage", Err: errors.New("connection refused")}, bs.DirectNotSent, 0},
