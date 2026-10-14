@@ -181,6 +181,9 @@ func (c *Client) UploadForInline(ctx context.Context, chatID int64, kind, filena
 	}
 	w.Close()
 
+	if err := c.pace(ctx, method); err != nil {
+		return InlineMedia{}, 0, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.methodURL(method), &body)
 	if err != nil {
 		return InlineMedia{}, 0, err

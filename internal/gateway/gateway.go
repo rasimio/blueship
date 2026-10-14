@@ -865,6 +865,9 @@ func (g *Gateway) execHostCommand(ctx context.Context, bi *botInstance, us *User
 	// arrive while there is nothing recorded to route it to.
 	g.settleAwaitedReply(ctx, bi, caller, name, result)
 
+	if result.NewMessage {
+		editID = 0
+	}
 	g.renderHostCommand(ctx, bi, caller.ChatID, editID, name, result)
 	if result.Restart {
 		g.greetAsNew(ctx, bi, caller)

@@ -139,6 +139,13 @@ type (
 	BotCommandHandler    = core.BotCommandHandler
 	BotCommandButton     = core.BotCommandButton
 	TelegramCaller       = core.TelegramCaller
+	DirectMessage        = core.DirectMessage
+	DirectPhoto          = core.DirectPhoto
+	DirectButton         = core.DirectButton
+	DirectReceipt        = core.DirectReceipt
+	DirectOutcome        = core.DirectOutcome
+	DirectSendError      = core.DirectSendError
+	DirectSender         = core.DirectSender
 	InvoiceOffer         = core.InvoiceOffer
 	BotMenu              = core.BotMenu
 	BotMenuNode          = core.BotMenuNode
@@ -291,6 +298,14 @@ const (
 const (
 	OnboardingModeWizard  = core.OnboardingModeWizard
 	OnboardingModeInstant = core.OnboardingModeInstant
+)
+
+// --- What a failed direct send means for the message ---
+const (
+	DirectNotSent     = core.DirectNotSent
+	DirectRateLimited = core.DirectRateLimited
+	DirectRejected    = core.DirectRejected
+	DirectUnknown     = core.DirectUnknown
 )
 
 const (

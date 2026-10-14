@@ -30,6 +30,10 @@ type Client struct {
 	// Optional; nil means those recoveries stay silent, which is the
 	// behaviour that hid a formatting regression for hours.
 	logger *slog.Logger
+
+	// limiter paces every message this bot sends; see limiter.go. Nil
+	// (a client built by hand, as tests do) paces nothing.
+	limiter *sendLimiter
 }
 
 // SetLogger attaches a logger. Without one, every fallback this client
@@ -57,7 +61,17 @@ func NewClientWithAPIURL(token, apiBaseURL string, timeout time.Duration) *Clien
 		token:      token,
 		apiBaseURL: strings.TrimRight(strings.TrimSpace(apiBaseURL), "/"),
 		httpClient: &http.Client{Timeout: timeout},
+		limiter:    newSendLimiter(),
 	}
+}
+
+// pace waits for this bot's send allowance when method puts a message in
+// a chat. The only error is ctx ending first.
+func (c *Client) pace(ctx context.Context, method string) error {
+	if !pacedMethods[method] {
+		return nil
+	}
+	return c.limiter.wait(ctx, isBulk(ctx))
 }
 
 func (c *Client) baseURL() string {
@@ -450,6 +464,9 @@ func (c *Client) postJSON(ctx context.Context, method string, payload map[string
 	if err != nil {
 		return nil, fmt.Errorf("telegram %s marshal request: %w", method, err)
 	}
+	if err := c.pace(ctx, method); err != nil {
+		return nil, err
+	}
 	apiURL := c.methodURL(method)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
@@ -482,6 +499,9 @@ func (c *Client) postJSON(ctx context.Context, method string, payload map[string
 		}
 		if len(description) > 500 {
 			description = description[:500] + "..."
+		}
+		if envelope.ErrorCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusTooManyRequests {
+			c.limiter.pause(time.Duration(envelope.Parameters.RetryAfter) * time.Second)
 		}
 		return nil, &APIError{
 			Method: method, StatusCode: resp.StatusCode, ErrorCode: envelope.ErrorCode,
@@ -670,6 +690,9 @@ func (c *Client) SendVoice(ctx context.Context, chatID string, audio []byte) err
 	}
 	w.Close()
 
+	if err := c.pace(ctx, "sendVoice"); err != nil {
+		return err
+	}
 	apiURL := c.methodURL("sendVoice")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, &body)
 	if err != nil {
@@ -795,6 +818,9 @@ func (c *Client) sendFile(ctx context.Context, chatID, method, field, filename, 
 	}
 	w.Close()
 
+	if err := c.pace(ctx, method); err != nil {
+		return 0, err
+	}
 	apiURL := c.methodURL(method)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, &body)
 	if err != nil {
