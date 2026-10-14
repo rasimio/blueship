@@ -22,7 +22,7 @@ import (
 func (g *Gateway) SendDirect(ctx context.Context, msg bs.DirectMessage) (bs.DirectReceipt, error) {
 	bi := g.botByID(msg.BotID)
 	if bi == nil || bi.client == nil || !bi.client.IsConfigured() {
-		return bs.DirectReceipt{}, &bs.DirectSendError{Outcome: bs.DirectNotSent, Description: "bot is not running"}
+		return bs.DirectReceipt{}, &bs.DirectSendError{Outcome: bs.DirectBotUnavailable, Description: "bot is not running"}
 	}
 	rows, err := g.directRows(msg.Buttons)
 	if err != nil {

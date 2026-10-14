@@ -302,10 +302,11 @@ const (
 
 // --- What a failed direct send means for the message ---
 const (
-	DirectNotSent     = core.DirectNotSent
-	DirectRateLimited = core.DirectRateLimited
-	DirectRejected    = core.DirectRejected
-	DirectUnknown     = core.DirectUnknown
+	DirectBotUnavailable = core.DirectBotUnavailable
+	DirectNotSent        = core.DirectNotSent
+	DirectRateLimited    = core.DirectRateLimited
+	DirectRejected       = core.DirectRejected
+	DirectUnknown        = core.DirectUnknown
 )
 
 const (

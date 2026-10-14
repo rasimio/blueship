@@ -61,8 +61,13 @@ type DirectReceipt struct {
 type DirectOutcome string
 
 const (
-	// DirectNotSent: nothing reached Telegram — the bot is not running,
-	// or the request never left. Safe to send again.
+	// DirectBotUnavailable: the bot is not running in this process (not
+	// loaded yet, or removed). Nothing was sent, and nothing about the
+	// recipient is known — it says no more about them than about anyone
+	// else that bot would have reached.
+	DirectBotUnavailable DirectOutcome = "bot_unavailable"
+	// DirectNotSent: the request never reached Telegram. Safe to send
+	// again.
 	DirectNotSent DirectOutcome = "not_sent"
 	// DirectRateLimited: Telegram refused under flood control and created
 	// nothing. Safe to send again after RetryAfter.

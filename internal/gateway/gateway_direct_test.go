@@ -69,7 +69,7 @@ func TestSendDirectBotNotRunningIsNotSent(t *testing.T) {
 	g, _, forms := directGateway(t, func(http.ResponseWriter, map[string]string) {})
 	_, err := g.SendDirect(context.Background(), bs.DirectMessage{BotID: uuid.New(), ChatID: 1, HTML: "x"})
 	var de *bs.DirectSendError
-	if !errors.As(err, &de) || de.Outcome != bs.DirectNotSent {
+	if !errors.As(err, &de) || de.Outcome != bs.DirectBotUnavailable {
 		t.Fatalf("err = %v", err)
 	}
 	if len(*forms) != 0 {
