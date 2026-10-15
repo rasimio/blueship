@@ -44,12 +44,18 @@ func (g *Gateway) CoordinateTaskNotification(
 		)
 	}
 
+	waitStarted := time.Now()
 	turnMu := g.turnMutex(userID, soulID)
 	turnMu.Lock()
 	defer turnMu.Unlock()
 	if g.conversationRetired(userID, soulID) {
 		return receipt, bs.PermanentlyNotSent(errConversationRetired)
 	}
+	ctx, cancel, err := budgetAfterTurnWait(ctx, waitStarted)
+	if err != nil {
+		return receipt, bs.DefinitelyNotSent(fmt.Errorf("coordinate task notification: %w", err))
+	}
+	defer cancel()
 
 	ctx = bs.WithUserID(ctx, userID)
 	ctx = bs.WithSoulID(ctx, soulID)
@@ -81,6 +87,30 @@ func (g *Gateway) CoordinateTaskNotification(
 	}
 	defer unlockActivity()
 	return deliver(ctx, sess.ID)
+}
+
+// budgetAfterTurnWait restarts a notification's time budget once the
+// conversation is free. Waiting for a chat turn is not sending, yet a turn can
+// hold the conversation longer than the whole budget, and a send that spent it
+// waiting failed before it began: a reminder due at 13:59 behind a 56-second
+// turn went to the retry queue and arrived at 14:01:09 (2026-10-15). The
+// caller's budget is kept, counted from when the wait ended. A caller that
+// cancelled while waiting gets its cancellation back; nothing was sent.
+func budgetAfterTurnWait(ctx context.Context, waitStarted time.Time) (context.Context, context.CancelFunc, error) {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return ctx, func() {}, ctx.Err()
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return ctx, func() {}, nil
+	}
+	rebased, cancel := context.WithTimeout(context.WithoutCancel(ctx), deadline.Sub(waitStarted))
+	stop := context.AfterFunc(ctx, func() {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			cancel()
+		}
+	})
+	return rebased, func() { stop(); cancel() }, nil
 }
 
 // SendConversationMessage is the message_send transport for a tenant-bound

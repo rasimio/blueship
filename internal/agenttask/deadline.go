@@ -139,6 +139,7 @@ func (s *Scheduler) notifyTaskLifecycle(ctx context.Context, task core.AgentTask
 		fmt.Sprintf(format, task.Title), refs)
 	if err != nil {
 		s.logger.WarnContext(ctx, "agent-tasks: lifecycle notification failed", "task_id", task.ID, "stage", stage, "error", err)
+		s.wakeForNotificationRetry(ctx, err)
 	}
 }
 

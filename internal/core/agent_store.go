@@ -711,6 +711,21 @@ func (s *AgentTaskStore) RejectNotificationAttempt(ctx context.Context, id uuid.
 	return nil
 }
 
+// NextNotificationRetry is the earliest moment after now at which a deferred
+// notification may be retried, or the zero time when none waits. The
+// scheduler wakes for it; the outbox is drained only by a scheduler run.
+func (s *AgentTaskStore) NextNotificationRetry(ctx context.Context, now time.Time) (time.Time, error) {
+	var next sql.NullTime
+	err := s.db.GetContext(ctx, &next, `
+		SELECT min(next_attempt_at)
+		FROM agent_task_notification_attempts
+		WHERE state = 'retryable' AND next_attempt_at > $1`, now)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("next notification retry: %w", err)
+	}
+	return next.Time, nil
+}
+
 // ClaimRetryableNotification atomically claims the oldest due retryable intent.
 // SKIP LOCKED lets concurrent drainers select disjoint rows without waiting.
 // A claimed row returns to dispatching and is never automatically reclaimed if

@@ -112,7 +112,35 @@ func (s *Scheduler) schedulePersistedWake(ctx context.Context) {
 	if hostAt := s.nextRecurringWake(queryCtx, time.Now()); !hostAt.IsZero() && (at.IsZero() || hostAt.Before(at)) {
 		at = hostAt
 	}
+	if retryAt := s.nextNotificationRetry(queryCtx, time.Now()); !retryAt.IsZero() && (at.IsZero() || retryAt.Before(at)) {
+		at = retryAt
+	}
 	s.scheduleWakeupAt(ctx, at)
+}
+
+// notificationRetryClock is the optional journal side that knows when the
+// next deferred notification may go out.
+type notificationRetryClock interface {
+	NextNotificationRetry(ctx context.Context, now time.Time) (time.Time, error)
+}
+
+// nextNotificationRetry is the next moment a deferred notification may be
+// retried. Without a wake for it a retry asked for in one second went out at
+// the next minute's poll.
+func (s *Scheduler) nextNotificationRetry(ctx context.Context, now time.Time) time.Time {
+	clock, ok := s.notifyJournal.(notificationRetryClock)
+	if !ok {
+		return time.Time{}
+	}
+	at, err := clock.NextNotificationRetry(ctx, now)
+	if err != nil {
+		s.logger.WarnContext(ctx, "agent-tasks: notification retry wake unavailable; polling remains active", "error", err)
+		return time.Time{}
+	}
+	if !at.After(now) {
+		return time.Time{}
+	}
+	return at
 }
 
 // nextRecurringWake is the host's next due moment for a recurring task. A
