@@ -533,8 +533,9 @@ func TestDrainRetryableNotificationsUsesImmutableIntent(t *testing.T) {
 			if gotID != attemptID || !strings.Contains(reason, "429") {
 				t.Fatalf("defer id=%s reason=%q", gotID, reason)
 			}
-			if time.Until(retryAt) < defaultNotificationRetryDelay-time.Second {
-				t.Fatalf("retry delay too short: retry_at=%s", retryAt)
+			// Telegram's retry_after is kept: it says when the message can go.
+			if wait := time.Until(retryAt); wait < 4*time.Second || wait > 6*time.Second {
+				t.Fatalf("retry in %s, want the 5s retry_after: retry_at=%s", wait, retryAt)
 			}
 			return nil
 		},

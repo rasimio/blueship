@@ -113,9 +113,19 @@ func TestNotificationJournalPostgresConcurrency(t *testing.T) {
 		if early, err := store.ClaimRetryableNotification(ctx, retryAt.Add(-time.Second)); err != nil || early != nil {
 			t.Fatalf("early claim = %#v err=%v", early, err)
 		}
+		// The scheduler wakes for the deferred retry instead of the next poll.
+		if next, err := store.NextNotificationRetry(ctx, retryAt.Add(-time.Second)); err != nil || !next.Equal(retryAt) {
+			t.Fatalf("next retry = %s err=%v, want %s", next, err, retryAt)
+		}
+		if next, err := store.NextNotificationRetry(ctx, retryAt); err != nil || !next.IsZero() {
+			t.Fatalf("a retry already due is the poll's, not a wake: %s err=%v", next, err)
+		}
 		intent, err := store.ClaimRetryableNotification(ctx, retryAt.Add(time.Second))
 		if err != nil {
 			t.Fatal(err)
+		}
+		if next, err := store.NextNotificationRetry(ctx, retryAt.Add(-time.Second)); err != nil || !next.IsZero() {
+			t.Fatalf("a claimed retry still wakes the scheduler: %s err=%v", next, err)
 		}
 		if intent == nil || intent.ID != id || intent.TaskID != taskID || intent.UserID != userID || intent.Text != "immutable retry text" ||
 			len(intent.Refs) != 2 || intent.Refs[0] != calendarRef || intent.Refs[1] != gitRef {

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"slices"
 	"strings"
@@ -401,5 +402,52 @@ func TestPrepareAutonomousContextHonorsAlwaysSilentRule(t *testing.T) {
 	_, _, silent := g.prepareAutonomousContext(bs.ContextWithAutonomousTurn(context.Background()), us, "dialogue")
 	if !silent {
 		t.Fatal("always-scoped silent rule was ignored")
+	}
+}
+
+// A send queued behind a chat turn keeps its whole budget for the send itself:
+// it used to spend it waiting, fail, and fall to the retry queue (a reminder
+// due 13:59 arrived at 14:01:09, 2026-10-15).
+func TestNotificationBudgetStartsWhenTheTurnEnds(t *testing.T) {
+	parent, cancelParent := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelParent()
+	waitStarted := time.Now()
+	<-parent.Done() // the chat turn outlasted the whole budget
+
+	ctx, cancel, err := budgetAfterTurnWait(parent, waitStarted)
+	if err != nil {
+		t.Fatalf("a budget spent waiting is not a failure: %v", err)
+	}
+	defer cancel()
+	if ctx.Err() != nil {
+		t.Fatalf("rebased budget already spent: %v", ctx.Err())
+	}
+	deadline, ok := ctx.Deadline()
+	if left := time.Until(deadline); !ok || left < 30*time.Millisecond || left > 60*time.Millisecond {
+		t.Fatalf("rebased deadline in %s, want the original 50ms budget", left)
+	}
+
+	explicit, stop := context.WithCancel(context.Background())
+	rebased, cancelRebased, err := budgetAfterTurnWait(explicit, time.Now())
+	if err != nil || rebased != explicit {
+		t.Fatalf("a context without a deadline is kept as is: %v", err)
+	}
+	cancelRebased()
+	stop()
+	if _, _, err := budgetAfterTurnWait(explicit, time.Now()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a caller that cancelled while waiting sends nothing: %v", err)
+	}
+
+	withDeadline, cancelWithDeadline := context.WithTimeout(context.Background(), time.Minute)
+	rebased, cancelRebased, err = budgetAfterTurnWait(withDeadline, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cancelRebased()
+	cancelWithDeadline()
+	select {
+	case <-rebased.Done():
+	case <-time.After(time.Second):
+		t.Fatal("cancelling the caller did not cancel the send")
 	}
 }
