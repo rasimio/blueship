@@ -434,7 +434,7 @@ func (g *Gateway) runReflexPipeline(
 		var rc *bs.ReflexContext
 		if us.Deps.ReflexPreparer != nil {
 			preparerStarted := time.Now()
-			rc = us.Deps.ReflexPreparer(ctx, us.UserID.String(), msgText, priorContext)
+			rc = us.Deps.ReflexPreparer(bs.ContextWithoutCandidateRules(ctx), us.UserID.String(), msgText, priorContext)
 			timings.RecordSince("context_prep", preparerStarted, "interaction_tier")
 			if rc != nil {
 				us.LastStrategy = rc.Strategy

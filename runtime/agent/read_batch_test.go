@@ -8,6 +8,7 @@ import (
 	bs "github.com/rasimio/blueship/internal/core"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -230,4 +231,74 @@ func TestReadBatchTimedOutHandlerRetainsCapacity(t *testing.T) {
 		}
 	}
 	stop()
+}
+
+type streamReadBatchProvider struct{ readBatchProvider }
+
+func (p *streamReadBatchProvider) StreamComplete(ctx context.Context, req bs.CompletionRequest, _ *bs.StreamCallbacks) (*bs.CompletionResponse, error) {
+	return p.Complete(ctx, req)
+}
+
+// A chat turn's read-only round runs at once, and the person still sees the
+// results announced, and the model still receives them, in call order.
+func TestStreamReadBatchParallelismAndOrder(t *testing.T) {
+	registry := bs.NewToolRegistry()
+	entered := make(chan struct{}, 5)
+	release := make(chan struct{})
+	var active, peak atomic.Int32
+	registry.Register("fetch", "fetch", json.RawMessage(`{}`), func(ctx context.Context, input json.RawMessage) (any, error) {
+		n := active.Add(1)
+		defer active.Add(-1)
+		for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {
+		}
+		entered <- struct{}{}
+		select {
+		case <-release:
+			return string(input), nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	})
+	if err := registry.MarkReadOnly("fetch"); err != nil {
+		t.Fatal(err)
+	}
+	loop := NewLoop(&streamReadBatchProvider{}, &fakeMessageStore{}, registry, nil, &bs.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var mu sync.Mutex
+	var announced []string
+	cb := &bs.StreamCallbacks{OnToolResult: func(id, _ string, _ bool, _ int) {
+		mu.Lock()
+		announced = append(announced, id)
+		mu.Unlock()
+	}}
+	type outcome struct {
+		traces []ToolTrace
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		_, traces, err := loop.RunStream(ctx, RunConfig{SessionID: "batch", Model: "test", MaxTurns: 3, MaxTokens: 100, ParallelReadTools: 3}, "Read independent sources", cb)
+		done <- outcome{traces, err}
+	}()
+	for i := 0; i < 3; i++ {
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatal("reads ran serially")
+		}
+	}
+	close(release)
+	result := <-done
+	if result.err != nil || len(result.traces) != 5 || peak.Load() != 3 || active.Load() != 0 {
+		t.Fatalf("invalid batch: err=%v traces=%d peak=%d active=%d", result.err, len(result.traces), peak.Load(), active.Load())
+	}
+	for i, trace := range result.traces {
+		if want := fmt.Sprintf(`{"index":%d}`, i); trace.Input != want || !strings.Contains(trace.Output, fmt.Sprintf(`index\":%d`, i)) || trace.Receipt == nil {
+			t.Fatalf("trace %d = %+v, want the result of %s", i, trace, want)
+		}
+		if announced[i] != fmt.Sprint(i) {
+			t.Fatalf("results announced out of order: %v", announced)
+		}
+	}
 }

@@ -42,7 +42,7 @@ func TestInteractionTierPreparesCortexContextWithoutReflexLLM(t *testing.T) {
 		logger: logger,
 	}
 
-	preparerCalled := false
+	preparerCalled, candidatesWanted := false, true
 	us := &UserState{
 		UserID: userID,
 		ChatID: "telegram:1",
@@ -50,6 +50,7 @@ func TestInteractionTierPreparesCortexContextWithoutReflexLLM(t *testing.T) {
 			UserID: userID,
 			ReflexPreparer: func(ctx context.Context, userID, message, priorContext string) *bs.ReflexContext {
 				preparerCalled = true
+				candidatesWanted = !bs.CandidateRulesUnused(ctx)
 				return &bs.ReflexContext{
 					FormattedTraces: "[memory] important trace",
 					MemoriesCount:   1,
@@ -72,6 +73,9 @@ func TestInteractionTierPreparesCortexContextWithoutReflexLLM(t *testing.T) {
 
 	if !preparerCalled {
 		t.Fatalf("interaction-tier preflight should still call ReflexPreparer for Cortex context")
+	}
+	if candidatesWanted {
+		t.Fatalf("interaction tier never reads CandidateRules; the preparer must be told so it can skip them")
 	}
 	if result.InjectedCtx != "[memory] important trace" {
 		t.Fatalf("Cortex context missing AME traces: %#v", result.InjectedCtx)

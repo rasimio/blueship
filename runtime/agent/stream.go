@@ -385,7 +385,16 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 			outcome.ToolTurns = toolTurns
 			var toolResults []bs.ContentBlock
 			var promptToolResults []bs.ContentBlock
-			for _, block := range resp.Content {
+			// A round of read-only calls (three web pages) runs at once;
+			// results are still recorded and announced in model order.
+			var batch map[int]<-chan readToolResult
+			if !forceFinal && a.canBatchReads(cfg, resp.Content, turnTools) {
+				batchCtx := bs.WithResponseValidationContext(ctx, responseValidationRequest(cfg, userMessage, receipts))
+				var stop func()
+				batch, stop = a.startReadBatch(batchCtx, cfg, resp.Content)
+				defer stop()
+			}
+			for blockIndex, block := range resp.Content {
 				if block.Type != "tool_use" {
 					continue
 				}
@@ -434,12 +443,23 @@ func (a *Loop) RunStream(ctx context.Context, cfg RunConfig, userMessage any, cb
 					continue
 				}
 				a.logger.Info("executing tool", "tool", block.Name, "tool_use_id", block.ID)
-				start := time.Now()
-				toolTimeout := resolveToolExecutionTimeout(cfg.ToolTimeout, block.Name)
-				toolCtx := bs.WithResponseValidationContext(ctx, responseValidationRequest(cfg, userMessage, receipts))
-				result, isError, timedOut := executeToolWithTimeout(toolCtx, a.registry, block.Name, block.Input, toolTimeout)
-				latencyMs := int(time.Since(start) / time.Millisecond)
-				emitTiming(cfg, "tool.execute", start, toolTimingDetail(cfg, turn+1, block.Name, isError))
+				var result string
+				var isError, timedOut bool
+				var elapsed time.Duration
+				if ch, ok := batch[blockIndex]; ok {
+					ready := <-ch
+					result, isError, timedOut, elapsed = ready.output, ready.isError, ready.timedOut, ready.elapsed
+				} else {
+					start := time.Now()
+					toolTimeout := resolveToolExecutionTimeout(cfg.ToolTimeout, block.Name)
+					toolCtx := bs.WithResponseValidationContext(ctx, responseValidationRequest(cfg, userMessage, receipts))
+					result, isError, timedOut = executeToolWithTimeout(toolCtx, a.registry, block.Name, block.Input, toolTimeout)
+					elapsed = time.Since(start)
+				}
+				latencyMs := durationMs(elapsed)
+				if cfg.OnTiming != nil {
+					cfg.OnTiming(bs.TimingSpan{Name: "tool.execute", DurationMs: latencyMs, Detail: toolTimingDetail(cfg, turn+1, block.Name, isError)})
+				}
 				a.logger.Info("tool result",
 					"tool", block.Name,
 					"tool_use_id", block.ID,

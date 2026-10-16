@@ -139,6 +139,7 @@ func SoulIDFromContextOK(ctx context.Context) (uuid.UUID, bool) {
 // is a normal, fully-persisted turn.
 type ephemeralCtxKey struct{}
 type autonomousTurnCtxKey struct{}
+type noCandidateRulesCtxKey struct{}
 
 // singleAttemptNotificationCtxKey marks an outbound notification whose
 // durable journal has already reserved its occurrence keys. Transports must
@@ -172,6 +173,21 @@ func ContextWithAutonomousTurn(ctx context.Context) context.Context {
 // assistant-initiated chat turn.
 func IsAutonomousTurn(ctx context.Context) bool {
 	v, _ := ctx.Value(autonomousTurnCtxKey{}).(bool)
+	return v
+}
+
+// ContextWithoutCandidateRules marks context preparation whose caller never
+// reads ReflexContext.CandidateRules: the interaction tier hands the turn to
+// Cortex without the reflex classifier those rules are found for. A preparer
+// may skip searching for them; the reply waits on that search otherwise.
+func ContextWithoutCandidateRules(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noCandidateRulesCtxKey{}, true)
+}
+
+// CandidateRulesUnused reports whether the caller of a ReflexPreparer will
+// ignore its CandidateRules.
+func CandidateRulesUnused(ctx context.Context) bool {
+	v, _ := ctx.Value(noCandidateRulesCtxKey{}).(bool)
 	return v
 }
 

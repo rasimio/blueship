@@ -23,6 +23,7 @@ type CompletionProvider struct {
 	httpClient  *http.Client
 	extraParams map[string]any // additional JSON fields merged into every request
 	dropImages  bool           // strip image content blocks before sending (text-only endpoints like MLX)
+	thinking    bool           // send the role's ThinkingMode as DeepSeek's thinking switch
 }
 
 // NewCompletionProvider creates a new OpenAI completion provider.
@@ -41,6 +42,10 @@ func NewCompletionProvider(apiKey string, timeout time.Duration) *CompletionProv
 // merged request payload:
 //   - "drop_images": true  → image content blocks are replaced by a text marker
 //     (for endpoints that only accept text content)
+//   - "thinking_switch": true → the request's ThinkingMode is sent as
+//     {"thinking":{"type":"enabled"|"disabled"}} (DeepSeek V4). Without it a
+//     role set to thinking "off" still reasons: V4 thinks by default, and the
+//     hidden reasoning was most of every chat reply's wait.
 func NewCompatibleProvider(baseURL string, apiKey string, timeout time.Duration, extraParams map[string]any) *CompletionProvider {
 	p := &CompletionProvider{
 		apiKey:     apiKey,
@@ -53,6 +58,12 @@ func NewCompatibleProvider(baseURL string, apiKey string, timeout time.Duration,
 				p.dropImages = b
 			}
 			delete(extraParams, "drop_images")
+		}
+		if v, ok := extraParams["thinking_switch"]; ok {
+			if b, ok := v.(bool); ok {
+				p.thinking = b
+			}
+			delete(extraParams, "thinking_switch")
 		}
 		if len(extraParams) > 0 {
 			p.extraParams = extraParams
@@ -69,6 +80,27 @@ type chatCompletionRequest struct {
 	Temperature     float64          `json:"temperature,omitempty"`
 	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
 	ToolChoice      string           `json:"tool_choice,omitempty"`
+	Thinking        *thinkingSwitch  `json:"thinking,omitempty"`
+}
+
+type thinkingSwitch struct {
+	Type string `json:"type"`
+}
+
+// thinkingFor maps a role's ThinkingMode onto the switch. An empty mode leaves
+// the backend's default.
+func (p *CompletionProvider) thinkingFor(mode string) *thinkingSwitch {
+	if !p.thinking {
+		return nil
+	}
+	switch mode {
+	case "off":
+		return &thinkingSwitch{Type: "disabled"}
+	case "":
+		return nil
+	default:
+		return &thinkingSwitch{Type: "enabled"}
+	}
 }
 
 type chatMessage struct {
@@ -160,6 +192,7 @@ func (p *CompletionProvider) Complete(ctx context.Context, req bs.CompletionRequ
 		MaxTokens:       req.MaxTokens,
 		ReasoningEffort: req.Effort,
 		Temperature:     req.Temperature,
+		Thinking:        p.thinkingFor(req.ThinkingMode),
 	}
 	if len(tools) > 0 {
 		payload.ToolChoice = "auto"
@@ -293,6 +326,7 @@ func (p *CompletionProvider) StreamComplete(ctx context.Context, req bs.Completi
 			MaxTokens:       req.MaxTokens,
 			ReasoningEffort: req.Effort,
 			Temperature:     req.Temperature,
+			Thinking:        p.thinkingFor(req.ThinkingMode),
 		},
 		Stream:        true,
 		StreamOptions: map[string]bool{"include_usage": true},

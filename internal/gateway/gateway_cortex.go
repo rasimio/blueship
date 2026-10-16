@@ -381,9 +381,16 @@ func (g *Gateway) prepareCortexTurnWithRegistry(
 			Effort:              cortexRef.Effort,
 			AllowedTools:        allowedTools,
 			OnTiming:            onTiming,
+			// A round of read-only calls runs at once: three page fetches
+			// cost the slowest of them instead of their sum.
+			ParallelReadTools: cortexParallelReads,
 		},
 	}, nil
 }
+
+// cortexParallelReads bounds how many read-only tools of one round run at
+// once on a chat turn.
+const cortexParallelReads = 3
 
 // composeSummaries joins the hard-compaction summary with the soft one, oldest
 // first, dropping whichever is absent.
