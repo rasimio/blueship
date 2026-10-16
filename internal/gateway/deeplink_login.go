@@ -2,10 +2,12 @@ package gateway
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
+
+	bs "github.com/rasimio/blueship/internal/core"
+	"github.com/rasimio/blueship/internal/transport/telegram"
 )
 
 // Deep-link "Approve in bot" auth flow. The cabinet's "Login via
@@ -19,7 +21,9 @@ import (
 // We deliberately do NOT mutate UserState, sessions, or memory: the auth
 // graduation happens browser-side, on the cabinet's next poll. The bot's
 // only job here is to (a) signal Telegram-side approval and (b) tell the
-// user to return to their browser tab.
+// user to return to their browser tab — or, when the host implements
+// DeeplinkLoginReplier, give them a button that finishes the sign-in in
+// whatever browser they open it in, for when that tab is gone.
 
 // deeplinkPayloadPrefix is the literal prefix Telegram bot deep links use
 // for our login-approve flow. The cabinet's StartDeeplink builds the
@@ -41,7 +45,7 @@ const deeplinkPayloadPrefix = "login_"
 //     falls through to the onboarding FSM as before;
 //   - the host hook must be wired, otherwise we can't approve anything.
 //
-// Errors from the host are logged and reported as a "link expired" reply
+// Errors from the host are logged and reported as UIStrings.DeeplinkLoginFailed
 // so the user gets actionable feedback instead of silence.
 func (g *Gateway) maybeRunDeeplinkLogin(ctx context.Context, bi *botInstance, tgChatID, tgUserID int64, text string) bool {
 	if g.deps.DeeplinkLogin == nil || bi == nil || bi.id == uuid.Nil {
@@ -66,27 +70,47 @@ func (g *Gateway) maybeRunDeeplinkLogin(ctx context.Context, bi *botInstance, tg
 		return false
 	}
 
-	approved, message, err := g.deps.DeeplinkLogin.CompleteDeeplinkLogin(ctx, token, tgUserID)
+	var reply bs.DeeplinkReply
+	var err error
+	if replier, ok := g.deps.DeeplinkLogin.(bs.DeeplinkLoginReplier); ok {
+		reply, err = replier.ReplyDeeplinkLogin(ctx, token, tgUserID)
+	} else {
+		// The host encodes the approval state in the message.
+		_, reply.Text, err = g.deps.DeeplinkLogin.CompleteDeeplinkLogin(ctx, token, tgUserID)
+	}
 	if err != nil {
 		g.logger.Warn("gateway: CompleteDeeplinkLogin failed",
 			"bot_id", bi.id.String(), "tg_user", tgUserID, "error", err)
-		// Treat host errors as "expired" so the user knows to retry on
-		// the cabinet. Don't reveal internals.
-		message = "Login link expired — try again on the website."
+		// Tell the user to retry on the website. Don't reveal internals.
+		reply = bs.DeeplinkReply{Text: g.deeplinkUI().DeeplinkLoginFailedText()}
 	}
-	_ = approved // host already encoded approval state in the message
-	g.sendDeeplinkReply(ctx, bi, tgChatID, message)
+	g.sendDeeplinkReply(ctx, bi, tgChatID, reply)
 	return true
 }
 
-// sendDeeplinkReply pushes the host-chosen confirmation line back to the
-// user. Bare-text SendMessage keeps formatting simple and deterministic —
-// these strings are short by design.
-func (g *Gateway) sendDeeplinkReply(ctx context.Context, bi *botInstance, tgChatID int64, text string) {
-	if bi == nil || bi.client == nil || text == "" {
+// deeplinkUI is the host's wording for the deep-link failure answers; a
+// gateway without a runtime Config (tests) falls back to the defaults.
+func (g *Gateway) deeplinkUI() bs.UIStrings {
+	if g.deps.Config == nil {
+		return bs.UIStrings{}
+	}
+	return g.deps.Config.UI
+}
+
+// sendDeeplinkReply pushes the host-chosen answer back to the user: plain
+// text, with the host's link button under it when there is one. Plain, so
+// the host's wording reaches the person exactly as written and nothing in
+// it is read as markup; no link preview, so a one-time URL in the button is
+// fetched by no one but the person who taps it.
+func (g *Gateway) sendDeeplinkReply(ctx context.Context, bi *botInstance, tgChatID int64, reply bs.DeeplinkReply) {
+	if bi == nil || bi.client == nil || reply.Text == "" {
 		return
 	}
-	if _, err := bi.client.SendMessage(ctx, fmt.Sprintf("%d", tgChatID), text); err != nil {
+	var rows [][]telegram.InlineKeyboardButton
+	if reply.ButtonLabel != "" && reply.ButtonURL != "" {
+		rows = [][]telegram.InlineKeyboardButton{{{Text: reply.ButtonLabel, URL: reply.ButtonURL}}}
+	}
+	if _, err := bi.client.SendPlainMessage(ctx, tgChatID, reply.Text, rows); err != nil {
 		g.logger.Warn("gateway: deeplink reply send failed",
 			"tg_chat", tgChatID, "error", err)
 	}
