@@ -132,6 +132,30 @@ type DeeplinkLoginApprover interface {
 	CompleteDeeplinkLogin(ctx context.Context, token string, tgUserID int64) (approved bool, message string, err error)
 }
 
+// DeeplinkLoginReplier is an optional extension of DeeplinkLoginApprover
+// for a host whose answer to the approval is more than a line of text. The
+// sign-in normally finishes in the browser tab that started it, but that
+// tab can be gone by the time the person approves — some browsers open the
+// bot's link in it. A link button under the answer lets the host hand back
+// a way to finish the sign-in from wherever the person taps it.
+//
+// The gateway uses it instead of CompleteDeeplinkLogin when the approver
+// implements both. A non-nil error is reserved for infrastructure faults
+// and reaches the person as UIStrings.DeeplinkLoginFailed.
+type DeeplinkLoginReplier interface {
+	ReplyDeeplinkLogin(ctx context.Context, token string, tgUserID int64) (DeeplinkReply, error)
+}
+
+// DeeplinkReply is what the bot says back to a sign-in deep link. Text is
+// required. ButtonLabel and ButtonURL, both set, add one link button under
+// it. The message is sent as plain text without a link preview, so a
+// one-time URL in the button is never fetched by anyone but the person.
+type DeeplinkReply struct {
+	Text        string
+	ButtonLabel string
+	ButtonURL   string
+}
+
 // DeeplinkLinker connects an existing browser account to a Telegram chat. It
 // is intentionally independent from both login approval and bot onboarding.
 //
