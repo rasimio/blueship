@@ -3,6 +3,7 @@ package agenttask
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -108,7 +109,30 @@ const (
 	maxHistoryProjectionsPerTick  = 50
 	notificationAttemptTimeout    = 10 * time.Second
 	defaultNotificationRetryDelay = time.Minute
+	// minNotificationRetryDelay floors a delay the sender asked for itself:
+	// Telegram's retry_after, or a conversation busy with the person's turn.
+	minNotificationRetryDelay = time.Second
 )
+
+// notificationDeferredError reports a notification put back for a retry at a
+// known moment, so the scheduler can wake for it instead of the next poll.
+type notificationDeferredError struct {
+	err     error
+	retryAt time.Time
+}
+
+func (e *notificationDeferredError) Error() string { return e.err.Error() }
+func (e *notificationDeferredError) Unwrap() error { return e.err }
+
+// wakeForNotificationRetry arms the wake timer for a deferred notification.
+// The outbox is drained only by a scheduler run, and without this the retry
+// waited for the next minute's poll after its moment had come.
+func (s *Scheduler) wakeForNotificationRetry(ctx context.Context, err error) {
+	var deferred *notificationDeferredError
+	if errors.As(err, &deferred) {
+		s.scheduleWakeupAt(ctx, deferred.retryAt)
+	}
+}
 
 // SetStatusCallback registers a function called after a task transitions
 // to a terminal status (done/failed/canceled). Used to send A2A
@@ -807,6 +831,7 @@ func (s *Scheduler) executeTaskOnce(ctx context.Context, task core.AgentTask, ha
 		if err != nil {
 			s.logger.WarnContext(ctx, "agent-tasks: notify delivery failed",
 				"task_id", task.ID, "error", err)
+			s.wakeForNotificationRetry(ctx, err)
 		}
 		result.Notified = outcome.Delivered
 		return outcome, err
@@ -1235,15 +1260,21 @@ func resolveTaskNotificationAttempt(
 		return false, fmt.Errorf("notify permanently not sent: %w", notifyErr)
 	}
 	if core.IsDefinitelyNotSent(notifyErr) {
+		// A delay the sender named is the sender's own knowledge of when it
+		// can take the message; flooring it at a minute cost a reminder that
+		// waited one second for a chat turn a whole extra minute.
 		delay, ok := core.NotificationRetryDelay(notifyErr)
-		if !ok || delay < defaultNotificationRetryDelay {
+		switch {
+		case !ok:
 			delay = defaultNotificationRetryDelay
+		case delay < minNotificationRetryDelay:
+			delay = minNotificationRetryDelay
 		}
 		retryAt := time.Now().Add(delay)
 		if err := journal.DeferNotificationAttempt(finalizeCtx, attemptID, notifyErr.Error(), retryAt); err != nil {
 			return false, fmt.Errorf("notify definitely not sent: %w; defer notification attempt: %v", notifyErr, err)
 		}
-		return false, fmt.Errorf("notify definitely not sent: %w", notifyErr)
+		return false, &notificationDeferredError{err: fmt.Errorf("notify definitely not sent: %w", notifyErr), retryAt: retryAt}
 	}
 	if err := journal.MarkNotificationUncertain(finalizeCtx, attemptID, notifyErr.Error()); err != nil {
 		return false, fmt.Errorf("notify uncertain: %w; mark notification uncertain: %v", notifyErr, err)
@@ -1273,6 +1304,7 @@ func (s *Scheduler) drainRetryableNotifications(ctx context.Context) {
 		if err := s.retryTaskNotification(ctx, *intent); err != nil {
 			s.logger.WarnContext(ctx, "agent-tasks: retry notification failed",
 				"attempt_id", intent.ID, "task_id", intent.TaskID, "error", err)
+			s.wakeForNotificationRetry(ctx, err)
 		}
 	}
 }
