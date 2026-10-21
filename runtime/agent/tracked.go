@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -167,6 +168,7 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 	forceFinal := false
 	deadlineFinalRecoveryUsed := false
 	maxTokenContinuations := 0
+	responseRevisions := 0
 	truncatedToolRecoveries := 0
 	var pendingMaxTokenText strings.Builder
 	pendingMaxTokenOutputTokens := 0
@@ -311,7 +313,27 @@ func (a *Loop) RunTracked(ctx context.Context, cfg RunConfig, userMessage any) (
 		// ctx so a long turn that just consumed the iteration budget can't lose
 		// this state write.
 		if cfg.ResponseValidator != nil {
-			resp.Content, err = validateResponse(ctx, cfg, userMessage, resp.Content, receipts)
+			draft := resp.Content
+			revisable := !forceFinal && !usedEmptyVisibleFallback && responseRevisions < maxResponseRevisions
+			resp.Content, err = validateResponse(ctx, cfg, userMessage, draft, receipts, revisable)
+			var revision *bs.ResponseRevision
+			if errors.As(err, &revision) {
+				// The draft goes back to the model, unpersisted and unseen,
+				// with its tools still on the table.
+				responseRevisions++
+				convo = append(convo, bs.Message{Role: "assistant", Content: draft}, responseRevisionMessage(revision.Feedback))
+				pendingMaxTokenText.Reset()
+				pendingMaxTokenOutputTokens = 0
+				// The withdrawn draft's call does not count against the run.
+				cfg.MaxTurns++
+				a.logger.Warn("response validator sent the draft back for revision",
+					"model", cfg.Model,
+					"role", cfg.Role,
+					"turn", turn+1,
+					"session_id", cfg.SessionID,
+				)
+				continue
+			}
 			if err != nil {
 				return nil, err
 			}

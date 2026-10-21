@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,7 +10,10 @@ import (
 	bs "github.com/rasimio/blueship/internal/core"
 )
 
-func validateResponse(ctx context.Context, cfg RunConfig, userMessage any, content []bs.ContentBlock, receipts []bs.ToolExecutionResult) ([]bs.ContentBlock, error) {
+// validateResponse returns the content to publish. When revisable and the
+// validator asks for a revision, it returns the *bs.ResponseRevision as the
+// error, unwrapped, for the loop to send the draft back.
+func validateResponse(ctx context.Context, cfg RunConfig, userMessage any, content []bs.ContentBlock, receipts []bs.ToolExecutionResult, revisable bool) ([]bs.ContentBlock, error) {
 	if cfg.ResponseValidator == nil || strings.TrimSpace(bs.ExtractText(content)) == "" {
 		return content, nil
 	}
@@ -20,7 +24,16 @@ func validateResponse(ctx context.Context, cfg RunConfig, userMessage any, conte
 			request.PendingTools = append(request.PendingTools, block.Name)
 		}
 	}
+	// A tool_use in the draft needs its result before anything else is said.
+	request.Revisable = revisable && len(request.PendingTools) == 0
 	safe, err := cfg.ResponseValidator(ctx, request)
+	var revision *bs.ResponseRevision
+	if errors.As(err, &revision) {
+		if !request.Revisable {
+			return nil, fmt.Errorf("validate response: revision requested for a draft that cannot be revised")
+		}
+		return nil, revision
+	}
 	if err != nil {
 		return nil, fmt.Errorf("validate response: %w", err)
 	}
