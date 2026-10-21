@@ -921,6 +921,24 @@ const (
 	maxTokenOverlapRunes       = 800
 )
 
+// maxResponseRevisions bounds the drafts a response validator can send back
+// in one run.
+const maxResponseRevisions = 1
+
+// responseRevisionMessage carries a validator's feedback on a draft that was
+// not shown. The draft stays in the transcript above it, so the model can see
+// what it is correcting.
+func responseRevisionMessage(feedback string) bs.Message {
+	return bs.Message{
+		Role: "user",
+		Content: []bs.ContentBlock{{
+			Type: "text",
+			Text: "[response_revision]\nYour previous reply was not shown to the user. " + strings.TrimSpace(feedback) +
+				"\nAnswer again; your new reply replaces it. Do not mention this check.\n[/response_revision]",
+		}},
+	}
+}
+
 func maxTokenContinuationMessage() bs.Message {
 	return bs.Message{
 		Role: "user",

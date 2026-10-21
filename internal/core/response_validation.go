@@ -22,12 +22,28 @@ type ResponseValidationRequest struct {
 	UserText        string                `json:"user_text"`
 	Tools           []ToolExecutionResult `json:"tools"`
 	PendingTools    []string              `json:"pending_tools,omitempty"`
+	// Revisable reports that the run can take this draft back: instead of
+	// replacement text the validator may return a *ResponseRevision, and the
+	// model answers again, with its tools, after reading the feedback. False
+	// for a draft with pending tool calls, on a closing turn without tools,
+	// once the run has used its revision, and outside an interactive run.
+	Revisable bool `json:"revisable,omitempty"`
 }
 
 // ResponseValidator returns safe visible text, or an error to stop publication.
 // When set, the agent buffers text until validation, before persistence and
 // streaming. Domain-specific interpretation belongs to the host.
 type ResponseValidator func(context.Context, ResponseValidationRequest) (string, error)
+
+// ResponseRevision is a validator's answer for a Revisable draft that the
+// model should redo rather than have rewritten: typically a draft that
+// claims an action no tool performed. The draft is neither persisted nor
+// shown; the model reads Feedback as the next message and answers again.
+type ResponseRevision struct {
+	Feedback string
+}
+
+func (r *ResponseRevision) Error() string { return "response revision requested" }
 
 type responseValidationContextKey struct{}
 

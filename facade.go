@@ -68,6 +68,7 @@ type (
 	TurnPolicyRequest             = core.TurnPolicyRequest
 	TurnPolicyResolver            = core.TurnPolicyResolver
 	ResponseValidator             = core.ResponseValidator
+	ResponseRevision              = core.ResponseRevision
 	ResponseValidationRequest     = core.ResponseValidationRequest
 	ToolExecutionResult           = core.ToolExecutionResult
 	Usage                         = core.Usage
