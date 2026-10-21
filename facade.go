@@ -197,6 +197,8 @@ type (
 	LinkParams            = core.LinkParams
 	BotOnboarding         = core.BotOnboarding
 	DeeplinkLoginApprover = core.DeeplinkLoginApprover
+	DeeplinkLoginReplier  = core.DeeplinkLoginReplier
+	DeeplinkReply         = core.DeeplinkReply
 	DeeplinkLinker        = core.DeeplinkLinker
 	BotOnboardingAccount  = core.BotOnboardingAccount
 	BotOnboardingComplete = core.BotOnboardingComplete
