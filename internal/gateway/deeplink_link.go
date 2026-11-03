@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	bs "github.com/rasimio/blueship/internal/core"
 )
 
 // Deep-link "Connect Telegram" account-linking flow. The cabinet's Settings
@@ -66,9 +68,9 @@ func (g *Gateway) maybeRunDeeplinkLink(ctx context.Context, bi *botInstance, tgC
 	if err != nil {
 		g.logger.Warn("gateway: CompleteDeeplinkLink failed",
 			"bot_id", bi.id.String(), "tg_user", tgUserID, "error", err)
-		message = "Link expired — open Settings on the website and try again."
+		message = g.deeplinkUI().DeeplinkLinkFailedText()
 	}
-	g.sendDeeplinkReply(ctx, bi, tgChatID, message)
+	g.sendDeeplinkReply(ctx, bi, tgChatID, bs.DeeplinkReply{Text: message})
 
 	// Drop any cached UserState built before the bot_links row landed so the
 	// next inbound message resolves the freshly-linked (user, soul) via

@@ -94,6 +94,13 @@ type UIStrings struct {
 	// conversation quiet in time: the answer being written would not stop.
 	// Nothing was done, so the person can simply try again.
 	CommandBusy string
+
+	// DeeplinkLoginFailed and DeeplinkLinkFailed answer a sign-in or an
+	// account-link deep link when the host's hook failed outright. The
+	// host's own answers (approved, expired, already linked) come from the
+	// hook; these cover only the case where it could not give one.
+	DeeplinkLoginFailed string
+	DeeplinkLinkFailed  string
 }
 
 func (u *UIStrings) applyDefaults() {
@@ -190,6 +197,12 @@ func (u *UIStrings) applyDefaults() {
 	}
 	if u.CommandBusy == "" {
 		u.CommandBusy = "Still finishing the previous answer. Nothing was changed — try again in a moment."
+	}
+	if u.DeeplinkLoginFailed == "" {
+		u.DeeplinkLoginFailed = "Login link expired — try again on the website."
+	}
+	if u.DeeplinkLinkFailed == "" {
+		u.DeeplinkLinkFailed = "Link expired — open Settings on the website and try again."
 	}
 }
 
@@ -779,6 +792,19 @@ func (m *OnboardingMessages) applyDefaults() {
 	d(&m.OfferLater, "No problem. Send /persona whenever you feel like it.")
 	d(&m.ErrPersonaFail, "Something went wrong saving that. Nothing was changed — try again.")
 	d(&m.ErrNoPersona, "Personalising isn't available here yet.")
+}
+
+// DeeplinkLoginFailedText and DeeplinkLinkFailedText are the two deep-link
+// failure answers with the framework defaults filled in, for a gateway
+// built without a runtime Config.
+func (u UIStrings) DeeplinkLoginFailedText() string {
+	u.applyDefaults()
+	return u.DeeplinkLoginFailed
+}
+
+func (u UIStrings) DeeplinkLinkFailedText() string {
+	u.applyDefaults()
+	return u.DeeplinkLinkFailed
 }
 
 // TaskCancellationExplanation also supports tool registries constructed without
