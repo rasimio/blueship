@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -57,6 +58,42 @@ func TestBrowserPoolReusesProcessWithoutCookiesOrStorage(t *testing.T) {
 		t.Fatal("pool exceeded context bound")
 	}
 	closeSecond() // cleanup is idempotent
+}
+
+func TestBrowserPoolReplacesProcessThatStoppedAnswering(t *testing.T) {
+	if os.Getenv("BLUESHIP_TEST_CHROME") != "1" {
+		t.Skip("set BLUESHIP_TEST_CHROME=1 for isolated Chrome integration")
+	}
+	pool := browserPool{slots: make(chan struct{}, 1)}
+	defer pool.shutdown()
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	first, closeFirst, err := pool.acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wedged := chromedp.FromContext(first).Browser
+	closeFirst()
+	// A stopped process keeps its socket open, as the wedged production
+	// Chrome did: LostConnection never fires.
+	process := wedged.Process()
+	if err := process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = process.Signal(syscall.SIGCONT) }()
+
+	second, closeSecond, err := pool.acquire(ctx)
+	if err != nil {
+		t.Fatalf("pool kept the unresponsive process: %v", err)
+	}
+	defer closeSecond()
+	if chromedp.FromContext(second).Browser == wedged {
+		t.Fatal("pool handed out a tab in the unresponsive process")
+	}
+	var title string
+	if err := chromedp.Run(second, chromedp.Navigate("about:blank"), chromedp.Title(&title)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestDocumentNavigationDoesNotWaitForUnrelatedSubresource(t *testing.T) {
